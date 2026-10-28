@@ -1020,25 +1020,29 @@ configuration time; the catalog moves.
 
 | Model | Provider | Input | Output | Role |
 |---|---|---|---|---|
-| `mimo-v2.6-flash` | opencode-go | $0.14 | $0.28 | **default** |
+| `mimo-v2.6-flash` | opencode-go | $0.14 | $0.28 | **default; live tool call 2026-10-28** |
 | ~~`minimax-m3.1-flash-free`~~ | opencode-go | — | — | **deprecated live (410, 2026-10-28); do not use** |
-| `longcat-2.5-preview-free` | opencode-go | $0 | $0 | free candidate; live probe |
-| `beam-free` | opencode-go | $0 | $0 | free candidate; live probe |
-| `deepseek-v4.1-flash` | opencode-go | $0.15 | $0.60 | paid fallback |
-| `glm-5.3-flash` | opencode-go | $0.15 | $0.50 | paid fallback |
-| `qwen3.8-flash` | opencode-go | $0.15 | $0.47 | paid fallback |
-| `minimax/minimax-m3.1-flash:free` | openrouter | $0 | $0 | second-provider free |
-| `openrouter/free` | openrouter | $0 | $0 | free router |
+| ~~`longcat-2.5-preview-free`~~ | opencode-go | — | — | **deprecated live (410, 2026-10-28); do not use** |
+| `beam-free` | opencode-go | $0 | $0 | free candidate; live tool call 2026-10-28 |
+| `deepseek-v4.1-flash` | opencode-go | $0.15 | $0.60 | paid fallback; live tool call 2026-10-28 |
+| `glm-5.3-flash` | opencode-go | $0.15 | $0.50 | paid fallback; live probe at startup |
+| `qwen3.8-flash` | opencode-go | $0.15 | $0.47 | paid fallback; live probe at startup |
+| ~~`minimax/minimax-m3.1-flash:free`~~ | openrouter | — | — | **retired live (404); paid variant below** |
+| `minimax/minimax-m3.1-flash` | openrouter | $0.15 | $0.60 | paid fallback; live probe at startup |
+| `openrouter/free` | openrouter | $0 | $0 | free router; live 429, unreliable |
 
 Every model must pass a **live tool-calling probe** before it appears in the
 picker. The table is a catalog snapshot, not a promise: providers deprecate
 models without a version bump. On 2026-10-28 OpenCode Go returned
-`410 ModelDeprecated` for `minimax-m3.1-flash-free`, which the Pi AI `1.4.0`
-catalog still listed. The allowlist is built at startup (tiny tool-call probe),
-drops 401/410/deprecated/unavailable models, and records the result in the
-Settings sheet. `mimo-v2.6-flash` is the default only if it passes; otherwise
-the cheapest available paid fallback is used. Free models can be rate-limited or
-weak at tools; the probe decides, not the name.
+`410 ModelDeprecated` for `minimax-m3.1-flash-free` **and**
+`longcat-2.5-preview-free`; OpenRouter returned 404 for the `minimax` free
+variant and 429 for `openrouter/free`. `mimo-v2.6-flash`, `beam-free` and
+`deepseek-v4.1-flash` passed a real tool-call probe. The allowlist is built at
+startup (tiny tool-call probe), drops 401/404/410/deprecated/rate-limited
+models, and records the result in the Settings sheet. `mimo-v2.6-flash` is the
+default only if it passes; otherwise the cheapest available paid fallback is
+used. Free models are unstable; the probe decides, not the name. Evidence:
+[`docs/spikes/P0-05-models-budget.md`](spikes/P0-05-models-budget.md).
 
 ### 11.3 Budget
 
@@ -1066,8 +1070,11 @@ weak at tools; the probe decides, not the name.
 - `mimo-v2.6-flash` has a 1M context, but the app should keep its context small
   to control cost.
 - Expected spend for two caregivers is well under $10/month; the cap is a guard,
-  not a target.
-- Free models are for fallback/testing; they may be slower or less reliable.
+  not a target. P0-05 simulation: ~$0.35 at 12 runs/day, ~$2.28 at 40 runs/day,
+  ~$9.24 at 100 runs/day on `mimo-v2.6-flash`.
+- Free models are for fallback/testing; the live catalog is unstable (two
+  deprecations and one retired free variant on 2026-10-28). Do not build the
+  core loop around them.
 
 ---
 
@@ -1645,7 +1652,7 @@ E2E passes; no agent tool can escape app state.
 | Quick tunnel URL changes break PWA push | High if used | Medium | Tailscale daily; quick tunnel testing only; re-subscribe after a tunnel restart |
 | Web Push on iOS | Medium | Medium | iOS 16.4+, Add to Home Screen; in-app fallback |
 | Shared-thread actor attribution wrong | Medium | Medium | Phase 0 spike; latest-speaker rule + memo; approval fallback |
-| Free models weak at tool calling | High | Medium | Tool-call probe; allowlist; default paid cheap model |
+| Free models deprecated or rate-limited | High | Medium | Live tool-call probe; allowlist; default paid cheap model; free is optional |
 | Model costs exceed $10 | Low | Medium | Monthly ledger, 80%/100% gates, free models, compaction, no background calls |
 | SQLite `FULL` slow on phone | Low | Low | Measure commits; WAL; batch small writes; fallback to `NORMAL` only with a decision |
 | Document growth | Medium | Medium | Caps, checkpoint policy, archive/export path |

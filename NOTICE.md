@@ -10,12 +10,15 @@ code lands.
 - Repository: <https://github.com/TannerMidd/pi-pocket>
 - Version checked: `0.26.0`
 - Licence: MIT, copyright (c) Tanner Middleton
-- Planned reuse/adaptation: launcher access modes (`local`, `lan`, `cloudflare`,
-  `tailscale`), server/tunnel supervision, owner-token and invite auth, Web Push
-  (RFC 8291/8292) and service-worker patterns, process lock, and the no-build
-  Preact/htm web structure.
+- Commit audited: `e984c60b4060ba5c5856a2d3413d6d6d6e0eb522`
+  (`v0.26.0-2-ge984c60`, package `0.26.0`).
+- Planned reuse/adaptation: `src/server/lock.ts`, `src/server/push.ts`,
+  `web/sw.js` and `src/launcher/access.ts` near-direct; adapt
+  `src/server/auth.ts`, `src/server/config.ts`, `web/notify.js` and the
+  `web/index.html` import-map/vendor pattern. The audit and deviations are in
+  `docs/spikes/P0-02-pi-pocket-reuse.md`.
 - Not reused: the coding-agent domain (sessions, files, subagents, browser,
-  design mode).
+  design mode, extensions, update system).
 
 ## Pi Durable / Pi AI / Chord
 
