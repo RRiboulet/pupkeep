@@ -42,12 +42,14 @@ code is copied.
   does not redistribute Termux binaries)
 - Use: the Node/SQLite runtime on the host phone.
 
-## Preact and htm
+## Preact, htm, marked and DOMPurify
 
 - Preact: MIT, <https://preactjs.com/>
 - htm: Apache-2.0, <https://github.com/developit/htm>
-- Use: no-build browser UI, with the licence notices kept when the vendor files
-  are added.
+- marked: MIT, <https://github.com/markedjs/marked>
+- DOMPurify: Apache-2.0 / MPL-2.0, <https://github.com/cure53/DOMPurify>
+- Use: no-build browser UI and safe Markdown rendering, with the licence
+  notices and pinned versions/checksums kept when the vendor files are added.
 
 ## Cloudflare Tunnel
 

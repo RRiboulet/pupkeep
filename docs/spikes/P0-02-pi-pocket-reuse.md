@@ -47,6 +47,8 @@ host plumbing only, with these classifications:
 - `PushStore.save()` has the same non-fsynced temp+rename as `ConfigStore`;
   apply the serialized write queue before reuse.
 - Add `ntfy` publishing beside Web Push in the outbox, not inside `push.ts`.
+- Cosmetic renames when copying: `pocket_auth` → `pupkeep_auth`, lock error
+  strings, `DEFAULT_SUBJECT`, `X-Pocket`.
 
 ### `web/sw.js` — near-direct
 
