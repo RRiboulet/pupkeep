@@ -70,7 +70,9 @@ npm start -- --access local
 On the phone:
 
 ```bash
-pkg install nodejs git cloudflared termux-api
+pkg install nodejs git termux-api sqlite rclone termux-services tmux
+# cloudflared: confirm the Termux package source, or use Tailscale only
+# pkg install cloudflared
 git clone <repo> ~/pupkeep
 cd ~/pupkeep && npm ci --omit=dev
 termux-wake-lock

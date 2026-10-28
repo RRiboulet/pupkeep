@@ -121,7 +121,7 @@ buying one. The decision is:
   - the PWA can be opened in the browser, but service-worker/Web Push features
     require a secure context and are not available on `http://100.x`;
   - daily notifications are in-app plus a host local notification
-    (Termux:API), with an optional **ntfy** bridge for the partner’s phone;
+    (Termux:API), with a recommended **ntfy** bridge for the partner’s phone;
   - Web Push is tested through the Cloudflare quick tunnel, not claimed as a
     daily Tailscale feature.
 - **Phase 0 checks** whether the Android Tailscale app exposes Serve/Funnel
@@ -129,6 +129,18 @@ buying one. The decision is:
   daily HTTPS path too. If not, the split above stands.
 - **If a domain appears later**, switch the daily path to a named Cloudflare
   Tunnel; no app changes beyond the access mode/config.
+
+### 2.2 Open decisions and their gates
+
+| Decision | Status | Gate |
+|---|---|---|
+| Tailscale Serve/Funnel on Android | Unknown | P0-03: if available, HTTPS/PWA push can be daily; if not, ntfy stays |
+| Termux `cloudflared` package source | Unconfirmed | P0-03: package or arm64 binary fallback |
+| Default model live availability | Live-probed | P0-05: `mimo-v2.6-flash` only if the probe passes; otherwise cheapest paid fallback |
+| ntfy acceptance | Recommended, not forced | P0-08: if rejected, in-app only or buy a domain; never silently drop notifications |
+| Remote backup target | Must be configured | P0-07/P5-02: rclone remote; local backup always; warning until configured |
+| App name/branding | Working title | Not blocking; `Pupkeep` until renamed |
+| Named Cloudflare Tunnel | Deferred | Only after a domain exists |
 
 ---
 
@@ -154,9 +166,9 @@ buying one. The decision is:
 │   │   └─ durable reminder tasks                                         │
 │   ├─ SQLite: ~/.pupkeep/pupkeep.sqlite                                  │
 │   ├─ data: config.json, push.json, secrets.json                         │
-│   └─ notification outbox → Web Push                                     │
+│   └─ notification outbox → Web Push / ntfy / host Termux:API            │
 │                                                                        │
-│  Chrome PWA                                                            │
+│  Chrome (host PWA / partner browser)                                   │
 │   ├─ host phone: http://127.0.0.1:8787                                  │
 │   └─ partner: http://<tailscale-ip>:8787 (daily)                        │
 │              https://<quick-tunnel> (testing: PWA/push)                 │
@@ -180,7 +192,7 @@ one concurrently. On restart, `harness.resume()` continues pending work.
 | Primitive | Pupkeep use |
 |---|---|
 | **Session documents** | Shared household state: puppy, feeding, walks, growth, training, calendar, showers, notifications, activity, approvals, usage |
-| **Conversation** | One shared household agent thread |
+| **Conversation** | One human-facing shared household thread (+ one hidden, model-less system conversation for reminder tasks) |
 | **Tool tasks** | Every agent write; intent committed before execution; replay policy |
 | **Tasks + `sleepUntil`** | Appointment and feeding reminders that survive restarts |
 | **`watchEvents`** | Shared agent stream: messages, deltas, tool calls, approvals |
@@ -195,7 +207,7 @@ transcript store.
 
 - It is a **durable, multiplayer, mobile-first Pi Durable web app** already
   running in Termux.
-- It has the exact access modes and PWA push we need.
+- It has the access modes and PWA-push plumbing we need for the host and the HTTPS test path.
 - It has owner-token + invite auth and a process lock.
 - It has a no-build browser client, so the phone runs the checkout directly.
 - It avoids the Android packaging problems that made pidabl unattractive.
@@ -249,8 +261,7 @@ pupkeep/
 │   │   ├── agent/             # system prompt, tools, conversation
 │   │   ├── reminders/         # tasks + outbox
 │   │   └── views/             # JSON projections for the UI
-│   ├── shared/                # types, timezone, trend rules
-│   └── web/                   # (served from ../web)
+│   └── shared/                # types, timezone, trend rules
 ├── web/
 │   ├── index.html
 │   ├── app.js
@@ -328,6 +339,8 @@ No Android SDK, JDK, Gradle or NDK.
 PUPKEEP_DATA_DIR=/tmp/pupkeep-dev
 PUPKEEP_PORT=8787
 PUPKEEP_ACCESS=local
+# Only for a VPS/Caddy deployment behind a public HTTPS origin.
+# PUPKEEP_PUBLIC_ORIGIN=https://pupkeep.example
 OPENCODE_API_KEY=
 OPENROUTER_API_KEY=
 ```
@@ -342,11 +355,13 @@ the off-device database backup.
 
 ### 6.1 Install
 
-Termux must come from F-Droid, not the stale Play Store build.
+Termux must come from F-Droid, not the stale Play Store build. Install the
+**Termux:API** and **Termux:Boot** companion apps too; the package alone does
+not provide `termux-notification` or boot startup.
 
 ```bash
 pkg update && pkg upgrade
-pkg install nodejs git termux-api sqlite rclone termux-services
+pkg install nodejs git termux-api sqlite rclone termux-services tmux
 # cloudflared: confirm the Termux package source first (P0-03). If
 # `pkg install cloudflared` is unavailable, download the arm64 binary into
 # ~/.pupkeep/bin, or use Tailscale only.
@@ -384,7 +399,8 @@ restarting the launcher; the app’s pid lock prevents a second server.
    long-random per-user topic; the server publishes only the notifications meant
    for that caregiver. The host phone uses a Termux:API local notification. Both
    have the in-app centre.
-7. Optional HTTPS/PWA test: start `--access cloudflare`, open the
+7. Optional HTTPS/PWA test: stop the daily launcher first (one server owns the
+   DB), start `--access cloudflare`, open the
    `https://<random>.trycloudflare.com` URL on a test device with a **separate
    test invite**, and test PWA install/Web Push. Re-subscribe after a tunnel
    restart. Do not use the daily tailnet invite for the test origin.
@@ -460,9 +476,11 @@ PWA installation and Web Push need a secure context. Daily notifications use:
 - in-app notification centre (source of truth);
 - host phone: a Termux:API local notification from the reminder task — **v1**;
 - partner: **ntfy is recommended**, not merely optional. Use a **per-user**
-  long-random topic (≥128 bits), send generic text (“Check Pupkeep”), never vet
-  names, appointment titles or health details. `ntfy.sh` sees the topic and
-  message; self-hosting is the upgrade. In-app remains the source of truth.
+  long-random topic (≥128 bits) and **category-only** text, e.g. “A meal was
+  logged — open Pupkeep”, “A meal is overdue”, “An appointment is coming up”,
+  “A confirmation is waiting”. Never send dog names, vet names, appointment
+  titles or health details. `ntfy.sh` sees the topic and message; self-hosting
+  is the upgrade. In-app remains the source of truth.
 
 ### 6.7 Cloudflare quick tunnel for testing HTTPS
 
@@ -496,10 +514,38 @@ The **data** is durable. The **service** is best-effort.
 ### 6.9 VPS/Docker fallback
 
 - Same server, `--access lan`, behind Caddy or Tailscale.
+- A public VPS can use a free `sslip.io`/`nip.io` hostname for Caddy’s HTTPS
+  certificate, so the fallback does not need a purchased domain; Tailscale is
+  the alternative. Set `PUPKEEP_PUBLIC_ORIGIN` to that HTTPS origin.
 - Restore the latest encrypted SQLite backup.
 - `docker compose up -d` on a small VPS; systemd unit if not Docker.
 - This is a deployment target, not a fork. The phone remains primary unless it
   proves unreliable.
+
+### 6.10 Assumptions and stop rules
+
+Assumptions that must hold:
+
+- Pi Durable `1.4.0` behaves as documented for session docs, tools, tasks,
+  `sleepUntil`, `watchEvents`, `resume`, and SQLite.
+- Termux Node 24/26 can run the server with type stripping and `node:sqlite`.
+- The Tailscale interface is visible to Termux, and the partner can reach the
+  host’s `100.x` address.
+- ntfy is acceptable as the partner’s daily notification transport.
+- The daily phone can keep Termux alive often enough for the care loop; data
+  survives when it cannot.
+
+Stop rules:
+
+- **Pi Durable cannot run on Termux →** move the server to Docker/VPS; keep the
+  same code and restore the backup. Do not build an Android runtime.
+- **Tailscale binding fails →** use LAN or the quick tunnel explicitly; never
+  silently bind `0.0.0.0`.
+- **ntfy is unacceptable →** in-app only or buy a domain for a named tunnel;
+  do not pretend Tailscale HTTP has Web Push.
+- **Termux is killed too often →** move to the VPS; the phone becomes a client.
+- **The default model is unavailable →** use the live probe’s cheapest paid
+  fallback; the $10 cap still applies.
 
 ---
 
@@ -612,7 +658,8 @@ outside this commit path; they are not care state.
 - `pupkeep.sqlite` — Pi Durable conversations, docs, tasks.
 - `config.json` — owner token **hash**, invite hashes, hashed session tokens,
   member roles. Without it a restore loses sign-in.
-- `push.json` — VAPID keys and subscriptions, so push survives a restore.
+- `push.json` — VAPID keys, subscriptions and per-user ntfy topics, so push and
+  the partner notification path survive a restore.
 - **Excluded:** `secrets.json` (provider keys), `server.log`, tunnel credentials.
 - `secrets.json` absent on restore must still boot; provider keys are re-entered.
 
@@ -663,7 +710,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | File/table | Contents |
 |---|---|
 | `config.json` | Owner token hash, invite hashes, hashed session tokens, member auth/roles; serialized atomic temp-file + rename |
-| `push.json` | VAPID keys, per-user/device subscriptions, notification prefs |
+| `push.json` | VAPID keys, per-user/device subscriptions, notification prefs, per-user ntfy topics (0600) |
 | `secrets.json` | OpenCode Go / OpenRouter keys (0600; not in DB backup) |
 | `pupkeep.sqlite` | Pi Durable tables only, `pi_` prefix |
 
@@ -720,8 +767,10 @@ type Walk = {
   endedAt?: string;
   startedActionId: string;
   endActionId?: string;
-  startedBy: string;
-  endedBy?: string;
+  startedBy: string | null;          // null = household attribution
+  startedByLabel: string;
+  endedBy?: string | null;
+  endedByLabel?: string;
   pee?: number;
   poop?: number;
   dogsMet?: string;
@@ -740,7 +789,8 @@ type Appointment = {
   notes?: string;
   status: "scheduled" | "cancelled" | "completed";
   reminderOffsetsMin: number[];
-  createdBy: string;
+  createdBy: string | null;          // null = household attribution
+  createdByLabel: string;
   updatedAt: string;
   rev: number;                       // revision, not schema version
   actionId: string;
@@ -788,7 +838,7 @@ or "Household" and the confirming human.
   timer uses the server-clock offset from the bootstrap/hello, not the device
   clock.
 - **app.commands:** keep 24h / at most 1000 entries; prune expired entries in a
-tested maintenance pass, never pending care state.
+  tested maintenance pass, never pending care state.
 
 ---
 
@@ -953,12 +1003,11 @@ tools are registered.
 
 ### 11.1 Providers
 
-Pi AI `1.4.0` includes both providers:
+Pi AI `1.4.0` includes both providers. Use the built-in provider factories, not
+hand-rolled HTTP:
 
-- **OpenCode Go** — base URL `https://opencode.ai/inference/go`, auth
-  `OPENCODE_API_KEY`.
-- **OpenRouter** — `https://openrouter.ai/api/v1`, auth
-  `OPENROUTER_API_KEY`.
+- **OpenCode Go** — `opencodeGoProvider()`, auth `OPENCODE_API_KEY`.
+- **OpenRouter** — `openrouterProvider()`, auth `OPENROUTER_API_KEY`.
 
 Keys live in `~/.pupkeep/secrets.json` (0600) on the phone, or `.env` in
 development. They are not written to SQLite, logs or the off-device database
@@ -1006,9 +1055,9 @@ weak at tools; the probe decides, not the name.
 - Budget includes OpenCode Go and OpenRouter, across both keys.
 - If the model fails with rate limit/model error, the UI offers “Retry with
   fallback model”; automatic cross-provider failover is deferred.
-- The monthly baseline is stored in a tiny metadata doc; a crash mid-turn is
-  reconciled by re-reading `harness.usage()` on restart, not by adding a second
-  local counter.
+- The monthly baseline is stored in the derived `app.usage` doc (`month`,
+  `baselineCostUsd`) and rebuilt from `harness.usage()` after a crash; it is
+  never a second ledger.
 
 ### 11.4 Cost controls
 
@@ -1062,7 +1111,7 @@ displayed but not pushed in v1.
 - Grace windows: appointments if still upcoming; feeds within a few hours.
 - Reminder sleeps are chunked (≤6h) and re-armed after a clock jump.
 
-### 12.3 Outbox and Web Push
+### 12.3 Outbox, Web Push and ntfy
 
 - Notification intents are committed to `app.notifications` with a server-side
   dedupe key: `(category, subject, offset, localDate/rev, userId)`. The Web Push
@@ -1073,7 +1122,7 @@ displayed but not pushed in v1.
   SSE; push/ntfy are best-effort.
 - VAPID keys in `~/.pupkeep/push.json`; per-device subscriptions.
 - 404/410 subscriptions are removed.
-- A test-push button is in Settings.
+- A test-notification button is in Settings.
 - Pruning never deletes pending, unread or undelivered items.
 
 ### 12.4 PWA
@@ -1092,7 +1141,8 @@ displayed but not pushed in v1.
 
 ### 12.5 Notifications on a phone host
 
-- The host phone runs the server; if the process is dead, no push is sent.
+- The host phone runs the server; if the process is dead, no push or ntfy is
+  sent.
 - Termux wake lock + boot + battery settings improve delivery, but do not
   guarantee it.
 - A VPS fallback is the reliable-notification answer if needed.
@@ -1136,7 +1186,6 @@ displayed but not pushed in v1.
 
 5. **Settings**
    - Household, timezone, members, invite.
-   - Owner token rotation.
    - Notification permissions, test notification (Web Push/ntfy), preferences;
      host Termux:API; partner ntfy onboarding.
    - Meal schedule.
@@ -1169,7 +1218,7 @@ displayed but not pushed in v1.
   breakfast, reports the change, and Sam sees it live.
 - **Agent cancel:** Sam asks to cancel the vet visit → an approval card appears;
   Alex confirms → the appointment is cancelled and reminders removed.
-- **Crash:** the phone kills Termux; the PWA shows offline; the launcher
+- **Crash:** the phone kills Termux; the app shows offline; the launcher
   restarts; `harness.resume()` continues; the open walk is still there.
 
 ---
@@ -1213,8 +1262,10 @@ Pi Pocket style, simplified for two caregivers:
   omitted (Tailscale encrypts transport, but there is no browser secure-context
   guarantee).
 - **Origins are derived from the active access mode**, not hard-coded:
-  `http://127.0.0.1:8787`, the current Tailscale `http://100.x:8787`, and the
-  live `https://*.trycloudflare.com` URL. A mutation must match one of them.
+  `http://127.0.0.1:8787`, the current Tailscale `http://100.x:8787`, the live
+  `https://*.trycloudflare.com` URL, and a VPS deployment’s configured
+  `PUPKEEP_PUBLIC_ORIGIN` (HTTPS via Caddy/`sslip.io`). A mutation must match
+  one of them.
 - CSRF: `SameSite=Lax` + `Origin` check + a custom request header.
 - Mutations require JSON content type; no CORS headers (default-deny).
 - `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-For` and
@@ -1261,7 +1312,7 @@ Pi Pocket style, simplified for two caregivers:
 - No analytics/telemetry in the app. Outbound calls are: the model provider
   (OpenCode Go/OpenRouter), Web Push, the Cloudflare quick tunnel when testing,
   **ntfy** when enabled, and **rclone** for backups. Each sees only what it must:
-  ntfy sees a generic message + topic; rclone sees the encrypted archive.
+  ntfy sees a category-only message + topic; rclone sees the encrypted archive.
 - Model providers see the shared thread and app context. Free models may have
   different data policies; the owner chooses.
 - Accepted risks, stated plainly: any tailnet device can reach the port (app
@@ -1301,7 +1352,8 @@ Pi Pocket style, simplified for two caregivers:
 - Appointments: create/update/cancel, reminder offsets, timezone/DST, stale
   `rev`; reminder tasks are system-conversation-owned; reschedule/cancel.
 - Notifications: server dedupe, cancel removes pending, overdue feed stops after
-  feed, tag display-only, ntfy payload contains no care specifics.
+  feed, tag display-only, ntfy payload is category-only (no dog/vet/health
+  specifics), and a `fed` category still tells the partner a meal was logged.
 - Budget: `harness.usage()` authoritative, derived `app.usage`, 80% warning,
   100% block, month rollover, free model.
 - Models: live tool-call probe drops 401/410/deprecated models (the
@@ -1409,12 +1461,35 @@ Pi Pocket style, simplified for two caregivers:
       (secrets excluded), owner/session hashes, VAPID, clean-host restore,
       `integrity_check`.
 - [ ] **P0-08** Daily notification path: host Termux:API local notification;
-      **recommended** ntfy topic for the partner; generic payload; confirm it
-      works without HTTPS and without exposing the app.
+      **recommended** per-user ntfy topic for the partner; **category-only**
+      payload; confirm it works while the app is served over HTTP (ntfy uses its
+      own HTTPS endpoint) and without exposing the app.
 - [ ] **P0-09** Decide Go/No-Go for the phone host, access and notification
       split; write the decision into this plan.
 
-**Gate G0:** every spike has a measured answer or a documented fallback.
+**Phase 0 exit criteria (measurable):**
+
+- **P0-01:** Node ≥24; server `.ts` runs via type stripping; `node:sqlite`
+  opens; `PRAGMA synchronous` reads `2`; `Intl` resolves `Europe/Paris`.
+- **P0-02:** exact reused Pi Pocket files/commits are in `NOTICE.md`; no
+  coding-agent domain code is copied.
+- **P0-03:** host binds its `100.x` address; partner reaches it; no `0.0.0.0`
+  fallback; cloudflared source confirmed; quick tunnel serves HTTPS; PWA/Web
+  Push test passes; Serve/Funnel answer recorded.
+- **P0-04:** two authors; one input accepted, the other busy-rejected; tool
+  actor correct; memo wins on rerun; household fallback visible.
+- **P0-05:** live probes for the default, one free and one paid model; the
+  `minimax-m3.1-flash-free` 410 is reproduced; a simulated month fits $10.
+- **P0-06:** kill/restart, Termux:Boot, wake lock, `harness.resume()`, parked
+  task and phantom-process behavior recorded.
+- **P0-07:** encrypted restore works; auth, VAPID, open walk and reminders
+  survive; `secrets.json` absent still boots.
+- **P0-08:** host Termux:API notification and per-user ntfy arrive without
+  HTTPS; payloads contain no care specifics; in-app mirrors them.
+- **P0-09:** a written go/no-go decision with the chosen fallback.
+
+**Gate G0:** every spike has a measured answer or a documented fallback, and
+the Phase 0 exit criteria above are met.
 
 ### Phase 1 — Repo, devcontainer, host skeleton, vertical slice
 
@@ -1510,13 +1585,13 @@ process kill; both clients see the same state; the partner notification
 - [ ] **P4-02** Appointment HTTP + agent tools + Calendar UI.
 - [ ] **P4-03** Appointment reminder tasks owned by the **system conversation**
       (`tx.createTask`, background, no model); task IDs persisted; reschedule/
-      cancel; planner boot reconciliation.
+      cancel; no tool-owned tasks.
 - [ ] **P4-04** Daily feed planner + feed reminder tasks; stale windows; no
-      duplicate planner; skip past offsets.
+      duplicate planner; boot reconciliation; skip past offsets.
 - [ ] **P4-05** `app.notifications` + outbox + Web Push + VAPID + service worker;
       server dedupe key authoritative.
-- [ ] **P4-06** Notification centre, prefs, test push, badge; host Termux:API;
-      ntfy recommended for the partner.
+- [ ] **P4-06** Notification centre, prefs, test notification, badge; host
+      Termux:API; ntfy recommended for the partner.
 - [ ] **P4-07** Approvals: `app.approvals`, propose tools, confirm/cancel routes,
       **one-commit** confirm with `rev`/idempotency/expiry, deterministic
       execution, activity/thread entry.
@@ -1564,7 +1639,7 @@ E2E passes; no agent tool can escape app state.
 | Daily phone battery/heat | Medium | Medium | Charge limit/bypass, screen off, low CPU, heat awareness; spare phone later |
 | No domain; named tunnel unavailable | Certain | Medium | Tailscale daily access; Cloudflare quick tunnel for testing; named tunnel deferred |
 | Tailscale is HTTP, so no PWA push daily | High | Medium | In-app + host Termux:API + **recommended ntfy**; quick tunnel for push testing; Serve/Funnel check |
-| ntfy becomes a second notification channel | Medium | Low | Recommended partner path, long-random topic, generic payload, self-host upgrade; in-app remains source of truth |
+| ntfy becomes a second notification channel | Medium | Low | Recommended partner path, long-random topic, category-only payload, self-host upgrade; in-app remains source of truth |
 | Quick tunnel URL changes break PWA push | High if used | Medium | Tailscale daily; quick tunnel testing only; re-subscribe after a tunnel restart |
 | Web Push on iOS | Medium | Medium | iOS 16.4+, Add to Home Screen; in-app fallback |
 | Shared-thread actor attribution wrong | Medium | Medium | Phase 0 spike; latest-speaker rule + memo; approval fallback |
@@ -1593,15 +1668,15 @@ E2E passes; no agent tool can escape app state.
 These are intentionally not in v1 unless a Phase 0 spike changes the decision.
 
 - **Domain for a named Cloudflare Tunnel** — deferred; Tailscale is daily,
-  Cloudflare quick tunnel is testing.
-- **Cloudflare Access** — only relevant if a named tunnel/domain appears.
+  Cloudflare quick tunnel is testing. Cloudflare Access is only relevant if a
+  named tunnel/domain appears.
 - **Native partner push bridge without ntfy** — deferred; ntfy is the recommended
   v1 path, in-app is always present.
 - **Queued multi-user messages** — v1 rejects a second message while the agent is
   busy; queueing is deferred until run-input attribution is proven.
-- **Named Cloudflare Tunnel** — deferred until a domain exists; Tailscale is
-  daily, quick tunnel is testing.
-- **Remote backup target** — rclone remote (S3/R2/WebDAV/Drive) and retention.
+- **Remote backup target** — must be configured as an rclone remote (S3/R2/
+  WebDAV/Drive); there is no default provider. Local backups always run, and the
+  app shows a persistent warning until an off-device target is configured.
 - **App name/branding** — Pupkeep is a working title.
 - **Branch model** — `main` + short-lived feature branches for now; revisit
   `dev`/`main` if release cadence needs it.
@@ -1663,6 +1738,11 @@ deprecated and the allowlist is built by a live probe.
 review findings (vendor checksums, CSP details, note length caps, SSE connection
 caps) are folded into the relevant tasks; the deferred items remain in §18.
 
+A second self-review pass then fixed the leftovers those edits introduced:
+“optional” vs recommended ntfy, non-null actor fields vs the household fallback,
+duplicate owner-rotation UI, duplicate named-tunnel entries, the dead
+`src/web/` path, and the absence of measurable Phase 0 exit criteria (now §16).
+
 ---
 
 ## 21. Glossary
@@ -1671,7 +1751,8 @@ caps) are folded into the relevant tasks; the deferred items remain in §18.
   tools and documents.
 - **Session doc** — a typed JSON document stored by the Harness, current-only,
   used for shared care state.
-- **Conversation** — the shared household agent transcript.
+- **Conversation** — the human-facing shared household agent transcript; the
+  hidden system conversation is a task-owner only and never calls a model.
 - **Commit** — one atomic Pi Durable write; the durability boundary.
 - **Shared thread** — the one household conversation both caregivers use.
 - **Approval** — a proposed high-impact action that a human must confirm.
