@@ -24,10 +24,10 @@ Durable is explicitly experimental; every dependency is pinned.
 | `@earendil-works/pi-durable` | `1.4.0` | Harness, conversations, tasks, tools, session documents, SQLite storage, `watchEvents`, `watchDoc`, `resume`, replay rules |
 | `@earendil-works/pi-ai` | `1.4.0` | `createModels`, OpenCode Go and OpenRouter providers, model catalog and prices, faux provider for tests |
 | `@earendil-works/chord` | `1.4.0` | SQLite facade, document state |
-| Pi Pocket (`TannerMidd/pi-pocket`) | `0.26.0` | Host-stack reference: Termux setup, launcher access modes, owner/invite auth, Web Push, service worker, process lock, no-build Preact/htm web |
-| Pi Pocket docs | `0.26.0` | `docs/systemd.md`, `docs/docker.md`, `docs/features.md`, `docs/architecture.md`, Termux commands |
+| Pi Pocket (`TannerMidd/pi-pocket`) | `0.26.0`; audited at `e984c60b…` (2 commits after `v0.26.0`) | Host-stack reference: Termux setup, launcher access modes, owner/invite auth, Web Push, service worker, process lock, no-build Preact/htm web |
+| Pi Pocket docs | `0.26.0`; audited at `e984c60b…` | `docs/systemd.md`, `docs/docker.md`, `docs/features.md`, `docs/architecture.md`, Termux commands |
 | Cloudflare Tunnel | public pricing/docs, 2026-10-28 | Free tunnel; named tunnel needs a hostname on Cloudflare DNS; quick tunnels are ephemeral. No domain: quick tunnel for testing, named deferred |
-| Tailscale | free personal plan, 2026-10-28 | Stable private tailnet access; HTTP, no `tailscale serve` from the Android app expected; Serve/Funnel to confirm |
+| Tailscale | free personal plan, 2026-10-28 | Stable private tailnet access; HTTP. The Android app exposes no Serve/Funnel (P0-03), so Tailscale stays HTTP. |
 | Termux | current F-Droid packages | Node 24/26, `cloudflared`, `termux-api`, `termux-wake-lock`, Termux:Boot, `termux-services` |
 | `my-agent-setup` | tag `v1.9.0` | Shared pi coding-agent extensions and skills for development |
 | pi coding agent | `1.4.0` | Development environment only |
@@ -134,11 +134,11 @@ buying one. The decision is:
 
 | Decision | Status | Gate |
 |---|---|---|
-| Tailscale Serve/Funnel on Android | Unknown | P0-03: if available, HTTPS/PWA push can be daily; if not, ntfy stays |
-| Termux `cloudflared` package source | Unconfirmed | P0-03: package or arm64 binary fallback |
-| Default model live availability | Live-probed | P0-05: `mimo-v2.6-flash` only if the probe passes; otherwise cheapest paid fallback |
+| Tailscale Serve/Funnel on Android | **Answered (P0-03): no Serve/Funnel in Android app 1.104.2; Tailscale stays HTTP** | P0-09: ntfy remains the partner daily path; quick tunnel is testing-only |
+| Termux `cloudflared` package source | **Answered (P0-03): no package; arm64 binary needs `termux-chroot` + `SSL_CERT_FILE`** | P1-04: wrapper, or run the tunnel on the VPS; do not spawn the raw binary |
+| Default model live availability | **Answered (P0-05): `mimo-v2.6-flash` passes; `deepseek-v4.1-flash` paid fallback** | P1-03/P4-08: re-probe with the app schema and startup cache |
 | ntfy acceptance | Recommended, not forced | P0-08: if rejected, in-app only or buy a domain; never silently drop notifications |
-| Remote backup target | Must be configured | P0-07/P5-02: rclone remote; local backup always; warning until configured |
+| Remote backup target | **Open: P0-07 drill used `scp`; rclone target not configured** | P5-02: rclone remote + 14-day retention; local backup always; warning until configured |
 | App name/branding | Working title | Not blocking; `Pupkeep` until renamed |
 | Named Cloudflare Tunnel | Deferred | Only after a domain exists |
 
@@ -420,6 +420,8 @@ exec "$PREFIX/bin/npm" start -- --access tailscale --data ~/.pupkeep >> ~/.pupke
 ```
 
 - Install **Termux:Boot**.
+- Operator SSH is not the product path. Do not start `sshd` on all interfaces;
+  bind it to the Tailscale address and loopback, or start it on demand (P0-06).
 - Battery optimization: unrestricted for Termux.
 - **Tailscale does not reconnect by itself after a reboot** (P0-06). Set
   Android’s “Always-on VPN” for Tailscale, or start it manually before expecting
@@ -445,7 +447,9 @@ The host is the user’s daily phone, always charging. This is acceptable for v1
 - Use the phone’s charge limit / bypass charging / optimized charging if it has
   it, to reduce battery wear and heat.
 - Avoid running the server in direct sun or on a hot surface.
-- The wake lock keeps the CPU available; it does not keep the screen on.
+- The wake lock is intended to keep the CPU available; it does not keep the
+  screen on. P0-06 could not independently observe the effect (`dumpsys` is
+  blocked to Termux); the day-long check is P5-05.
 - Android may still kill Termux. Data survives; the service returns on restart.
 - A spare phone remains the better long-term host, but is not required.
 
@@ -674,6 +678,9 @@ Procedure:
   crypt), copy off-device via `rclone`; retention 14 days.
 - Backup the DB while the server is running with a child process and a busy
   timeout; do not copy `-wal`/`-shm` by hand.
+- A live `.backup` is a consistent snapshot but can lag the newest commit
+  (P0-07). Verify a post-backup copy with `integrity_check` and the expected
+  newest record, not only the command's exit code.
 - Restore with the server **stopped**: remove `pupkeep.sqlite-wal`/`-shm`,
   restore the bundle, verify `integrity_check`, start, confirm auth, VAPID,
   open walk, transcript and reminder tasks.
@@ -1028,7 +1035,8 @@ backup. The agent never sees them.
 ### 11.2 Model allowlist
 
 Prices are from the Pi AI `1.4.0` catalog, USD per 1M tokens. Confirm at
-configuration time; the catalog moves.
+configuration time; the catalog moves. The P0-05 probes used the devcontainer
+coding agent's tool schema; P1-03/P4-08 must repeat them with the app schema.
 
 | Model | Provider | Input | Output | Role |
 |---|---|---|---|---|
@@ -1471,8 +1479,8 @@ Pi Pocket style, simplified for two caregivers:
 - [x] **P0-01** Termux runtime: Node 24/26, TypeScript type-stripping for the
       server, `node:sqlite`, Pi Durable `1.4.0`, `PRAGMA synchronous=FULL`,
       `Intl` IANA timezone data, one-process lock. Evidence:
-      `docs/spikes/P0-01-termux-runtime.md`; the application-level lock is
-      P0-06/P1-07.
+      `docs/spikes/P0-01-termux-runtime.md`; the one-process lock is **P1-05**
+      (P1-04 calls it), Node 26 was measured and Node 24 is untested.
 - [x] **P0-02** Pi Pocket host review: exact MIT modules, commit hashes and
       deviations are in `NOTICE.md` and
       `docs/spikes/P0-02-pi-pocket-reuse.md`.
@@ -1481,7 +1489,8 @@ Pi Pocket style, simplified for two caregivers:
       confirm the Termux `cloudflared` package source or the arm64 binary
       fallback; fail-closed bind. Partial evidence:
       `docs/spikes/P0-03-no-domain-access.md` (host-side checks pass; the
-      partner-phone reach check is still pending).
+      partner phone reach, partner PWA/Web Push subscription and re-subscribe
+      after a tunnel restart are still pending).
 - [x] **P0-04** Shared-thread attribution: two sequential authors, one
       busy-rejected input with no transcript entry, tool actor resolution, memo
       read after SIGKILL, household fallback. Evidence:
@@ -1493,7 +1502,9 @@ Pi Pocket style, simplified for two caregivers:
       `docs/spikes/P0-05-models-budget.md`.
 - [x] **P0-06** Termux resilience: wake lock, Termux:Boot, `sv`/tmux, kill/restart,
       `harness.resume()`, parked-task surfacing, phantom-process killer, battery
-      settings. Evidence: `docs/spikes/P0-06-termux-resilience.md`.
+      settings. Evidence: `docs/spikes/P0-06-termux-resilience.md`
+      (wake-lock effect not independently observable; app kill needs a manual
+      sshd; P5-05 owns the long-run).
 - [x] **P0-07** Backup/restore: encrypted bundle `sqlite + config + push`
       (secrets excluded), owner/session hashes, VAPID, clean-host restore,
       `integrity_check`. Evidence:
@@ -1525,7 +1536,8 @@ Pi Pocket style, simplified for two caregivers:
 - **P0-07:** encrypted restore works; auth, VAPID, open walk and reminders
   survive; `secrets.json` absent still boots.
 - **P0-08:** host Termux:API notification and per-user ntfy arrive without
-  HTTPS; payloads contain no care specifics; in-app mirrors them.
+  HTTPS; payloads contain no care specifics; in-app remains the documented
+  source of truth (the in-app mirror itself is P4-06, not Phase 0).
 - **P0-09:** a written go/no-go decision with the chosen fallback.
 
 **Gate G0:** every spike has a measured answer or a documented fallback, and
@@ -1548,7 +1560,7 @@ the Phase 0 exit criteria above are met.
       server child, restart/backoff, tunnel supervisor, owner link + QR.
 - [ ] **P1-05** Data dir/config: `~/.pupkeep`, `config.json`, `secrets.json`,
       `push.json`, mode `0700/0600`, serialized per-file writes, log scrub,
-      logging, lock.
+      logging, one-process pid lock (P0-01 deferred; P1-04 calls it).
 - [ ] **P1-06** Auth: owner token hash, **owner reissue/rotate**, one-time
       hashed invite, hashed sessions, cookie, owner/member roles, authz matrix,
       remove member + purge sessions, rate limit, per-origin cookies.
@@ -1556,7 +1568,8 @@ the Phase 0 exit criteria above are met.
       (`openNodeSqliteDatabase` → `PRAGMA synchronous=FULL` →
       `SqliteStorage.open({prefix:"pi_"})` → `Harness.open`), `pi_` docs,
       `harness.resume()` on start, `harness.closed` failed-exit, close timeout,
-      parked-task reporting.
+      parked-task reporting, post-backup verification and restore of an
+      interrupted generation.
 - [ ] **P1-08** Session docs: `app.household`, `app.puppy`, `app.activity`,
       `app.commands`, with initial values, `schemaVersion` migration policy,
       `checkpointWhen`.
@@ -1652,7 +1665,8 @@ changes nothing until confirmed.
 
 - [ ] **P5-01** Kill/restart matrix on the phone: server, Termux, phone reboot,
       tunnel restart, agent mid-turn.
-- [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy.
+- [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy;
+      rclone remote/retention; restore an interrupted generation.
 - [ ] **P5-03** Two-client E2E: feed race, walk, appointment, shared thread,
       approvals, reconnect.
 - [ ] **P5-04** Termux install/boot scripts and PHONE-RUNBOOK polish.

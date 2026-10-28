@@ -11,8 +11,9 @@ archived with only the three intended files, encrypted with `age`, copied
 off-device, and restored on a clean phone directory and a clean devcontainer
 directory. Auth hashes, VAPID keys, the push subscription, the ntfy topic, the
 transcript, the open walk and the sleeping reminder all survived; the reminder
-then fired after the restore. `secrets.json` and `server.log` were excluded and
-the restored copy boots without `secrets.json`.
+then completed after the restore under a future clock (`now + 2h`). `secrets.json`
+and `server.log` were excluded and the restored Harness opens without
+`secrets.json`.
 
 ## Environment
 
@@ -56,8 +57,9 @@ The `app.reminder` task slept until `now + 1h` and committed `completed` in its
    `server.log`, `-wal` or `-shm`.
 4. Encrypt the tar with `age -p` (passphrase supplied out-of-band via `expect`;
    the passphrase is not in the bundle, the repo or the note).
-5. Copy the `.age` file to the devcontainer with `scp`; copy the passphrase
-   separately.
+5. Copy the `.age` file to the devcontainer with `scp`; for the drill the
+   passphrase was copied separately to the same devcontainer. Production must
+   keep the passphrase off the backup host (credential vault/different channel).
 6. Restore on a clean phone directory `~/p0-07/restore` and on a clean
    devcontainer directory `/tmp/p0-07-restore`: decrypt, extract, run
    `PRAGMA integrity_check`, then run the scratch `restore-check.mjs`.
@@ -80,7 +82,7 @@ The `app.reminder` task slept until `now + 1h` and committed `completed` in its
 | 1 | Bundle contents match PLAN §7.5 | archive: `pupkeep.sqlite`, `config.json`, `push.json` | **pass** |
 | 2 | Excluded files stay out | no `secrets.json`, `server.log`, `pupkeep.sqlite-wal` or `-shm` in the archive | **pass** |
 | 3 | Online backup during a generation | `.backup` on the live copy; `PRAGMA integrity_check` = `ok` | **pass (snapshot caveat)** |
-| 4 | Encryption / off-device copy | `age -p`; `scp` to the devcontainer; passphrase separate | **pass** |
+| 4 | Encryption / off-device copy | `age -p`; `scp` to the devcontainer; passphrase separate for the drill (production must not co-locate) | **pass (drill)** |
 | 5 | Clean restore on the phone | `integrity_check=ok`; all restore checks passed | **pass** |
 | 6 | Clean restore on the devcontainer | Node `v24.22.0`, SQLite `3.50.6`; all restore checks passed | **pass** |
 | 7 | Owner/session/invite hashes | SHA-256 of the scratch tokens matches `config.json`; no raw token in config | **pass** |
@@ -129,9 +131,13 @@ change the bundle contents or the auth/push/reminder result.
   private key is inside `push.json` **inside the encrypted bundle** because push
   subscriptions need it; `secrets.json` (provider keys) is excluded.
 - The backup passphrase is out-of-band. A lost passphrase means a lost backup;
-  P0-07/P1-04 should document the recovery/rotation step.
+  P1-07/P5-02 should document the recovery/rotation step and must not store the
+  passphrase beside the archive.
 - The `.backup`/WAL interaction above is a tooling caveat for the real backup
   job; the real job should verify a post-backup copy, not just the exit code.
+- The off-device copy used `scp`, not the plan’s `rclone` path; rclone on Termux
+  and the 14-day retention were not exercised. P5-02 must configure the remote
+  and retention.
 - The restore was on a clean **directory**, not a clean Termux app install; the
   devcontainer restore proves host portability of the SQLite/config/push set.
   P5-02 still owns the clean-Termux/VPS release drill.
@@ -139,12 +145,14 @@ change the bundle contents or the auth/push/reminder result.
 ## What P1-05/P1-07/P5-02 can rely on
 
 - The backup set is exactly `pupkeep.sqlite` + `config.json` + `push.json`; the
-  encrypted archive can exclude `secrets.json` and `server.log` and still boot.
+  encrypted archive can exclude `secrets.json` and `server.log`, and the
+  restored Harness opens without them.
 - Owner/session/invite **hashes** restore auth without raw tokens; VAPID keys,
   the push subscription and the ntfy topic survive in `push.json`.
 - A clean restore can read the open walk, the transcript and a sleeping reminder;
   a future clock makes the reminder fire, so the task state is real.
-- Age passphrase encryption + `scp` is a workable off-device path; `age` is
-  available on Termux and the devcontainer.
+- Age passphrase encryption + `scp` is a workable drill path; `age` is available
+  on Termux and the devcontainer. The production `rclone` remote and retention
+  remain P5-02.
 - The in-progress-generation restore and the clean-Termux/VPS drill are still
   open; do not claim them from this spike.

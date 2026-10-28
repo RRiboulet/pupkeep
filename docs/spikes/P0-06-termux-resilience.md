@@ -30,9 +30,9 @@ controls. P0-06 is checked in PLAN §16.
 | 6 | Parked task at `restartLimit` | task `p0_06.hang`, `restartLimit: 1`: attempt 1 `running`; SIGKILL; attempt 2 `blocked` / `restart_limit`; `retryTask()` + finish flag → terminal `completed` | **pass** |
 | 7 | Boot script | `~/.termux/boot/p0-06.sh` created; manual run exit 0; after reboot it wrote `boot.log`, started wake lock, sshd, `service-daemon`, `sv up p0-06` | **pass** |
 | 8 | Termux:Boot companion app | `com.termux.boot` installed; boot script in `~/.termux/boot/p0-06.sh` | **pass** |
-| 9 | Phone reboot / boot script | new boot id `cf7373f5-7f12-43d4-af54-8c607a2b3fee`; `boot.log` start 19:04:38, done 19:04:40; `sshd=13955`; service pid 13973 | **pass** |
+| 9 | Phone reboot / boot script | new boot id (redacted); `boot.log` start 19:04:38, done 19:04:40; `sshd=13955`; service pid 13973 | **pass** |
 | 10 | `harness.resume()` after reboot | service log `start pid=13973 dbStarts=4 previousStarts=3 scheduling=running` | **pass** |
-| 11 | Kill the Termux app itself | `am force-stop com.termux`, reopen Termux: boot id unchanged (`cf7373f5…`), no new boot log, `runsvdir` pid 7113, service pid 7117; log `dbStarts=5 previousStarts=4 scheduling=running`; sshd did **not** auto-start | **pass (service); sshd manual** |
+| 11 | Kill the Termux app itself | user ran `am force-stop com.termux`, then reopened Termux: boot id unchanged, no new boot log; a new `runsvdir` (7113) and service (7117) started, log `dbStarts=5 previousStarts=4 scheduling=running`; sshd did **not** auto-start. Exact force-stop time was not captured; lower pids indicate a new app process, not a surviving boot-time supervisor. | **pass for service restart; sshd manual; timing caveat** |
 | 12 | Battery optimisation / phantom-process / OEM settings | user set Termux battery to **Unrestricted** and enabled Developer options → **Disable child process restrictions** (phantom-process killer); Android blocks `settings get` / `dumpsys` from Termux, so this is user-confirmed, not shell-observed | **pass (user-confirmed)** |
 | 13 | Tailscale auto-connect after reboot | phone was offline in Tailscale after reboot until the user opened the Tailscale app; after the Termux app kill it stayed online | **manual start needed after reboot** |
 
@@ -87,11 +87,16 @@ to open the Tailscale app before SSH was reachable.
 
 ## Residual risks and next actions
 
-- **Termux app kill:** the service returned via `sv-enable` and `harness.resume()`
-  after `am force-stop com.termux` and reopening Termux. sshd did not return by
-  itself; it had to be started with `sshd -p 8022`. Termux:Boot only covers a
-  reboot. A production launcher should be the supervised service; remote shell
-  access is an operator convenience, not a product path.
+- **Termux app kill:** after `am force-stop com.termux` and reopening Termux,
+  the enabled service started under a new `runsvdir` and `harness.resume()`
+  logged a new start; sshd did not return and was started manually with
+  `sshd -p 8022`. The exact force-stop timestamp was not instrumented, so this
+  is recorded as a user-confirmed app restart, not a controlled timing test.
+  Termux:Boot only covers a reboot.
+- **SSH exposure:** after the security review, `sshd_config` was changed to
+  `ListenAddress` the Tailscale address plus `127.0.0.1`; the LAN address is
+  refused and the old config is backed up beside it. P1-04/P1-13 should start
+  SSH only on demand (or bind it to the tailnet), never all interfaces.
 - **Tailscale auto-connect:** it did not reconnect by itself after reboot. For a
   daily host, set Android’s “Always-on VPN” for Tailscale (or accept a manual
   start). This is an access-path finding for P0-03/P1-04.
@@ -107,14 +112,15 @@ to open the Tailscale app before SSH was reachable.
 
 After the evidence was recorded, the scratch service was stopped (`sv down` plus
 a `down` file) and the scratch boot script was removed. P1-04 owns the real
-launcher service and boot script; sshd remains the operator access path.
+launcher service and boot script; sshd remains the operator access path, now
+bound to the Tailscale address and loopback only.
 
 ## What P1-04/P1-13 can rely on
 
 - `termux-services`/`runsvdir` restarts a Node child after SIGKILL; the next
   process can reopen SQLite and `harness.resume()` reports `scheduling=running`.
-- The scratch service proves the supervision shape; P1-04’s launcher still owns
-  the real pid lock and one-process rule.
+- The scratch service proves the supervision shape; **P1-05 owns the real pid
+  lock**, and P1-04 calls it.
 - A task parked at `restartLimit` is visible as `blocked` / `restart_limit` in
   `harness.inspect()` and is retryable with `harness.retryTask()`.
 - `tmux` is available for an interactive fallback, but `sv` is the supervised
@@ -122,8 +128,8 @@ launcher service and boot script; sshd remains the operator access path.
 - Termux:Boot restores the service after a reboot; the boot script started
   sshd, `runsvdir` and `p0-06`, and the service resumed the Harness. Tailscale
   needed a manual start after reboot.
-- The Termux-app kill is survivable for the supervised service; sshd needs a
-  manual start, and Termux:Boot only restores on reboot. Wake-lock effect,
+- The Termux-app kill is survivable for the enabled supervised service; sshd
+  needs a manual start, and Termux:Boot only restores on reboot. Wake-lock effect,
   battery optimisation and the phantom-process killer are recorded from the
   command/UI, not independently observable. **Do not claim unconditional phone
   survival**: Android memory pressure and OEM controls can still kill the

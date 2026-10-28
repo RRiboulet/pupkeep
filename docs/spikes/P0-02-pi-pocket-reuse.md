@@ -32,7 +32,7 @@ host plumbing only, with these classifications:
 - No Pi Pocket imports; only Node built-ins.
 - Adapt: export `takeLock(dataDir/harness.lock)` for Pupkeep; record the pid in
   the same data dir; keep the existing close/release path. Rename the hardcoded
-  "Pi Pocket" error strings.
+  "Pi Pocket" error strings. **P1-05 owns the lock; P1-04 calls it.**
 - This is the guard against two servers writing the same SQLite file.
 
 ### `src/server/push.ts` — near-direct
@@ -151,7 +151,7 @@ Pi Pocket's auth is a good shape but not our model:
 
 ## Next tasks
 
-- P1-04 (launcher) uses `access.ts` + `lock.ts`.
+- P1-04 (launcher) uses `access.ts`; **P1-05 owns `lock.ts`** and P1-04 calls the lock.
 - P1-05/P1-06 (data/config/auth) adapt `config.ts`/`auth.ts` with the deviations
   above.
 - P4-05/P4-06 (push/outbox/ntfy) use `push.ts` + `sw.js` + `notify.js` patterns.

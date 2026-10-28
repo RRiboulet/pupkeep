@@ -36,19 +36,50 @@ Scratch harness in `/tmp/p0-04` (throwaway; not committed):
 | Transcript scan after the busy rejection | **exactly 1** `app.chat` entry |
 | Two sequential accepted authors | `Alex`, then `Sam` |
 | Fresh conversation with no `app.chat` input | `{ authorId: null, authorName: "Household" }` |
-| Post-kill rerun | `rerunActor: { authorId: "alex", authorName: "Alex" }` |
+| Post-kill rerun | `rerunActor: { memoHit: true, actor: { authorId: "alex", authorName: "Alex" } }` |
 | Submission after rerun | `done` |
 | Tool result entry | `rerun actor={"authorId":"alex","authorName":"Alex"}` |
 
-The SIGKILL test shows the same `pi.tool` task reran and read the memo: the
-actor did not come from a fresh resolution in that script. The transcript was
-unchanged between runs, so it does **not** prove precedence over a conflicting
-transcript. That negative control is not meaningful for this tool: the scan is
-bounded by the tool’s own assistant entry, and a later `app.chat` entry (for
-example a passive write) falls after that bound. A true conflict would require
-an input placed **before** the assistant entry, which is the queueing/steering
-case v1 disables. If queueing is ever enabled, resolve from the run’s input
-submissions, not from recency.
+The SIGKILL test shows the same `pi.tool` task reran and took the memo branch:
+the actor did not come from a fresh resolution in that script. The probe now
+writes `{ memoHit: true, actor }` **only** when `api.memo("actor")` returns a
+prior value, and the parent asserts `memoHit === true` before accepting the
+result. The transcript was unchanged between runs, so it does **not** prove
+precedence over a conflicting transcript. That negative control is not
+meaningful for this tool: the scan is bounded by the tool’s own assistant
+entry, and a later `app.chat` entry (for example a passive write) falls after
+that bound. A true conflict would require an input placed **before** the
+assistant entry, which is the queueing/steering case v1 disables. If queueing is
+ever enabled, resolve from the run’s input submissions, not from recency.
+
+### Memo-hit rerun (2026-10-28)
+
+The crash/memo case was rerun with the exact SQLite sequence
+`openNodeSqliteDatabase` → `PRAGMA synchronous = FULL` →
+`SqliteStorage.open(..., { prefix: "pi_" })` → `Harness.open`:
+
+```bash
+cd /tmp/p0-04 && node rerun-parent.ts
+```
+
+Output:
+
+```json
+{
+  "firstActor": { "authorId": "alex", "authorName": "Alex" },
+  "rerunActor": {
+    "memoHit": true,
+    "actor": { "authorId": "alex", "authorName": "Alex" },
+    "pid": 230424
+  },
+  "submissionId": "8",
+  "settled": "done"
+}
+```
+
+`memoHit: true` is written only in the memo branch; a fresh scan is not
+executed on rerun. This proves the memo was read, not that it outranks a
+changed transcript.
 
 ## Rules for P1-09
 
@@ -91,12 +122,14 @@ submissions, not from recency.
 - Nested tools and a parent-chain actor lookup.
 - Persisting the actor on a real domain record and replaying the domain write
   with the same `api.taskId`.
-- SQLite with the production `synchronous=FULL` (P0-01).
 - A changed-transcript rerun; see the bound above.
+- Care-tool replay/idempotency after a memo commit; the memo branch returns
+  without the domain write.
 
 ## Caveats
 
-- The basic case used `MemoryStorage`; the crash case used SQLite.
+- The basic/sequential/fallback cases used `MemoryStorage`; the crash/memo case
+  used SQLite with `PRAGMA synchronous=FULL` via the exact open sequence.
 - The crash test used SIGKILL, not power loss.
 - The tool returned the actor but did not create a care record; the mapping to
   `byUserId`/`byLabel` is P1-11/P2.
