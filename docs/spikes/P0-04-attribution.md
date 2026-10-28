@@ -1,25 +1,30 @@
 # P0-04 — Shared-thread attribution
 
-**Task:** P0-04. **Date:** 2026-10-28. **Status:** complete.
+**Task:** P0-04. **Date:** 2026-10-28. **Status:** complete for the P0-04 spike;
+integration belongs to P1-09/P1-12.
 
-**Verdict:** the v1 rule is safe **only because v1 rejects a second input while
-the shared thread is busy**. Resolving the actor from the latest placed
-`app.chat` entry before the tool's assistant entry works, the busy input never
-enters the transcript, and a post-crash rerun finds the durable actor memo.
+**Verdict:** v1’s rule works **only if the server enforces one-at-a-time chat
+input with `whenBusy: "reject"`**. The actor resolves from the latest placed
+`app.chat` entry before the tool’s assistant entry; a second input while the
+thread is busy is rejected and adds no entry; sequential authors resolve
+correctly; a missing author falls back to the household; and a tool rerun after
+SIGKILL reads the durable actor memo.
 
 ## What was tested
 
 Scratch harness in `/tmp/p0-04` (throwaway; not committed):
 
-- Pi Durable `1.4.0`, `MemoryStorage` for the basic case and SQLite for the
-  kill/restart case.
+- Pi Durable `1.4.0`, `MemoryStorage` for the basic/sequential/fallback cases
+  and SQLite for the SIGKILL/reopen case.
 - Faux provider returns `actor_probe` as a tool call.
 - `actor_probe` reads its own task input (`api.getTask(api.taskId)`), scans
   `tx.scanEntries({ conversationId, maxEntryId: assistant, order: "descending" })`
-  for the latest `app.chat`, and stores the actor with `api.memo("actor", …)`.
-- The tool is `replay: "safe"`; the first run blocks after the memo commit, the
-  parent SIGKILLs the child, then reopens the same SQLite file and waits for the
-  submission.
+  for the latest `app.chat`, and stores an **actor object** with
+  `api.memo("actor", …)`:
+  `{ authorId: string | null, authorName: string }`.
+- The tool is `replay: "safe"`. In the crash test the first run blocks after the
+  memo commit; the parent SIGKILLs the child, reopens the same SQLite file and
+  waits for the submission.
 
 ## Results
 
@@ -27,33 +32,64 @@ Scratch harness in `/tmp/p0-04` (throwaway; not committed):
 |---|---|
 | First author | `{ authorId: "alex", authorName: "Alex" }` |
 | Second message while the tool is running, `whenBusy: "reject"` | `ConversationBusy: Conversation 1 is busy` |
-| Transcript after the busy rejection | only the first `app.chat` entry |
+| Transcript scan after the busy rejection | **exactly 1** `app.chat` entry |
+| Two sequential accepted authors | `Alex`, then `Sam` |
+| Fresh conversation with no `app.chat` input | `{ authorId: null, authorName: "Household" }` |
 | Post-kill rerun | `rerunActor: { authorId: "alex", authorName: "Alex" }` |
 | Submission after rerun | `done` |
 | Tool result entry | `rerun actor={"authorId":"alex","authorName":"Alex"}` |
 
-The crash test proves the important part: the tool intent and memo were
-committed before the kill; on reopen the tool reran, read the memo and did not
-re-resolve a different actor from a changed transcript.
+The SIGKILL test shows the same `pi.tool` task reran and read the memo: the
+actor did not come from a fresh resolution in that script. The transcript was
+unchanged between runs, so it does **not** prove precedence over a conflicting
+transcript. That negative control is not meaningful for this tool: the scan is
+bounded by the tool’s own assistant entry, and a later `app.chat` entry (for
+example a passive write) falls after that bound. A true conflict would require
+an input placed **before** the assistant entry, which is the queueing/steering
+case v1 disables. If queueing is ever enabled, resolve from the run’s input
+submissions, not from recency.
 
 ## Rules for P1-09
 
-1. **v1 does not queue or steer.** A second input while the thread is busy
-   returns a friendly 409/`ConversationBusy`; the client keeps the draft.
-2. A tool resolves its actor **inside a `tx` read**: read its own task input,
-   scan backwards from the assistant entry to the latest `app.chat`, then memo
-   the actor. Read the memo first on a rerun.
-3. Never accept an actor from model arguments.
-4. If the resolution is ambiguous, use `byUserId: null` / `byLabel:
-   "Household"`, show that in the UI, and require approval for high-impact
-   actions.
-5. Do not enable queueing until a run-input mapping is implemented and tested;
-   “latest visible entry” is not safe once inputs can be placed mid-run.
+1. **Enforce the busy rule server-side.** Caregiver chat must always be an input
+   with `whenBusy: "reject"`, never a passive `write` or a `steer`; the HTTP
+   layer maps `ConversationBusy` to a friendly 409 and keeps the draft. An
+   omitted `whenBusy` defaults to follow-up, so the server must set it
+   explicitly.
+2. **Resolve inside a `tx` read.** Read the tool task input, scan backwards from
+   the assistant entry to the latest `app.chat`, then memo an **actor object**
+   (use `prior !== undefined`, not `if (prior)`, so the household/null case is
+   not treated as absent).
+3. **Memo scope is the tool task, not the assistant entry.** The assistant entry
+   is provenance. Memos disappear when the task becomes terminal, so persist the
+   resolved actor on the domain record (`byUserId`/`byLabel`) as the durable
+   audit.
+4. **Never accept an actor from model arguments.** Derive it from the session’s
+   member identity and the placed input.
+5. **Fail closed for nested tools.** A `kind: "nested"` tool input has no
+   assistant entry; either walk the parent task chain or return the household
+   fallback. Do not throw or silently attribute to the model.
+6. **Fallback is visible.** `byUserId: null`, `byLabel: "Household"` in the UI
+   and approval cards; high-impact actions still require a human tap.
+7. **Do not enable queueing until** the run-input mapping and a changed-input
+   test exist. “Latest visible entry” is not safe once inputs can be placed
+   mid-run.
+
+## Not covered here — P1-09/P1-12
+
+- HTTP-layer busy → 409, draft preservation, retry after idle, and
+  `requestId` double-send dedupe.
+- Simultaneous first submits (source serializes admission; needs a test).
+- Passive writes/steer and omitted `whenBusy` trying to shift attribution.
+- Nested tools and a parent-chain actor lookup.
+- Persisting the actor on a real domain record and replaying the domain write
+  with the same `api.taskId`.
+- SQLite with the production `synchronous=FULL` (P0-01).
+- A changed-transcript rerun; see the bound above.
 
 ## Caveats
 
-- The scratch used `openNodeSqliteStorage` without the app's `synchronous=FULL`
-  override; P0-01 covers the production pragma.
-- The basic case used `MemoryStorage`; the crash case used SQLite. Both passed.
-- The household fallback path was not forced in this run; it is a one-line
-  branch and must be covered by P1-09/P1-12.
+- The basic case used `MemoryStorage`; the crash case used SQLite.
+- The crash test used SIGKILL, not power loss.
+- The tool returned the actor but did not create a care record; the mapping to
+  `byUserId`/`byLabel` is P1-11/P2.

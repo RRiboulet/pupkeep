@@ -31,7 +31,8 @@ host plumbing only, with these classifications:
   stale/incomplete lock handling.
 - No Pi Pocket imports; only Node built-ins.
 - Adapt: export `takeLock(dataDir/harness.lock)` for Pupkeep; record the pid in
-  the same data dir; keep the existing close/release path.
+  the same data dir; keep the existing close/release path. Rename the hardcoded
+  "Pi Pocket" error strings.
 - This is the guard against two servers writing the same SQLite file.
 
 ### `src/server/push.ts` — near-direct
@@ -43,24 +44,31 @@ host plumbing only, with these classifications:
   `approval`, `test`), per-user/device subscriptions, server-side dedupe keys,
   and a `tag` for display collapse. Keep the `PushMessage` shape and the
   `sendPush`/`PushStore` seam.
+- `PushStore.save()` has the same non-fsynced temp+rename as `ConfigStore`;
+  apply the serialized write queue before reuse.
 - Add `ntfy` publishing beside Web Push in the outbox, not inside `push.ts`.
 
 ### `web/sw.js` — near-direct
 
-- Push display, notification click/deep link, approval action, share target.
+- Push display, notification click/deep link, approval action; the share-target
+  path is removed.
 - Adapt: Pupkeep URLs/categories, no approval action from the notification in
-  v1 (approvals are in-app cards), static shell cache only.
-- Keep the notification `tag`/`renotify` behaviour.
+  v1 (approvals are in-app cards), static shell cache only. **Drop the share
+  target** (`receiveShare`, `SHARE_CACHE`, fetch handler) and its `share.js` /
+  `/share` server dependencies; it is not in the Pupkeep plan.
+- Keep the notification `tag`/`renotify` behaviour. Rename `X-Pocket`.
 
 ### `src/launcher/access.ts` — near-direct
 
 - `local` / `lan` / `cloudflare` / `tailscale`, Tailscale `100.64.0.0/10`
-  detection, fail-closed bind, `cloudflared` find/download/run, quick-tunnel
-  event parsing.
+  detection, `cloudflared` find/download/run, quick-tunnel event parsing.
+  Fail-closed bind is in the launcher main, not this file (see below).
 - No Pi Pocket imports; only Node built-ins.
-- Adapt: Pupkeep names/paths, `pupkeep` data dir, Tailscale fail-closed error
-  text, keep the quick tunnel testing-only. Confirm the Termux `cloudflared`
-  package (P0-03); if missing, use the arm64 binary download path.
+- Adapt: Pupkeep names/paths, `pupkeep` data dir, keep the quick tunnel
+  testing-only. **Fail-closed lives in the launcher main (`prepareAccess`), not
+  `access.ts`:** `bindHost("tailscale")` falls back to `127.0.0.1`; P1-04 must
+  reimplement the refusal. Confirm the Termux `cloudflared` package (P0-03); if
+  missing, use the arm64 binary download path.
 - Do not copy the quick-tunnel-per-user cookie logic from Pi Pocket; Pupkeep
   uses origin-scoped cookies and a separate test invite.
 
@@ -78,9 +86,16 @@ Pi Pocket's auth is a good shape but not our model:
   a per-file write queue (`fsync(temp)` + `rename` + `fsync(dir)`).
 - The user token hash is sha256 of a high-entropy token; keep that approach for
   sessions, but store owner/invite/session **hashes only**.
-- Keep the `SameSite=Lax` cookie, Origin check, hashed invites, one-time expiry,
-  rate-limit pattern, and the authz matrix idea. Add server-side 403 checks and
-  session purge on member removal.
+- Keep the `SameSite=Lax` cookie, Origin check, hashed invites and one-time
+  expiry. **Add** request rate limiting: Pi Pocket has no auth/HTTP rate limiter;
+  its 429s are provider-limit and webhook handling.
+- **Harden forwarded-header trust.** Pi Pocket's `isHttps()`/`origin()` trust
+  `X-Forwarded-Proto`/`X-Forwarded-Host` from any peer. Pupkeep must trust them
+  only from a loopback peer and derive origins from the active access mode.
+- **Owner-link file only at mint/reissue.** Pi Pocket stores the raw owner token
+  so it can reprint the same link every boot. Pupkeep stores only the hash, so
+  `owner-link.txt` is written when a token is minted or reissued, not on every
+  boot; ordinary boots log only its path.
 
 ### `web/notify.js` — adapt
 
@@ -95,8 +110,9 @@ Pi Pocket's auth is a good shape but not our model:
 ### `web/index.html` — adapt the pattern
 
 - Import map to vendored `preact`, `preact/hooks`, `htm`, `marked`, `dompurify`.
-- Pupkeep vendors only what it uses and records versions/checksums in
-  `NOTICE.md`; no CDN at runtime. No build step.
+  Pi Pocket serves them from `node_modules` through `/vendor/*` and `modulesWith()`
+  (`src/server/http/assets.ts`); Pupkeep instead checks in the vendor files with
+  versions/checksums in `NOTICE.md`. No CDN at runtime. No build step.
 
 ### `src/launcher/main.ts`, `docs/systemd.md`, `docs/docker.md` — reference only
 

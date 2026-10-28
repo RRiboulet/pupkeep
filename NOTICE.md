@@ -2,17 +2,17 @@
 
 Pupkeep plans to reuse or adapt host infrastructure from these MIT-licensed
 projects. The plan is to keep their copyright notices and licence texts beside
-any copied code, and to record the exact files and commits in this file when the
-code lands.
+any copied code, and to record the exact files and commits in this file when
+code is copied.
 
 ## Pi Pocket
 
 - Repository: <https://github.com/TannerMidd/pi-pocket>
-- Version checked: `0.26.0`
-- Licence: MIT, copyright (c) Tanner Middleton
+- Package version `0.26.0`; audited commit is two commits after the `v0.26.0` tag.
+- Licence: MIT, copyright (c) 2026 Tanner Middleton
 - Commit audited: `e984c60b4060ba5c5856a2d3413d6d6d6e0eb522`
   (`v0.26.0-2-ge984c60`, package `0.26.0`).
-- Planned reuse/adaptation: `src/server/lock.ts`, `src/server/push.ts`,
+- Audited reuse/adaptation: `src/server/lock.ts`, `src/server/push.ts`,
   `web/sw.js` and `src/launcher/access.ts` near-direct; adapt
   `src/server/auth.ts`, `src/server/config.ts`, `web/notify.js` and the
   `web/index.html` import-map/vendor pattern. The audit and deviations are in
