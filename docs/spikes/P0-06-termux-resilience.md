@@ -105,6 +105,10 @@ to open the Tailscale app before SSH was reachable.
 - If Termux is killed too often even with these settings, PLAN §6.10 moves the
   server to the VPS/Docker fallback; the phone becomes a client.
 
+After the evidence was recorded, the scratch service was stopped (`sv down` plus
+a `down` file) and the scratch boot script was removed. P1-04 owns the real
+launcher service and boot script; sshd remains the operator access path.
+
 ## What P1-04/P1-13 can rely on
 
 - `termux-services`/`runsvdir` restarts a Node child after SIGKILL; the next
