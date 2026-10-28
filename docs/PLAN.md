@@ -1433,8 +1433,10 @@ Pi Pocket style, simplified for two caregivers:
 
 ## 16. Phases and task breakdown
 
-> This is the list to convert into todos. Each task is small enough to be one
-> todo item. Dependencies are named where they matter.
+> The working view is [`docs/TODO-GUIDE.md`](TODO-GUIDE.md); the local todo
+> files live in `.pi/todos/` (ignored by git). This section is the durable
+> backlog. Each task is small enough to be one todo item. Dependencies are named
+> where they matter.
 
 ### Phase 0 — Spikes (no product code)
 

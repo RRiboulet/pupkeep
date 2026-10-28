@@ -53,6 +53,8 @@ No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
 
 - [`docs/PLAN.md`](docs/PLAN.md) — product, architecture, data model, shared
   thread, models and budget, host runbook, phases, task breakdown, risks.
+- [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) — how to pick a task, branch/PR
+  rules, definition of done, and the 59-task index.
 - [`AGENTS.md`](AGENTS.md) — instructions for coding agents working in this repo.
 - [`NOTICE.md`](NOTICE.md) — upstream projects and licences.
 

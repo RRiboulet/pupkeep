@@ -2,8 +2,9 @@
 
 ## First
 
-Read [`docs/PLAN.md`](docs/PLAN.md). It is the source of truth for product,
-architecture and the phase task breakdown. Do not build app code beyond the
+Read [`docs/PLAN.md`](docs/PLAN.md) and [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md).
+The plan is the source of truth for product and architecture; the guide explains
+how to pick a task, branch, verify and report. Do not build app code beyond the
 current approved phase.
 
 ## Shape
