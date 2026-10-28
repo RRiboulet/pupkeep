@@ -3,12 +3,13 @@
 **Task:** P0-04. **Date:** 2026-10-28. **Status:** complete for the P0-04 spike;
 integration belongs to P1-09/P1-12.
 
-**Verdict:** v1’s rule works **only if the server enforces one-at-a-time chat
-input with `whenBusy: "reject"`**. The actor resolves from the latest placed
-`app.chat` entry before the tool’s assistant entry; a second input while the
-thread is busy is rejected and adds no entry; sequential authors resolve
-correctly; a missing author falls back to the household; and a tool rerun after
-SIGKILL reads the durable actor memo.
+**Verdict:** with `whenBusy: "reject"` enforced by the server, the actor
+resolves from the latest placed `app.chat` entry before the tool’s assistant
+entry; a second input while the thread is busy is rejected and adds no entry;
+sequential authors resolve correctly; a conversation with no `app.chat` falls
+back to the household; and a tool rerun after SIGKILL reads the durable actor
+memo. The memo is an **actor cache**, not a reason to skip the care write: this
+spike did not prove care-tool replay/idempotency.
 
 ## What was tested
 
@@ -56,22 +57,28 @@ submissions, not from recency.
    layer maps `ConversationBusy` to a friendly 409 and keeps the draft. An
    omitted `whenBusy` defaults to follow-up, so the server must set it
    explicitly.
-2. **Resolve inside a `tx` read.** Read the tool task input, scan backwards from
-   the assistant entry to the latest `app.chat`, then memo an **actor object**
-   (use `prior !== undefined`, not `if (prior)`, so the household/null case is
-   not treated as absent).
-3. **Memo scope is the tool task, not the assistant entry.** The assistant entry
-   is provenance. Memos disappear when the task becomes terminal, so persist the
-   resolved actor on the domain record (`byUserId`/`byLabel`) as the durable
-   audit.
-4. **Never accept an actor from model arguments.** Derive it from the session’s
+2. **Memo is an actor cache only.** The probe returns immediately when a memo
+   exists; a real care tool must still run the domain write and be idempotent on
+   `actionId = api.taskId`. A crash between the memo commit and the domain commit
+   must not report success without the care record.
+3. **Resolve inside a `tx` read, and paginate.** Read the tool task input, scan
+   backwards from the assistant entry with `page.next` until an `app.chat` or
+   the conversation start; a single 50-entry page can miss the author after a
+   long tool chain.
+4. **Normalize the fallback to null/“Household”.** Missing/unknown `authorId`
+   must produce `byUserId: null`, `byLabel: "Household"`; never
+   `undefined` (JSON serialization drops it). Memo an actor **object** and read
+   it with `prior !== undefined`.
+5. **Memo scope is the tool task, not the assistant entry.** The assistant entry
+   is provenance. Memos are dropped when the outcome is decided/terminal, so
+   persist the resolved actor on the domain record (`byUserId`/`byLabel`) as the
+   durable audit.
+6. **Never accept an actor from model arguments.** Derive it from the session’s
    member identity and the placed input.
-5. **Fail closed for nested tools.** A `kind: "nested"` tool input has no
+7. **Fail closed for nested tools.** A `kind: "nested"` tool input has no
    assistant entry; either walk the parent task chain or return the household
    fallback. Do not throw or silently attribute to the model.
-6. **Fallback is visible.** `byUserId: null`, `byLabel: "Household"` in the UI
-   and approval cards; high-impact actions still require a human tap.
-7. **Do not enable queueing until** the run-input mapping and a changed-input
+8. **Do not enable queueing until** the run-input mapping and a changed-input
    test exist. “Latest visible entry” is not safe once inputs can be placed
    mid-run.
 
@@ -93,3 +100,8 @@ submissions, not from recency.
 - The crash test used SIGKILL, not power loss.
 - The tool returned the actor but did not create a care record; the mapping to
   `byUserId`/`byLabel` is P1-11/P2.
+- The memo path was tested with a short-circuit return; care-tool replay
+  (memo commit → domain commit crash → rerun) is **not** proven here.
+- The 50-entry scan was not paginated; P1-09 must use `page.next`.
+- Missing/`undefined` author normalization to `null` was not exercised; the
+  household test used a conversation with no `app.chat` at all.

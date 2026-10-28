@@ -38,7 +38,9 @@ $0.14 input / $0.28 output.
 | Normal | 1,200 (40/day) | 14.4M | 0.96M | **~$2.28** |
 | Heavy | 3,000 (100/day) | 60M | 3M | **~$9.24** |
 
-The heavy row is 92.4% of the $10 cap; normal use is comfortably under it.
+The rows model longer conversations than the one-line probe (which used ~13k
+*input+cache* tokens); the light row is not a prediction from that probe. The
+heavy row is 92.4% of the $10 cap; normal use is comfortably under it.
 Cache reads lower input cost, but compaction adds a summarization call and
 context growth/tool results raise it. The monthly ledger remains authoritative
 via `harness.usage()`. At 100% the UI should block paid models and **not
@@ -57,10 +59,11 @@ auto-select a free model**; the owner can raise the cap or explicitly switch.
   cannot be selected until the catalog is refreshed.
 - **Rate-limited during probe:** `openrouter/free` (429 after 5 turns). Optional,
   not a default.
-- The allowlist is built by a bounded, parallel startup probe: drop only
-  401/404/410/deprecated models; treat 429/network/offline as unknown and keep a
-  cached last-known-good allowlist. Record the result in Settings. The catalog
-  snapshot is not a promise. Probe cost is ~13k total tokens per model.
+- The allowlist is built by a bounded, parallel startup probe: one turn, ~15s
+  timeout, once per boot, cached. Drop only 401/404/410/deprecated models; treat
+  429/network/offline as unknown and keep a cached last-known-good allowlist.
+  Record the result in Settings. The catalog snapshot is not a promise. Probe
+  cost is ~13k total tokens per model.
 - Do not use the initial `minimax` product-review run as a model availability
   signal; it failed with 410 before doing any work.
 

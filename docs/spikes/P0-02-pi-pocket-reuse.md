@@ -90,7 +90,7 @@ Pi Pocket's auth is a good shape but not our model:
   sessions, but store owner/invite/session **hashes only**.
 - Keep the `SameSite=Lax` cookie, Origin check, hashed invites and one-time
   expiry. **Add** request rate limiting: Pi Pocket has no auth/HTTP rate limiter;
-  its 429s are provider-limit and webhook handling.
+  its 429s are provider-limit, webhook and artifact-save handling.
 - **Harden forwarded-header trust.** Pi Pocket's `isHttps()`/`origin()` trust
   `X-Forwarded-Proto`/`X-Forwarded-Host` from any peer. Pupkeep must trust them
   only from a loopback peer and derive origins from the active access mode.

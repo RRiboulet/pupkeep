@@ -872,10 +872,14 @@ The shared thread is the one place where attribution needs care.
 
 1. A tool reads its own `ToolTask` input, which carries the `assistant` entry
    that issued the call. It scans the conversation backwards from that entry to
-   the latest `app.chat` entry **inside a `tx` read** and stores the resolved
-   actor in the **tool task’s** durable memo; the assistant entry is provenance,
-   not the memo key. Persist the actor on the domain record too; memos disappear
-   when the task is terminal.
+   the latest `app.chat` entry **inside a `tx` read**, paginating with
+   `page.next` until found or the start. It stores the resolved actor in the
+   **tool task’s** durable memo; the assistant entry is provenance, not the memo
+   key. The memo is an actor cache only: the care write still runs and is
+   idempotent on `actionId = api.taskId`. Persist the actor on the domain record
+   too; memos are dropped when the task’s outcome is decided/terminal.
+   Missing/unknown author → `byUserId: null`, `byLabel: "Household"` (never
+   `undefined`).
 2. Because v1 rejects mid-run inputs, the latest placed `app.chat` is the input
    the run is answering. If the thread ever enables queueing, this rule is not
    safe; resolve from the run’s input submissions instead, or fall back.
@@ -1042,10 +1046,10 @@ models without a version bump. On 2026-10-28 OpenCode Go returned
 `longcat-2.5-preview-free`; OpenRouter returned 404 for the `minimax` free
 variant and 429 for `openrouter/free`. `mimo-v2.6-flash`, `beam-free` and
 `deepseek-v4.1-flash` passed a real tool-call probe. The allowlist is built by a
-**bounded, parallel startup probe**: drop only 401/404/410/deprecated models;
-treat 429/network/offline as “unknown” and keep the last-known-good cached
-allowlist instead of hiding a usable model. Record the result in the Settings
-sheet. `mimo-v2.6-flash` is the default only if it passes; otherwise the cheapest
+**bounded, parallel startup probe**: one probe turn, ~15s timeout, once per
+boot, cached. Drop only 401/404/410/deprecated models; treat 429/network/offline
+as “unknown” and keep the last-known-good cached allowlist instead of hiding a
+usable model. Record the result in the Settings sheet. `mimo-v2.6-flash` is the default only if it passes; otherwise the cheapest
 available paid fallback is used. Free models are best-effort; the probe decides,
 not the name. Evidence:
 [`docs/spikes/P0-05-models-budget.md`](spikes/P0-05-models-budget.md).
@@ -1370,8 +1374,10 @@ Pi Pocket style, simplified for two caregivers:
   specifics), and a `fed` category still tells the partner a meal was logged.
 - Budget: `harness.usage()` authoritative, derived `app.usage`, 80% warning,
   100% block, month rollover, free model.
-- Models: live tool-call probe drops 401/410/deprecated models (the
-  `minimax-m3.1-flash-free` 410 is a fixture); default availability.
+- Models: live tool-call probe drops 401/404/410/deprecated models; 429/network
+  is “unknown” with a cached last-known-good allowlist; bound each probe to one
+  turn / ~15s; the `minimax-m3.1-flash-free` 410 is a fixture; default
+  availability.
 - Agent: fake provider tool calls; actor attribution; conflict relay; approval
   path; no shell tools; system conversation has no model.
 - First-run setup: puppy profile + meal slots before G1.
@@ -1408,8 +1414,13 @@ Pi Pocket style, simplified for two caregivers:
 - Appointment A → B sees it.
 - Agent action in the shared thread → both see the card; activity attributed.
 - Both send at once: one run starts, the other gets the busy conflict; no
-  mid-run placement; the actor is the accepted speaker. Household fallback is
-  visible if the actor cannot be resolved.
+  mid-run placement; the actor is the accepted speaker.
+- More than 50 intervening entries: pagination finds the `app.chat`; missing or
+  unknown author normalizes to `byUserId: null` / `byLabel: "Household"` (never
+  `undefined`).
+- Memo is an actor cache only: a crash between memo and domain commit still
+  performs one idempotent care write; a nested tool resolves through the parent
+  chain or fails closed.
 - Reconnect after SSE drop → full snapshot, no lost state; long-poll fallback
   returns snapshots.
 - Invite on the daily Tailscale origin works; a separate test invite is used on
@@ -1495,8 +1506,9 @@ Pi Pocket style, simplified for two caregivers:
 - **P0-03:** host binds its `100.x` address; partner reaches it; no `0.0.0.0`
   fallback; cloudflared source confirmed; quick tunnel serves HTTPS; PWA/Web
   Push test passes; Serve/Funnel answer recorded.
-- **P0-04:** two authors; one input accepted, the other busy-rejected; tool
-  actor correct; memo wins on rerun; household fallback visible.
+- **P0-04:** two sequential authors; a busy input rejected with no transcript
+  entry; tool actor correct; the memo is read on rerun and the actor stays the
+  same; household fallback visible.
 - **P0-05:** live probes for the default, one free and one paid model; the
   `minimax-m3.1-flash-free` 410 is reproduced; a simulated month fits $10.
 - **P0-06:** kill/restart, Termux:Boot, wake lock, `harness.resume()`, parked
@@ -1670,7 +1682,7 @@ E2E passes; no agent tool can escape app state.
 | Phone loss/theft | Low | High | Encrypted off-device backup; restore to new phone/VPS |
 | Public quick tunnel exposes the app | Medium | High | Testing-only; owner/invite auth, rate limits, no public signup; Cloudflare Access only on a named tunnel/domain |
 | Owner link/cookie lost | Medium | High | `--reissue-owner` from physical Termux; rotate token; test at G1 |
-| Model deprecated live (catalog lags) | High | Medium | Live tool-call probe; drop 401/410; `minimax-m3.1-flash-free` is the fixture |
+| Model deprecated live (catalog lags) | High | Medium | Live tool-call probe; drop 401/404/410; 429/network unknown with cached last-known-good; `minimax-m3.1-flash-free` is the fixture |
 | Reminder task owned by a tool | Medium | High | Create via `tx.createTask` on the hidden system conversation; never `api.createTask` from a tool; test |
 | Backup omits auth | Medium | High | Bundle sqlite + config + push; restore drill at G5 |
 | Log leaks owner link/invite/key | Medium | High | Log scrub + grep test; no tokens in URLs after exchange |

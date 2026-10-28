@@ -31,8 +31,9 @@ current approved phase.
 ## Safety
 
 - Never put provider keys, owner tokens, owner links, invite codes or VAPID
-  private keys in git or in `server.log`. In boot mode the launcher writes the
-  owner link to `~/.pupkeep/owner-link.txt` (0600).
+  private keys in git or in `server.log`. The launcher writes the owner link to
+  `~/.pupkeep/owner-link.txt` (0600) only when a token is minted or reissued;
+  ordinary boots log only its path.
 - The data directory is `~/.pupkeep` (mode 0700); secrets are mode 0600 and are
   excluded from off-device database backups.
 - The agent must not receive shell, filesystem, browser or network tools.
