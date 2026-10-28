@@ -1,9 +1,10 @@
 # P0-06 — Termux resilience and supervision
 
-**Task:** P0-06. **Date:** 2026-10-28. **Status:** partial — process supervision,
-`harness.resume()`, wake-lock commands, tmux, the parked-task path and the
-Termux:Boot reboot are verified. The Termux app kill and the battery/phantom
-settings check are still pending. P0-06 is **not** checked in PLAN §16.
+**Task:** P0-06. **Date:** 2026-10-28. **Status:** complete — process supervision,
+`harness.resume()`, wake-lock commands, tmux, the parked-task path, the
+Termux:Boot reboot and a Termux app kill are recorded. The residual risks are
+the manual Tailscale start after reboot and the limits of the Android kill/OEM
+controls. P0-06 is checked in PLAN §16.
 
 ## Environment
 
@@ -31,9 +32,9 @@ settings check are still pending. P0-06 is **not** checked in PLAN §16.
 | 8 | Termux:Boot companion app | `com.termux.boot` installed; boot script in `~/.termux/boot/p0-06.sh` | **pass** |
 | 9 | Phone reboot / boot script | new boot id `cf7373f5-7f12-43d4-af54-8c607a2b3fee`; `boot.log` start 19:04:38, done 19:04:40; `sshd=13955`; service pid 13973 | **pass** |
 | 10 | `harness.resume()` after reboot | service log `start pid=13973 dbStarts=4 previousStarts=3 scheduling=running` | **pass** |
-| 11 | Kill the Termux app itself | not run yet | **pending** |
-| 12 | Battery optimisation / phantom-process / OEM settings | Android blocks `settings get` and `dumpsys` from Termux (`INTERACT_ACROSS_USERS` / `DUMP` denial); the user must check the UI | **partial (not observable)** |
-| 13 | Tailscale auto-connect after reboot | phone was offline in Tailscale after reboot until the user opened the Tailscale app | **manual start needed** |
+| 11 | Kill the Termux app itself | `am force-stop com.termux`, reopen Termux: boot id unchanged (`cf7373f5…`), no new boot log, `runsvdir` pid 7113, service pid 7117; log `dbStarts=5 previousStarts=4 scheduling=running`; sshd did **not** auto-start | **pass (service); sshd manual** |
+| 12 | Battery optimisation / phantom-process / OEM settings | user set Termux battery to **Unrestricted** and enabled Developer options → **Disable child process restrictions** (phantom-process killer); Android blocks `settings get` / `dumpsys` from Termux, so this is user-confirmed, not shell-observed | **pass (user-confirmed)** |
+| 13 | Tailscale auto-connect after reboot | phone was offline in Tailscale after reboot until the user opened the Tailscale app; after the Termux app kill it stayed online | **manual start needed after reboot** |
 
 ## What was run
 
@@ -84,18 +85,23 @@ and `harness.resume()` logged `dbStarts=4 previousStarts=3 scheduling=running`.
 The phone’s Tailscale client did **not** auto-connect after reboot; the user had
 to open the Tailscale app before SSH was reachable.
 
-## Blockers and next actions
+## Residual risks and next actions
 
-- **Kill the Termux app itself** (`am force-stop com.termux`), reopen Termux and
-  record whether `runsvdir`/`p0-06` returns. `sv-enable p0-06` should make the
-  service autostart when the service daemon starts; sshd must be started again
-  because Termux:Boot only runs on boot.
-- **Battery/phantom/OEM settings:** set Termux to unrestricted battery use and
-  check the Android 12+ developer option for the phantom-process killer. These
-  settings are not readable from Termux; record the UI state manually.
+- **Termux app kill:** the service returned via `sv-enable` and `harness.resume()`
+  after `am force-stop com.termux` and reopening Termux. sshd did not return by
+  itself; it had to be started with `sshd -p 8022`. Termux:Boot only covers a
+  reboot. A production launcher should be the supervised service; remote shell
+  access is an operator convenience, not a product path.
 - **Tailscale auto-connect:** it did not reconnect by itself after reboot. For a
   daily host, set Android’s “Always-on VPN” for Tailscale (or accept a manual
   start). This is an access-path finding for P0-03/P1-04.
+- **Wake lock:** the command exits 0 and the boot script holds it, but Android
+  does not let Termux read `dumpsys power`; the effect is not independently
+  observed. The P5-05 day-long battery/heat run remains the real check.
+- **Battery/phantom/OEM:** Termux is unrestricted and the phantom-process
+  restriction is disabled in Developer options. These are user-confirmed UI
+  settings, not shell-observed; Android may still kill the process under memory
+  pressure.
 - If Termux is killed too often even with these settings, PLAN §6.10 moves the
   server to the VPS/Docker fallback; the phone becomes a client.
 
@@ -112,6 +118,9 @@ to open the Tailscale app before SSH was reachable.
 - Termux:Boot restores the service after a reboot; the boot script started
   sshd, `runsvdir` and `p0-06`, and the service resumed the Harness. Tailscale
   needed a manual start after reboot.
-- The Termux-app kill, wake-lock effectiveness, battery optimisation and the
-  phantom-process killer are **not yet proven**; do not claim full phone
-  survival until the pending checks are run.
+- The Termux-app kill is survivable for the supervised service; sshd needs a
+  manual start, and Termux:Boot only restores on reboot. Wake-lock effect,
+  battery optimisation and the phantom-process killer are recorded from the
+  command/UI, not independently observable. **Do not claim unconditional phone
+  survival**: Android memory pressure and OEM controls can still kill the
+  process; P5-05 owns the day-long battery/heat/kill evidence.

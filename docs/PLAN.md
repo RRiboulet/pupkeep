@@ -421,6 +421,9 @@ exec "$PREFIX/bin/npm" start -- --access tailscale --data ~/.pupkeep >> ~/.pupke
 
 - Install **Termux:Boot**.
 - Battery optimization: unrestricted for Termux.
+- **Tailscale does not reconnect by itself after a reboot** (P0-06). Set
+  Android’s “Always-on VPN” for Tailscale, or start it manually before expecting
+  remote access.
 - Keep Termux in recents; do not swipe it away.
 - Recommended `termux-services`/`sv` unit (or a supervised loop) to restart the
   launcher after a crash; `exec` avoids an extra shell holding the lock.
@@ -1488,9 +1491,9 @@ Pi Pocket style, simplified for two caregivers:
       `longcat-2.5-preview-free` are 410; OpenRouter `minimax:free` is 404;
       `openrouter/free` was rate-limited. Budget simulation. Evidence:
       `docs/spikes/P0-05-models-budget.md`.
-- [ ] **P0-06** Termux resilience: wake lock, Termux:Boot, `sv`/tmux, kill/restart,
+- [x] **P0-06** Termux resilience: wake lock, Termux:Boot, `sv`/tmux, kill/restart,
       `harness.resume()`, parked-task surfacing, phantom-process killer, battery
-      settings.
+      settings. Evidence: `docs/spikes/P0-06-termux-resilience.md`.
 - [ ] **P0-07** Backup/restore: encrypted bundle `sqlite + config + push`
       (secrets excluded), owner/session hashes, VAPID, clean-host restore,
       `integrity_check`.
