@@ -40,7 +40,7 @@ not used; that remaining check keeps P0-03 open.
 | 7 | Tunnel restart changes the URL | first URL `<random-1>`, after restart `<random-2>` | **pass** |
 | 8 | PWA install and Web Push subscription | host phone Chrome opened the HTTPS page, installed it, and subscribed; server `/status`: one subscription, `endpoint` scheme `https`, `p256dh` length 87, `auth` length 22 | **pass on host phone** |
 | 9 | Partner phone reaches the host over Tailscale | Windows desktop `100.x.x.25` opened `http://100.x.x.61:8787/` and got `p0-03 scratch server` (user-confirmed); the partner phone itself has not been tested | **partial — Windows desktop** |
-| 10 | Android Tailscale app exposes Serve/Funnel | app `1.104.2`; `aapt dump strings` has `Run as exit node` / `Now running as exit node` but no Funnel or Serve feature label; tailnet reports `ExitNodeOption=false` (exit-node approval pending) | **no** |
+| 10 | Android Tailscale app exposes Serve/Funnel | app `1.104.2`; `aapt dump strings` has `Run as exit node` / `Now running as exit node` but no Funnel or Serve feature label; tailnet reports `ExitNodeOption=false`; owner confirmed the app switch is off after the test | **no** |
 
 ## Commands and evidence
 
@@ -109,14 +109,13 @@ repeat install/subscribe across a third URL.
 ## Tailscale Serve/Funnel vs exit node
 
 The Android app exposes **exit node** controls, not Serve/Funnel. The host phone
-was set to `Run as exit node`, and the app strings confirm that mode
+was set to `Run as exit node` during the test; the app strings confirm that mode
 (`Run as exit node`, `Now running as exit node`, `Stop running as exit node`).
-But the tailnet seen from the devcontainer still reports
-`ExitNode: false`, `ExitNodeOption: false` for the phone; the app says the exit
-node must be approved in the admin console before other devices can use it.
-That is a different feature from Serve/Funnel: an exit node routes internet
-traffic, while Serve/Funnel publishes a local service. The app has no Funnel or
-Serve control, so Tailscale HTTPS is not available from this host.
+The owner confirmed the app switch is **off** afterward. The tailnet seen from
+the devcontainer also reports `ExitNode: false`, `ExitNodeOption: false` for the
+phone. That is a different feature from Serve/Funnel: an exit node routes
+internet traffic, while Serve/Funnel publishes a local service. The app has no
+Funnel or Serve control, so Tailscale HTTPS is not available from this host.
 
 ## Blockers and fallback
 
@@ -136,9 +135,9 @@ Serve control, so Tailscale HTTPS is not available from this host.
   Tailscale-HTTPS alternative is not available. Tailscale stays HTTP; the quick
   tunnel stays testing-only. If a domain appears, a named tunnel is the upgrade.
 - **Exit node:** the app’s `Run as exit node` switch is not readable from
-  Termux. The tailnet reports the phone as `ExitNodeOption=false` (not
-  advertising); the owner should confirm the app switch is off after the test.
-  Exit node is not Serve/Funnel.
+  Termux, but the owner confirmed it is off after the test. The tailnet reports
+  the phone as `ExitNodeOption=false` (not advertising). Exit node is not
+  Serve/Funnel.
 - **Quick tunnel is public and temporary.** It is not a daily access path, and
   the PWA/push subscription must not be treated as stable across restarts.
 
