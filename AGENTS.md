@@ -10,6 +10,10 @@ current approved phase.
 
 - **Host:** Android phone → Termux → Node 24 → Pupkeep server → browser/PWA.
   No APK, no Android SDK, no pidabl, no embedded rootfs.
+- **Access:** Tailscale is the daily path (HTTP, no PWA/Web Push); a Cloudflare
+  quick tunnel is for HTTPS/PWA/Web Push testing only; a named tunnel waits for
+  a domain. Daily notifications: in-app, host Termux:API, and a recommended
+  per-user ntfy topic for the partner.
 - **Runtime:** Pi Durable `1.4.0` for conversations, tasks, tools, documents and
   SQLite storage. Pin exact versions.
 - **Client:** no build step; plain ES modules + Preact/htm, served by the same
@@ -17,14 +21,17 @@ current approved phase.
 - **Agent:** one shared household conversation. The agent has app tools only —
   no shell, file, web or SQL tools. Low-risk writes are direct; destructive or
   schedule-changing writes require a human confirmation.
-- **Durability:** every acknowledged action is one Pi Durable commit. One
-  process owns one SQLite file. Run `harness.resume()` on every start.
+- **Durability:** every acknowledged **care action** is one Pi Durable commit.
+  Auth/push config writes use serialized atomic JSON. One process owns one
+  SQLite file. Run `harness.resume()` on every start.
 - **Multiplayer:** one household, two caregivers, live state over SSE, and an
   explicit conflict instead of a silent overwrite.
 
 ## Safety
 
-- Never put provider keys, owner tokens or VAPID private keys in git.
+- Never put provider keys, owner tokens, owner links, invite codes or VAPID
+  private keys in git or in `server.log`. In boot mode the launcher writes the
+  owner link to `~/.pupkeep/owner-link.txt` (0600).
 - The data directory is `~/.pupkeep` (mode 0700); secrets are mode 0600 and are
   excluded from off-device database backups.
 - The agent must not receive shell, filesystem, browser or network tools.

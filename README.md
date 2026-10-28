@@ -41,9 +41,10 @@ Android phone (Termux)
 
 The host stack follows the **Pi Pocket** pattern (TannerMidd/pi-pocket):
 Termux, a launcher that chooses how devices connect, a browser UI, owner/invite
-auth, in-app notifications, and one process owning one SQLite file. PWA
-installation/Web Push is available on localhost and over an HTTPS quick tunnel
-for testing; daily partner access is Tailscale HTTP. The host infrastructure is
+auth, in-app notifications, host local notifications, a recommended ntfy bridge
+for the partner, and one process owning one SQLite file. PWA installation/Web
+Push is available on localhost and over an HTTPS quick tunnel for testing; daily
+partner access is Tailscale HTTP. The host infrastructure is
 reused or adapted from Pi Pocket under MIT, with attribution.
 
 No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
@@ -73,5 +74,7 @@ pkg install nodejs git cloudflared termux-api
 git clone <repo> ~/pupkeep
 cd ~/pupkeep && npm ci --omit=dev
 termux-wake-lock
-npm start -- --access cloudflare --data ~/.pupkeep
+npm start -- --access tailscale --data ~/.pupkeep
+# for HTTPS/PWA/push testing only:
+# npm start -- --access cloudflare --data ~/.pupkeep
 ```
