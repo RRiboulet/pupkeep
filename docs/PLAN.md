@@ -1494,9 +1494,11 @@ Pi Pocket style, simplified for two caregivers:
 - [x] **P0-06** Termux resilience: wake lock, Termux:Boot, `sv`/tmux, kill/restart,
       `harness.resume()`, parked-task surfacing, phantom-process killer, battery
       settings. Evidence: `docs/spikes/P0-06-termux-resilience.md`.
-- [ ] **P0-07** Backup/restore: encrypted bundle `sqlite + config + push`
+- [x] **P0-07** Backup/restore: encrypted bundle `sqlite + config + push`
       (secrets excluded), owner/session hashes, VAPID, clean-host restore,
-      `integrity_check`.
+      `integrity_check`. Evidence:
+      `docs/spikes/P0-07-encrypted-backup-restore.md` (in-progress generation
+      restore remains P1-07/P5-02).
 - [ ] **P0-08** Daily notification path: host Termux:API local notification;
       **recommended** per-user ntfy topic for the partner; **category-only**
       payload; confirm it works while the app is served over HTTP (ntfy uses its
