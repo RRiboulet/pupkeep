@@ -32,17 +32,19 @@ Android phone (Termux)
       ├─ Pupkeep server (HTTP, SSE, PWA)
       ├─ one shared household agent conversation
       ├─ durable reminder tasks
-      └─ Web Push
+      └─ in-app notifications + optional Web Push over HTTPS
            ▲
-           │ localhost / Cloudflare Tunnel
-     Chrome PWA on both caregivers' phones
+           │ host: localhost · partner: Tailscale (daily)
+           │ testing: Cloudflare quick tunnel (HTTPS)
+     Chrome on both caregivers' phones
 ```
 
 The host stack follows the **Pi Pocket** pattern (TannerMidd/pi-pocket):
-Termux, a launcher that chooses how devices connect, a browser UI, PWA push,
-owner/invite auth, and one process owning one SQLite file. The Puppy domain is
-new; the host infrastructure is reused or adapted from Pi Pocket under MIT,
-with attribution.
+Termux, a launcher that chooses how devices connect, a browser UI, owner/invite
+auth, in-app notifications, and one process owning one SQLite file. PWA
+installation/Web Push is available on localhost and over an HTTPS quick tunnel
+for testing; daily partner access is Tailscale HTTP. The host infrastructure is
+reused or adapted from Pi Pocket under MIT, with attribution.
 
 No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
 
