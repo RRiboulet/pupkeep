@@ -1465,9 +1465,11 @@ Pi Pocket style, simplified for two caregivers:
 
 ### Phase 0 — Spikes (no product code)
 
-- [ ] **P0-01** Termux runtime: Node 24/26, TypeScript type-stripping for the
+- [x] **P0-01** Termux runtime: Node 24/26, TypeScript type-stripping for the
       server, `node:sqlite`, Pi Durable `1.4.0`, `PRAGMA synchronous=FULL`,
-      `Intl` IANA timezone data, one-process lock.
+      `Intl` IANA timezone data, one-process lock. Evidence:
+      `docs/spikes/P0-01-termux-runtime.md`; the application-level lock is
+      P0-06/P1-07.
 - [x] **P0-02** Pi Pocket host review: exact MIT modules, commit hashes and
       deviations are in `NOTICE.md` and
       `docs/spikes/P0-02-pi-pocket-reuse.md`.
