@@ -1476,7 +1476,9 @@ Pi Pocket style, simplified for two caregivers:
 - [ ] **P0-03** Access without a domain: Tailscale daily access; Cloudflare
       quick tunnel for HTTPS/PWA/Web Push testing; Tailscale Serve/Funnel check;
       confirm the Termux `cloudflared` package source or the arm64 binary
-      fallback; fail-closed bind.
+      fallback; fail-closed bind. Partial evidence:
+      `docs/spikes/P0-03-no-domain-access.md` (host-side checks pass; the
+      partner-phone reach check is still pending).
 - [x] **P0-04** Shared-thread attribution: two sequential authors, one
       busy-rejected input with no transcript entry, tool actor resolution, memo
       read after SIGKILL, household fallback. Evidence:
