@@ -195,6 +195,9 @@ export class ThreadBus {
 
       // A poll evicted during subscribe was already settled and removed;
       // pushing it afterwards would leak, so only a live waiter is tracked.
+      // The eviction's settle ran while `unsubscribe` was still the no-op
+      // placeholder, so remove the connection it just created as well.
+      if (waiter.finished) unsubscribe();
       if (!waiter.finished) {
         const arm = this.#options.setTimer
           ?? ((callback: () => void, ms: number) => {
