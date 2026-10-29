@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createLauncher, type LauncherDeps } from "../src/launcher/main.ts";
 import type { ChildLike } from "../src/launcher/supervisor.ts";
 import { parseOptions } from "../src/launcher/options.ts";
+import { acquireLock, SERVER_LOCK_FILE } from "../src/server/lock.ts";
 
 class FakeChild extends EventEmitter implements ChildLike {
   readonly pid = 9001;
@@ -80,6 +81,33 @@ test("a second instance is refused with the holder's pid", async () => {
   assert.match(result.message ?? "", /pid 4321/);
 });
 
+test("a detached server left by a dead launcher is refused before a second one is spawned", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pupkeep-orphan-"));
+  const serverLock = await acquireLock(dir, process.pid, new Date(), SERVER_LOCK_FILE);
+  assert.ok(serverLock.ok);
+  try {
+    let spawned = false;
+    const launcher = createLauncher(
+      options(["--access", "local", "--data", dir]),
+      deps({
+        ensureDataDir: async (path) => ({ path, fixedMode: false }),
+        spawnChild: () => {
+          spawned = true;
+          return new FakeChild();
+        },
+      }),
+    );
+    const result = await launcher.start();
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 3);
+    assert.match(result.message ?? "", new RegExp(`pid ${process.pid}`));
+    assert.equal(spawned, false, "the orphan must be reported before another writer is started");
+  } finally {
+    await serverLock.lock.release();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("without the server program the launcher says which task owns it and releases the lock", async () => {
   let released = false;
   const launcher = createLauncher(
@@ -118,7 +146,11 @@ test("with a server program the child is spawned with the resolved bind address"
   assert.deepEqual(spawned[0], {
     command: "node",
     args: ["server.ts"],
-    env: { PUPKEEP_BIND_HOST: "100.90.202.61", PUPKEEP_PORT: "9000" },
+    env: {
+      PUPKEEP_BIND_HOST: "100.90.202.61",
+      PUPKEEP_PORT: "9000",
+      PUPKEEP_DATA_DIR: "/home/owner/.pupkeep",
+    },
   });
   await launcher.stop();
 });

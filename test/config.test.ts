@@ -61,6 +61,7 @@ test("a data path that is a file is refused with a sentence", async () => {
 
 test("the four files live where the plan says, all inside the data dir", async () => {
   const paths = dataPaths("/home/owner/.pupkeep");
+  assert.equal(paths.database, "/home/owner/.pupkeep/pupkeep.sqlite");
   assert.equal(paths.config, "/home/owner/.pupkeep/config.json");
   assert.equal(paths.secrets, "/home/owner/.pupkeep/secrets.json");
   assert.equal(paths.push, "/home/owner/.pupkeep/push.json");

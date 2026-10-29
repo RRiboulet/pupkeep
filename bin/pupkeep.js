@@ -2,6 +2,7 @@
 // `npm start`. Parses arguments, then hands the launch to the launcher module.
 // The CLI stays tiny on purpose: everything worth testing lives in src/launcher.
 
+import { fileURLToPath } from "node:url";
 import { parseOptions, USAGE } from "../src/launcher/options.ts";
 import { createLauncher } from "../src/launcher/main.ts";
 
@@ -19,8 +20,13 @@ if (options.help) {
 }
 
 const launcher = createLauncher(options, {
-  // The server program arrives with P1-07. Until then this is undefined and the
-  // launcher reports it rather than crash-looping on a missing file.
+  // The server is a separate process on purpose: the launcher can then restart
+  // a failed harness without touching the tunnel, and the server's own lock
+  // (`server.pid`) survives a launcher crash. Same Node binary, no shell.
+  serverEntry: {
+    command: process.execPath,
+    args: [fileURLToPath(new URL("./server.js", import.meta.url))],
+  },
   termux: process.env.PUPKEEP_TERMUX === "1",
 });
 

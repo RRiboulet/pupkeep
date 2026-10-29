@@ -140,7 +140,7 @@ buying one. The decision is:
 | Termux `cloudflared` package source | **Answered (P0-03): no package; arm64 binary needs `termux-chroot` + `SSL_CERT_FILE`** | P1-04: wrapper, or run the tunnel on the VPS; do not spawn the raw binary |
 | Default model live availability | **Answered (P0-05): `mimo-v2.6-flash` passes; `deepseek-v4.1-flash` paid fallback** | P1-03/P4-08: re-probe with the app schema and startup cache |
 | ntfy acceptance | **Partially answered (P0-08): host local + category-only publish pass; the partner's iPhone is P0-10** | **P0-10**: if the partner rejects ntfy or locked-phone latency fails, in-app only or buy a domain; never silently drop notifications |
-| Remote backup target | **Open: P0-07 drill used `scp`; rclone target not configured** | **P1-07** owns the job, the `rclone` remote and 14-day retention; local backup always; warning until configured |
+| Remote backup target | **Job landed (P1-07); target still open:** `scripts/backup.ts` takes an operator-supplied `--remote` and has no default; local backup always; warning until configured | **P5-02** chooses and drills the target |
 | App name/branding | Working title | Not blocking; `Pupkeep` until renamed |
 | Named Cloudflare Tunnel | Deferred | Only after a domain exists |
 
@@ -164,15 +164,16 @@ are decided here and nowhere else.
 | Access | **GO** | P0-03 | `cloudflared` runs only through the §6.7 wrapper, and the launcher supervises that, not a bare spawn |
 | Notifications | **GO, conditional on P0-10** | P0-08, P0-10 | The threshold that would reverse this row is set at **15 minutes** (P0-10 N2); §6.10 does not quantify it |
 | Models and budget | **GO** | P0-05 | The heavy simulation is 92% of the $10 cap; `harness.usage()` stays authoritative over any estimate |
-| Backup and restore | **GO; the job is unbuilt** | P0-07 | The *job* — `rclone` remote, 14-day retention, passphrase rotation, passphrase off the backup host — is **P1-07**'s, not a Phase 0 or drill task |
+| Backup and restore | **GO; the job is built (P1-07), the drill is P5-02** | P0-07, P1-07 | Retention, rotation and the passphrase rule are implemented; the `rclone` target and the clean-host drill remain P5-02's |
 | Supervision | **GO; two caveats carried** | P0-06 | `sshd` must start on demand with the tailnet address re-resolved (P1-04), and the wake-lock effect is unobservable (P5-05) |
 
 **What reverses this.** Five of the six areas reverse under §6.10's stop rules;
 that section owns them and this record does not restate them. Two triggers are
 new here:
 
-- **Backup:** a restore that fails on the phone is a no-go until fixed. The
-  forward test is the built job passing P5-02's drill.
+- **Backup:** a restore that fails on the phone is a no-go until fixed. P1-07
+  built the job and verified a restore of an interrupted generation; the
+  forward test is still P5-02's drill on a clean host.
 - **Notifications:** locked-phone latency above **15 minutes** (P0-10 N2). If it
   fires, the options are in-app only, a domain plus Web Push, or the host moving
   to a VPS (§12.5). "In-app only" settles the *promise* and leaves the
@@ -212,9 +213,9 @@ runbook.
 
 **Not decided here, and who revisits this.** The partner's acceptance (P0-10 —
 it amends the Access and Notifications rows in place when it runs); the `rclone`
-target, retention and passphrase rotation (P1-07); the app name; a named tunnel
-or domain (deferred until a domain exists). A reversal re-records the verdict
-**here**, not in a spike note.
+target and the P5-02 drill (retention and rotation are decided in §7.5 and
+implemented by P1-07); the app name; a named tunnel or domain (deferred until a
+domain exists). A reversal re-records the verdict **here**, not in a spike note.
 
 ---
 
@@ -253,10 +254,15 @@ or domain (deferred until a domain exists). A reversal re-records the verdict
 
 Pi Durable explicitly has no cross-process locking. Pupkeep enforces:
 
-- one server process per data directory (a pid lock, adapted from Pi Pocket).
-  **P1-05 owns `src/server/lock.ts`; P1-04 calls it** — this is the single
-  statement of that ownership, and other documents point here rather than
-  repeating it;
+- one server process per data directory: **two pid locks, adapted from Pi
+  Pocket.** The launcher takes `launcher.pid`; the server takes `server.pid`
+  itself at open. The second is not redundant: a SIGKILLed launcher can leave
+  its detached server alive, and a new launcher would clear the dead launcher
+  lock and spawn a second writer. The server's own lock closes that hole, and
+  the launcher also refuses to start when it sees a live `server.pid`.
+  **P1-05 owns `src/server/lock.ts`; P1-04 calls it; P1-07's server takes
+  `server.pid`** — this is the single statement of that ownership, and other
+  documents point here rather than repeating it;
 - one SQLite file;
 - one Harness;
 - no replicas, no serverless functions, no multi-instance deployment.
@@ -442,7 +448,7 @@ not provide `termux-notification` or boot startup.
 
 ```bash
 pkg update && pkg upgrade
-pkg install nodejs git termux-api sqlite rclone termux-services tmux
+pkg install nodejs git termux-api sqlite rclone age expect tar termux-services tmux
 # cloudflared: the Termux package does NOT exist (P0-03). The arm64 binary in
 # ~/.pupkeep/bin only runs under the wrapper in §6.7 — never spawn it directly.
 termux-setup-storage
@@ -460,8 +466,9 @@ server, Pi Durable and Pi AI only. The coding agent lives in the devcontainer.
 Preact/htm are vendored browser files, not a server runtime dependency; there is
 no build step on the phone.
 
-Backups use `sqlite3 .backup` when the `sqlite` package is available, otherwise
-the app’s `node:sqlite` backup command. `rclone` is optional but recommended for
+Backups use the app’s `node:sqlite` online backup, then `tar`, `age` (passphrase
+encryption) and `expect` (to answer age’s terminal prompt without putting the
+passphrase on a command line). `rclone` is optional but recommended for
 the encrypted off-device copy. `termux-services`/`sv` is recommended for
 restarting the launcher; the app’s pid lock prevents a second server.
 
@@ -674,7 +681,10 @@ Stop rules:
   `PRAGMA synchronous` (expect `2`) in a test. `busy_timeout` already defaults
   to 5000 in the Node adapter; set it explicitly anyway.
 - `PRAGMA journal_mode = WAL`, `PRAGMA foreign_keys = ON`.
-- One process; one Pi Durable storage adapter; no second writer.
+- One process; one Pi Durable storage adapter; no second writer. The server
+  takes `server.pid` at open as well as the launcher's lock (§3.2). A backup job
+  may open the database read-only for SQLite's online copy, but it never writes
+  the database or the three JSON files; a restore refuses both pid locks.
 - `config.json` is the **authority for auth identities and roles**. The
   `app.household` document carries display profiles only; boot reconciliation
   may create a missing profile from `config.json`, but must **never** create
@@ -767,29 +777,43 @@ outside this commit path; they are not care state.
 
 Procedure:
 
-- Nightly SQLite backup via the `sqlite3` CLI (with `busy_timeout`) or the
-  `node:sqlite` backup command; `PRAGMA integrity_check` before encryption.
+- Nightly SQLite backup via the `node:sqlite` backup command in a process
+  separate from the server; `PRAGMA integrity_check` on the copy.
 - Archive sqlite + config + push, encrypt with a passphrase (age or rclone
-  crypt), copy off-device via `rclone`; retention 14 days.
+  crypt), copy off-device via `rclone`; retention 14 days, **never deleting the
+  newest archive** so a host that was off for a month keeps its only copy.
 - **The passphrase lives off the backup host** — not beside the archive and not
   with the copy target's credentials. This is the strong form; §14.4 and
   `AGENTS.md` quote it rather than paraphrase it. P0-07's drill put the
   passphrase on the same machine and records that as a drill violation, not a
-  pattern.
-- **P1-07 owns the backup job** (`scripts/backup.ts`), including the `rclone`
-  remote configuration and retention enforcement, plus passphrase recovery and
-  rotation. P5-02 is the *drill* that exercises that job — it does not build it.
+  pattern. The job reads it from `PUPKEEP_BACKUP_PASSPHRASE` or an explicit
+  `--passphrase-file` outside `<data>` and `<data>/backups`; it never writes it.
+  An unattended scheduled run therefore needs an external source for that
+  variable (a vault read or another host); there is deliberately no on-host
+  default that would put the key beside the archive. The job enforces the data
+  and backup directories; keeping the file away from the rclone config (the copy
+  target's credentials) is the operator's placement rule, because the job cannot
+  know where rclone keeps its config.
+- **P1-07 owns the backup job** (`scripts/backup.ts`, `scripts/restore.ts`):
+  the job takes an operator-supplied `--remote`, enforces 14-day retention,
+  verifies the encrypted archive by decrypting it, rotates the passphrase across
+  the retained local+remote set, and writes `backups/status.json` for the app
+  warning. P5-02 is the *drill* that exercises that job — it does not build it.
 - Backup the DB while the server is running with a child process and a busy
   timeout; do not copy `-wal`/`-shm` by hand.
 - A live `.backup` is a consistent snapshot but can lag the newest commit
-  (P0-07). Verify a post-backup copy with `integrity_check` and the expected
-  newest record, not only the command's exit code.
+  (P0-07). The job decrypts the archive after writing it and checks
+  `integrity_check` plus `pi_durable_metadata.next_seq` against the source's
+  watermark at job start, not only the command's exit code. A commit that lands
+  during the copy may still be absent; that is a snapshot, not corruption.
 - Restore with the server **stopped**: remove `pupkeep.sqlite-wal`/`-shm`,
   restore the bundle, verify `integrity_check`, start, confirm auth, VAPID,
   open walk, transcript and reminder tasks.
 - `config.json`/`push.json` writes are serialized and fsynced; a crash during
   onboarding must not lock the owner out.
-- A failed backup is a visible app warning, not a silent log line.
+- A failed backup is a visible app warning, not a silent log line: the job
+  exits non-zero, logs a scrubbed line, and writes `backups/status.json`; P4-05's
+  notification centre reads that file.
 - Restore drill on a clean Termux install and the Docker/VPS fallback is a
   release gate.
 
@@ -1791,7 +1815,7 @@ that the partner is reached out-of-app is gated on P0-10.
       profiles, so a removed caregiver would otherwise keep receiving
       notifications; and every config read-modify-write goes through
       `JsonFileStore.update`, never a second write path.
-- [ ] **P1-07** Harness: exact open sequence
+- [x] **P1-07** Harness: exact open sequence
       (`openNodeSqliteDatabase` → `PRAGMA synchronous=FULL` →
       `SqliteStorage.open({prefix:"pi_"})` → `Harness.open`), `pi_` docs,
       `harness.resume()` on start, `harness.closed` failed-exit, close timeout,
@@ -1803,7 +1827,39 @@ that the partner is reached out-of-app is gated on P0-10.
       job must not write these files while the server runs. **Also owns the backup job** (`scripts/backup.ts`,
       `scripts/restore.ts`): the `rclone` remote, 14-day retention enforcement,
       and passphrase recovery/rotation, with the passphrase kept off the backup
-      host (§7.5). P5-02 only drills it.
+      host (§7.5). P5-02 only drills it. **Landed:** `src/server/harness.ts` is
+      the one open sequence — adapter (WAL + NORMAL), then explicit
+      `busy_timeout = 5000`, `synchronous = FULL`, `foreign_keys = ON`, an
+      assertion that `synchronous` reads 2 and `journal_mode` is `wal`, then
+      `SqliteStorage.open({ prefix: "pi_" })` and `Harness.open`; the pragmas are
+      reapplied and re-asserted on every open. `src/server/app.ts` and
+      `bin/server.js` are the supervised server: it takes its own `server.pid`
+      at open (the P1-05 carry-over; the launcher also refuses a live
+      `server.pid`, so a detached child of a SIGKILLed launcher cannot become a
+      second writer), calls `harness.resume()`, surfaces
+      `task_parked`/`task_faulted` through `onReport` plus a boot-time
+      `inspect()` for tasks parked by an earlier process, exposes `retryTask`,
+      and maps `harness.closed` reason `failed` to exit 1 after a 2 s close cap.
+      The listener is a scaffold: `/healthz` answers and everything else is 503
+      until P1-09/P1-10. Backup: `scripts/backup.ts` does the online SQLite copy
+      in a process separate from the server, verifies the encrypted archive by
+      decrypting it (`integrity_check` plus the `pi_durable_metadata.next_seq`
+      watermark), uploads via an operator-supplied `rclone` remote, enforces
+      14-day retention without deleting the newest archive, writes
+      `backups/status.json` for the app warning, and rotates the passphrase
+      across retained local+remote archives; `scripts/restore.ts` refuses a live
+      launcher/server lock, removes stale WAL/SHM, moves the old state aside
+      behind `--force`, and leaves `secrets.json` alone. The passphrase comes
+      from `PUPKEEP_BACKUP_PASSPHRASE` or a `--passphrase-file` outside the data
+      and backup directories; an unattended scheduled run needs an external
+      source for it, because the job deliberately has no on-host default.
+      **Verified:** 191 tests (32 new), typecheck clean; a real SIGKILLed child
+      reopens its committed document; a restored in-progress `pi.generation`
+      completes after `resume()` (closing P0-07's limitation); real `age` +
+      `expect` encrypt/decrypt. **Not verified:** the `rclone` target is not
+      configured in this environment (upload, retention and rotation are tested
+      with a fake runner), and power-loss / clean-Termux restore stay
+      P5-01/P5-02.
 - [ ] **P1-08** Session docs: `app.household`, `app.puppy`, `app.activity`,
       `app.commands`, with initial values, `schemaVersion` migration policy,
       `checkpointWhen`. Consumes P1-05's reconciliation plan (which now carries a
@@ -1980,8 +2036,9 @@ These are intentionally not in v1 unless a Phase 0 spike changes the decision.
 - **Queued multi-user messages** — v1 rejects a second message while the agent is
   busy; queueing is deferred until run-input attribution is proven.
 - **Remote backup target** — must be configured as an rclone remote (S3/R2/
-  WebDAV/Drive); there is no default provider. Local backups always run, and the
-  app shows a persistent warning until an off-device target is configured.
+  WebDAV/Drive); there is no default provider. The P1-07 job always writes a
+  local encrypted archive and warns until a target is set; it records the result
+  in `backups/status.json`, and P4-05 shows the persistent warning.
 - **App name/branding** — Pupkeep is a working title.
 - **Branch model** — `main` + short-lived feature branches for now; revisit
   `dev`/`main` if release cadence needs it.

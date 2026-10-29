@@ -24,6 +24,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "test", "bin"],
+  "include": ["src", "test", "bin", "scripts"],
   "exclude": ["node_modules", "web"]
 }
