@@ -318,7 +318,8 @@ pupkeep/
 │   ├── postCreate.sh
 │   └── pi/
 ├── .pi/
-│   └── settings.json          # shared my-agent-setup package pin
+│   └── todos/                 # local task files (gitignored); no package pin here —
+│                              #   see README "Development tooling" for why
 ├── bin/
 │   └── pupkeep.js             # launcher: access, server, tunnel, QR
 ├── src/
@@ -383,9 +384,11 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
 - `cloudflared` installed in the image or `postCreate` (amd64 build for the
   devcontainer; the phone uses Termux’s package).
 - **pi coding agent `1.4.0`**, pin exact.
-- `.pi/settings.json` pins the shared package
-  `git:github.com/RRiboulet/my-agent-setup@v1.9.0` (or the tag current at build
-  time). Bump pi and the package together.
+- The shared package (`my-agent-setup`) is **not** declared in this repo's
+  `.pi/settings.json`: when pupkeep sits inside a workspace that already loads
+  those extensions, a second declaration loads every extension twice and
+  subagents fail at startup on a duplicate flag. A standalone clone may add it to
+  its own local settings; bump pi and that package together when it does.
 - Persistent `pi-config` volume at `/home/vscode/.pi`.
 - Optional Docker-in-Docker only for testing the VPS fallback. Not required for
   the phone host.
@@ -1149,7 +1152,13 @@ coding agent's tool schema; P1-03/P4-08 must repeat them with the app schema.
 | `openrouter/free` | openrouter | $0 | $0 | free router; rate-limited during the probe; optional |
 
 Every model must pass a **live tool-calling probe** before it appears in the
-picker. The table is a catalog snapshot, not a promise: providers deprecate
+picker: `status: "ok"` is not enough, the model must actually emit the probe tool
+call. The probe records one of `ok`, `deprecated`, `not_found`, `unauthorized`,
+`rate_limited`, `network`, `timeout` per model. **Timeouts and aborts are resolved
+messages in Pi AI, not exceptions** — adapters set `stopReason: "aborted"` or
+`"error"` and resolve — so a probe that only inspects thrown errors records a hung
+provider as healthy and a 410-dead model as alive. P1-03's implementation maps
+from the message; keep it that way. The table is a catalog snapshot, not a promise: providers deprecate
 models without a version bump. On 2026-10-28 OpenCode Go returned
 `410 ModelDeprecated` for `minimax-m3.1-flash-free` **and**
 `longcat-2.5-preview-free`; OpenRouter returned 404 for the `minimax` free
@@ -1722,7 +1731,10 @@ that the partner is reached out-of-app is gated on P0-10.
       when sshd starts before Tailscale — P0-06).
 - [ ] **P1-05** Data dir/config: `~/.pupkeep`, `config.json`, `secrets.json`,
       `push.json`, mode `0700/0600`, serialized per-file writes, log scrub,
-      logging, one-process pid lock (P0-01 deferred; P1-04 calls it).
+      logging, one-process pid lock (P0-01 deferred; P1-04 calls it). **Owns the
+      log scrub**, which should absorb P1-03's `redactDetail` so every path gets
+      one implementation. Also owns the serialized write of the model-probe cache
+      (`models.json`), whose reader is P4-08.
 - [ ] **P1-06** Auth: owner token hash, **owner reissue/rotate**, one-time
       hashed invite, hashed sessions, cookie, owner/member roles, authz matrix,
       remove member + purge sessions, rate limit, per-origin cookies.
@@ -1819,7 +1831,11 @@ process kill; both clients see the same state; the partner notification
 - [ ] **P4-08** Budget with `harness.usage()` authoritative + model picker +
       provider keys + usage UI. Re-probe the allowlist with the **app schema**
       (P0-05's result shape) rather than trusting the spike's catalog probe, and
-      show the last probe result in Settings.
+      show the last probe result in Settings. Supplies the `Models` collection to
+      `createPiAiProbeCall(models)` — credentials come from `secrets.json` via
+      P1-05, never the environment — and reads/writes the cache P1-05 owns. Probe
+      spend is **not** in `harness.usage()`; record it in the ledger or state the
+      exception.
 - [ ] **P4-09** Tailscale runbook for daily access; ntfy onboarding; Cloudflare
       quick-tunnel runbook for testing; PWA install/push test; named tunnel
       deferred until a domain exists.

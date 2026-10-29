@@ -78,11 +78,14 @@ carry a `.gitkeep` and nothing else — no `android/`, no rootfs, no Gradle.
 
 ## Development tooling
 
-Agents work in this repository through the shared package pinned in
-[`.pi/settings.json`](.pi/settings.json):
-`git:github.com/RRiboulet/my-agent-setup@v1.9.0`, which targets pi `1.4.0` — the
-same pi version the plan pins for the runtime. Pi loads project packages only
-after project trust is granted.
+**No pi package is declared here on purpose.** This repository usually lives
+inside a workspace that already loads the shared `my-agent-setup` extensions, and
+declaring the same package again makes every extension load twice — the first
+version of this repo did, and subagents launched in this directory failed at
+startup with `Flag "--attach-subagent" conflicts with …`. A standalone clone can
+add the package to its own local settings; the repo does not force it. The pi
+runtime the plan pins is `1.4.0`, enforced by the devcontainer (P1-02) rather
+than by a file here.
 
 **The development agent is not the product agent, and they must never be
 confused.** The pi coding agent used to build this repo has shell, file and web
@@ -110,19 +113,7 @@ npm start              # the launcher — not implemented yet (P1-04)
 no build step either: `web/vendor/` holds the pinned Preact/htm ES modules,
 checked against `NOTICE.md` by `test/vendor.test.ts`.
 
-## Planned commands
-
-These are the commands the finished repo will expose. `npm ci`, `npm test` and
-`npm run typecheck` already work; `npm start` is the launcher and arrives with
-P1-04.
-
-```bash
-npm ci
-node --test
-npm start -- --access local
-```
-
-On the phone:
+## On the phone
 
 ```bash
 pkg install nodejs git termux-api sqlite rclone termux-services tmux

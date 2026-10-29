@@ -3,16 +3,25 @@
 // `minimax-m3.1-flash-free` was still listed after it started returning 410.
 //
 // Two halves, deliberately separated so the interesting half is testable offline:
-//   * `runProbes()` decides what a result *means* (status, tool call, latency) and
+//   * `runProbe()` decides what a result *means* (status, tool call, latency) and
 //     takes an injected `ProbeCall`, so the suite runs with no network and no keys.
-//   * `createPiAiProbeCall()` is the only code that talks to a provider.
+//   * `createPiAiProbeCall(models)` is the only code that talks to a provider. The
+//     caller owns the `Models` collection, and therefore credentials and catalog:
+//     Pupkeep keeps keys in `~/.pupkeep/secrets.json` (P1-05), never in the
+//     environment, so a default that read `process.env` would be the wrong seam.
 //
-// It uses the modern pi-ai surface (`builtinModels()` + `Models.completeSimple`),
-// not the deprecated `compat` shim, so P4-08 does not have to rewrite it.
+// IMPORTANT — how pi-ai reports failure. `Models.completeSimple()` does not reject
+// on an HTTP error or an abort; every adapter catches, records `stopReason`
+// (`"error"` or `"aborted"`) plus `errorMessage`, and *resolves* the message. So a
+// probe that only inspects thrown errors records a hung provider as `ok` and a
+// 410-dead model as `ok` — both were true of the first version of this file, and
+// the tests agreed with it because they modelled a rejection contract the runtime
+// never exhibits. Map from the message, and treat the `catch` as a fallback for
+// errors thrown before any message exists.
 
 import type { Api, AssistantMessage, Context, Model, Tool } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import type { Models } from "@earendil-works/pi-ai";
 
 /** Statuses recorded per model. Only the dropping ones may remove a model. */
 export type ProbeStatus =
@@ -43,7 +52,7 @@ export interface ProbeResult {
   latencyMs: number;
   usage?: ProbeUsage;
   checkedAt: string;
-  /** Redacted, bounded error text. Never a key, never a full URL with a query. */
+  /** Redacted, bounded text from the provider. Never a key, never a full URL. */
   detail?: string;
 }
 
@@ -91,16 +100,47 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_MAX_TOKENS = 64;
 
-/** Map an HTTP-ish failure to a status. Anything unrecognised is `network`. */
+/**
+ * Map a provider failure to a status. Only `deprecated`, `not_found` and
+ * `unauthorized` remove a model; everything unrecognised is `network`, which is
+ * "unknown" and keeps the last-known-good entry.
+ */
 export function statusFromError(error: unknown): ProbeStatus {
   if (isAbort(error)) return "timeout";
+
   const status = httpStatus(error);
+  if (status !== undefined) return fromCode(status);
+
+  // Provider adapters that report the code only in text. Kept narrow on purpose:
+  // a bare "\b410\b" matches model ids (`mimo-v4.1-410`) and URL paths
+  // (`/v1/401`), which would silently drop the wrong model.
+  const text = messageOf(error);
+  if (!text) return "network";
+
+  // Pi AI formats a provider failure as `${status}: ${body}` (see
+  // `formatProviderError` in each adapter), so a leading code is the common case.
+  const leading = /^\s*(?:error[: ]\s*)?(?:http\s+|status\s*)?(\d{3})\b/i.exec(text);
+  if (leading) return fromCode(Number(leading[1]));
+
+  if (/\b(?:model\s*deprecated|model_deprecated|410\s+gone)\b/i.test(text)) return "deprecated";
+  if (/\b(?:too\s*many\s*requests|rate[\s-]?limit(?:ed)?)\b/i.test(text)) return "rate_limited";
+
+  const coded = /\b(?:http|status(?:\s*code)?|error\s*code)\s*[:=]?\s*(4\d\d|5\d\d)\b/i.exec(text);
+  if (coded) return fromCode(Number(coded[1]));
+  return "network";
+}
+
+function fromCode(status: number): ProbeStatus {
   if (status === 410) return "deprecated";
   if (status === 404) return "not_found";
   if (status === 401 || status === 403) return "unauthorized";
   if (status === 429) return "rate_limited";
-  if (status !== undefined && status >= 500) return "network";
   return "network";
+}
+
+function messageOf(error: unknown): string | undefined {
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === "string" ? message : undefined;
 }
 
 function isAbort(error: unknown): boolean {
@@ -113,13 +153,6 @@ function httpStatus(error: unknown): number | undefined {
   if (typeof direct === "number") return direct;
   const nested = (error as { response?: { status?: unknown } } | null)?.response?.status;
   if (typeof nested === "number") return nested;
-  // Providers are inconsistent; fall back to the message, which is the only
-  // signal pi-ai surfaces for some adapters ("410 ModelDeprecated", "429 Too Many").
-  const message = (error as { message?: unknown } | null)?.message;
-  if (typeof message === "string") {
-    const match = /\b(4\d\d|5\d\d)\b/.exec(message);
-    if (match) return Number(match[1]);
-  }
   return undefined;
 }
 
@@ -154,6 +187,30 @@ export function probesToolCall(message: AssistantMessage | undefined): boolean {
   return false;
 }
 
+/**
+ * The status of a *resolved* message — which is how pi-ai reports failure.
+ * `aborted` is our own timeout; `error` carries the provider's code in
+ * `errorMessage`; anything else completed and is `ok` as far as reachability
+ * goes (whether it could call the tool is a separate field, gated by the
+ * allowlist).
+ */
+export function statusFromMessage(message: AssistantMessage): ProbeStatus {
+  if (message.stopReason === "aborted") return "timeout";
+  if (message.stopReason === "error") {
+    const detail = message.errorMessage ?? "";
+    return detail ? statusFromError(new Error(detail)) : "network";
+  }
+  return "ok";
+}
+
+function timeoutError(timeoutMs: number): Error {
+  // Named, so a caller that inspects the reason sees a timeout rather than a
+  // generic abort. (fetch would reject with this value verbatim.)
+  const error = new Error(`probe timed out after ${timeoutMs} ms`);
+  error.name = "TimeoutError";
+  return error;
+}
+
 export async function runProbe(
   target: ProbeTarget,
   call: ProbeCall,
@@ -163,15 +220,6 @@ export async function runProbe(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const started = now();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("probe timeout")), timeoutMs);
-  timer.unref?.();
-
-  const context: Context = {
-    systemPrompt:
-      "You are answering a capability check. Do exactly what the user asks and nothing else.",
-    messages: [{ role: "user", content: PROBE_PROMPT, timestamp: started }],
-    tools: [PROBE_TOOL],
-  };
 
   const base = {
     id: `${target.provider}/${target.model}`,
@@ -180,26 +228,49 @@ export async function runProbe(
     checkedAt: new Date(started).toISOString(),
   };
 
+  const context: Context = {
+    systemPrompt:
+      "You are answering a capability check. Do exactly what the user asks and nothing else.",
+    messages: [{ role: "user", content: PROBE_PROMPT, timestamp: started }],
+    tools: [PROBE_TOOL],
+  };
+
+  // The bound is structural: even a provider adapter that ignores the signal and
+  // never settles loses the race. The timer is not unref'd — while a probe is in
+  // flight the process should stay alive to record its result, and `finally`
+  // clears it either way.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = timeoutError(timeoutMs);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+
   try {
-    const message = await call(target, context, controller.signal);
+    const message = await Promise.race([call(target, context, controller.signal), deadline]);
     return {
       ...base,
-      status: message.stopReason === "error" ? "network" : "ok",
+      status: statusFromMessage(message),
       toolCall: probesToolCall(message),
       latencyMs: Math.max(0, now() - started),
       usage: usageOf(message),
       ...(message.errorMessage ? { detail: redactDetail(message.errorMessage) } : {}),
     };
   } catch (error) {
+    // Reached when the provider throws before producing a message, or when the
+    // deadline wins. An abort we caused is a timeout regardless of error shape.
+    const status = controller.signal.aborted ? "timeout" : statusFromError(error);
     return {
       ...base,
-      status: statusFromError(error),
+      status,
       toolCall: false,
       latencyMs: Math.max(0, now() - started),
       detail: redactDetail(error instanceof Error ? error.message : String(error)),
     };
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -226,9 +297,13 @@ export async function runProbes(
 }
 
 /**
- * The real call. Resolves the model from pi-ai's builtin catalog and asks it the
- * one question. Throws `ModelMissingError` when the catalog no longer has it,
- * which the probe records as `not_found`.
+ * The real call. The caller supplies the `Models` collection — that is where
+ * credentials live (Pupkeep's come from `secrets.json` via P1-05) and where the
+ * catalog comes from, so this function deliberately has no default: an env-keyed
+ * default would be the wrong seam for this app.
+ *
+ * Throws `ModelMissingError` when the catalog no longer has the model, which the
+ * probe records as `not_found`.
  */
 export class ModelMissingError extends Error {
   readonly status = 404;
@@ -242,8 +317,7 @@ export class ModelMissingError extends Error {
   }
 }
 
-export function createPiAiProbeCall(): ProbeCall {
-  const models = builtinModels();
+export function createPiAiProbeCall(models: Models): ProbeCall {
   return async (target, context, signal) => {
     const model: Model<Api> | undefined = models.getModel(target.provider, target.model);
     if (!model) throw new ModelMissingError(target);

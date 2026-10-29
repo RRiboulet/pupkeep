@@ -7,6 +7,7 @@ import {
   runProbe,
   runProbes,
   statusFromError,
+  statusFromMessage,
   type ProbeResult,
 } from "../src/server/models/probe.ts";
 import { resolveAllowlist } from "../src/server/models/allowlist.ts";
@@ -56,6 +57,63 @@ test("the probe tool is a literal-only object, which is the app schema shape", (
   assert.deepEqual(schema.required, ["status"]);
 });
 
+// --- the contract pi-ai actually has: failures RESOLVE a message ------------
+
+test("an aborted stopReason is a timeout, not an ok", async () => {
+  // pi-ai adapters resolve on abort (`stopReason: "aborted"`); they do not throw.
+  // The first version of this probe recorded that as ok — a hung provider was
+  // instantly allowed. This test is the regression guard.
+  const result = await runProbe(
+    target,
+    async () => assistant({ stopReason: "aborted", errorMessage: "Request was aborted" }),
+    { now: clock() },
+  );
+  assert.equal(result.status, "timeout");
+  assert.equal(result.toolCall, false);
+});
+
+test("an error stopReason is classified from its message, so 410 still drops", async () => {
+  const deprecated = await runProbe(
+    target,
+    async () =>
+      assistant({
+        stopReason: "error",
+        errorMessage: '410: {"type":"invalid_model_error","message":"ModelDeprecated: gone"}',
+      }),
+    { now: clock() },
+  );
+  assert.equal(deprecated.status, "deprecated");
+
+  const unauthorized = await runProbe(
+    target,
+    async () => assistant({ stopReason: "error", errorMessage: "HTTP 401 unauthorized" }),
+    { now: clock() },
+  );
+  assert.equal(unauthorized.status, "unauthorized");
+
+  const opaque = await runProbe(
+    target,
+    async () => assistant({ stopReason: "error", errorMessage: "upstream exploded" }),
+    { now: clock() },
+  );
+  assert.equal(opaque.status, "network");
+  assert.match(opaque.detail ?? "", /upstream exploded/);
+});
+
+test("statusFromMessage covers every stopReason the adapters emit", () => {
+  assert.equal(statusFromMessage(assistant({ stopReason: "stop" })), "ok");
+  assert.equal(statusFromMessage(assistant({ stopReason: "toolUse" })), "ok");
+  assert.equal(statusFromMessage(assistant({ stopReason: "length" })), "ok");
+  assert.equal(statusFromMessage(assistant({ stopReason: "aborted" })), "timeout");
+  assert.equal(statusFromMessage(assistant({ stopReason: "error", errorMessage: "" })), "network");
+  assert.equal(
+    statusFromMessage(assistant({ stopReason: "error", errorMessage: "429 Too Many Requests" })),
+    "rate_limited",
+  );
+});
+
+// --- result shape ----------------------------------------------------------
+
 test("a real tool call with status ok is recorded as ok/toolCall", async () => {
   const result = await runProbe(target, async () => toolCallMessage(), { now: clock() });
   assert.equal(result.status, "ok");
@@ -96,18 +154,9 @@ test("tool calls to another tool or with another argument do not count", async (
   assert.equal(wrongArg.toolCall, false);
 });
 
-test("a provider error embedded in the message is not an ok", async () => {
-  const result = await runProbe(
-    target,
-    async () => assistant({ stopReason: "error", errorMessage: "upstream exploded" }),
-    { now: clock() },
-  );
-  assert.equal(result.status, "network");
-  assert.equal(result.toolCall, false);
-  assert.match(result.detail ?? "", /upstream exploded/);
-});
+// --- errors that do throw --------------------------------------------------
 
-test("HTTP failures map to the statuses that decide drops", () => {
+test("a provider that throws before producing a message is classified", () => {
   for (const [error, expected] of [
     [{ status: 410, message: "410 ModelDeprecated" }, "deprecated"],
     [{ status: 404, message: "not found" }, "not_found"],
@@ -123,27 +172,45 @@ test("HTTP failures map to the statuses that decide drops", () => {
   }
 });
 
-test("a status in the message text is still recognised", () => {
-  // Some adapters only surface a string; this is the fallback path.
-  assert.equal(statusFromError(new Error("Error: 410 ModelDeprecated")), "deprecated");
+test("text classification needs context, so paths and ids are not codes", () => {
+  assert.equal(statusFromError(new Error("410 Gone")), "deprecated");
   assert.equal(statusFromError(new Error("HTTP 429 rate limited")), "rate_limited");
+  assert.equal(statusFromError(new Error("status code: 404")), "not_found");
+  // What pi-ai actually produces: `${status}: ${body}` from formatProviderError.
+  assert.equal(
+    statusFromError(new Error('410: {"type":"invalid_model_error","message":"gone"}')),
+    "deprecated",
+  );
+  assert.equal(statusFromError(new Error("404: not found")), "not_found");
+  assert.equal(statusFromError(new Error("Error: 401: bad key")), "unauthorized");
+  assert.equal(statusFromError(new Error("429: slow down")), "rate_limited");
+  // The old regex matched these; a 3-digit number in prose is not an HTTP status.
+  assert.equal(statusFromError(new Error("invalid URL path: /v1/401 or /v2/500")), "network");
+  assert.equal(statusFromError(new Error("model mimo-v4.1-410 failed")), "network");
+  assert.equal(statusFromError(new Error("used 401 tokens")), "network");
 });
 
-test("a hung provider times out instead of holding startup open", async () => {
-  const result = await runProbe(
-    target,
-    (_target, _context, signal) =>
-      new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => {
-          const error = new Error("aborted");
-          error.name = "AbortError";
-          reject(error);
-        });
-      }),
-    { timeoutMs: 5, now: clock() },
-  );
+test("a call that never settles is cut off by the deadline", async () => {
+  const started = Date.now();
+  const result = await runProbe(target, () => new Promise<never>(() => {}), {
+    timeoutMs: 10,
+    now: clock(),
+  });
   assert.equal(result.status, "timeout");
   assert.equal(result.toolCall, false);
+  assert.ok(Date.now() - started < 1_000, "the probe must not wait for a hung call");
+});
+
+test("a call that ignores the abort signal still loses the race", async () => {
+  // Some adapters never attach the signal; the bound must not depend on them.
+  const result = await runProbe(
+    target,
+    () => new Promise<never>(() => {
+      /* deliberately never resolves, never rejects */
+    }),
+    { timeoutMs: 5 },
+  );
+  assert.equal(result.status, "timeout");
 });
 
 test("detail is redacted before it can reach a log or the UI", () => {
@@ -182,17 +249,38 @@ test("runProbes keeps input order, bounds concurrency and probes every target", 
   assert.equal(results.filter((r) => r.status === "ok").length, 6);
 });
 
+test("one hung target does not hold the whole probe open", async () => {
+  const results = await runProbes(
+    [
+      { provider: "faux", model: "good" },
+      { provider: "faux", model: "hung" },
+    ],
+    async (t) =>
+      t.model === "hung" ? new Promise<never>(() => {}) : toolCallMessage(),
+    { timeoutMs: 10, concurrency: 2 },
+  );
+  assert.deepEqual(
+    results.map((r) => r.status),
+    ["ok", "timeout"],
+  );
+});
+
 // --- allowlist -------------------------------------------------------------
 
-function result(id: string, status: ProbeResult["status"]): ProbeResult {
+function result(
+  id: string,
+  status: ProbeResult["status"],
+  toolCall = status === "ok",
+  checkedAt = "2026-10-29T00:00:00.000Z",
+): ProbeResult {
   return {
     id,
     provider: id.split("/")[0]!,
     model: id.split("/")[1]!,
     status,
-    toolCall: status === "ok",
+    toolCall,
     latencyMs: 1,
-    checkedAt: "2026-10-29T00:00:00.000Z",
+    checkedAt,
   };
 }
 
@@ -208,34 +296,75 @@ test("only deprecated, not_found and unauthorized drop a model", () => {
   ];
   const list = resolveAllowlist([], fresh);
 
-  assert.deepEqual(list.allowed, ["a/ok"]);
   assert.deepEqual(
-    list.dropped.map((d) => d.id),
+    list.allowed.map((entry) => entry.id),
+    ["a/ok"],
+  );
+  assert.deepEqual(
+    list.dropped.map((drop) => drop.entry.id),
     ["a/gone", "a/missing", "a/keys"],
   );
-  // Unknown with no history: kept, but flagged rather than silently trusted.
-  assert.deepEqual(list.unverified, ["a/busy", "a/flaky", "a/slow"]);
+  assert.deepEqual(
+    list.unverified.map((u) => u.entry.id),
+    ["a/busy", "a/flaky", "a/slow"],
+  );
+  // Unknown with no history is unverified, and the reason says which kind.
+  assert.ok(list.unverified.every((u) => u.reason === "inconclusive"));
 });
 
-test("a rate limit keeps the last known good entry", () => {
-  const list = resolveAllowlist([result("a/busy", "ok")], [result("a/busy", "rate_limited")]);
-  assert.deepEqual(list.allowed, ["a/busy"]);
+test("reachable is not usable: ok without a tool call will not be allowed", () => {
+  const list = resolveAllowlist([], [result("a/chatty", "ok", false)]);
+  assert.deepEqual(list.allowed, []);
+  assert.equal(list.unverified.length, 1);
+  assert.equal(list.unverified[0]!.reason, "tool_call_missing");
+});
+
+test("a rate limit keeps the last known good entry, including its tool call", () => {
+  const list = resolveAllowlist([result("a/busy", "ok", true)], [result("a/busy", "rate_limited", false)]);
+  assert.deepEqual(
+    list.allowed.map((entry) => entry.id),
+    ["a/busy"],
+  );
+  assert.equal(list.allowed[0]!.toolCall, true);
   assert.deepEqual(list.unverified, []);
 });
 
 test("a drop beats history, and a later ok brings the model back", () => {
   const dropped = resolveAllowlist([result("a/x", "ok")], [result("a/x", "deprecated")]);
   assert.deepEqual(dropped.allowed, []);
-  assert.deepEqual(dropped.dropped, [{ id: "a/x", status: "deprecated" }]);
+  assert.deepEqual(dropped.dropped.map((d) => d.status), ["deprecated"]);
 
   const revived = resolveAllowlist([result("a/x", "deprecated")], [result("a/x", "ok")]);
-  assert.deepEqual(revived.allowed, ["a/x"]);
+  assert.deepEqual(
+    revived.allowed.map((entry) => entry.id),
+    ["a/x"],
+  );
   assert.deepEqual(revived.dropped, []);
 });
 
-test("a model missing from the fresh run is not resurrected or dropped", () => {
-  // The probe covers the current candidate list; history for others is untouched.
-  const list = resolveAllowlist([result("a/old", "ok")], [result("a/new", "ok")]);
-  assert.deepEqual(list.allowed, ["a/new"]);
-  assert.deepEqual(list.dropped, []);
+test("a model missing from the fresh run keeps its cached bucket", () => {
+  const list = resolveAllowlist(
+    [result("a/old", "ok"), result("a/dead", "deprecated"), result("a/busy", "rate_limited")],
+    [result("a/new", "ok")],
+  );
+
+  assert.deepEqual(
+    list.allowed.map((entry) => entry.id).sort(),
+    ["a/new", "a/old"],
+  );
+  assert.deepEqual(
+    list.dropped.map((d) => d.entry.id),
+    ["a/dead"],
+  );
+  // A cached "unknown" is never probed again by this run, and says so.
+  assert.deepEqual(
+    list.unverified.map((u) => u.entry.id),
+    ["a/busy"],
+  );
+  assert.equal(list.unverified[0]!.reason, "never_probed");
+});
+
+test("the cache keeps the timestamp, so the picker can say how old it is", () => {
+  const list = resolveAllowlist([], [result("a/ok", "ok", true, "2026-10-01T09:00:00.000Z")]);
+  assert.equal(list.allowed[0]!.checkedAt, "2026-10-01T09:00:00.000Z");
 });

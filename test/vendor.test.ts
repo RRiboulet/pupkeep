@@ -38,7 +38,12 @@ function sha256(bytes: Buffer): string {
 
 test("every vendored file is listed in NOTICE.md with a version and a checksum", async () => {
   const entries = await readNotice();
-  const files = (await readdir(VENDOR_DIR)).filter((name) => name.endsWith(".mjs")).sort();
+  // Every file, whatever its extension: an unlisted `.js` next to the `.mjs` files
+  // is exactly how a browser payload could slip in without a checksum.
+  const files = (await readdir(VENDOR_DIR, { withFileTypes: true }))
+    .filter((dirent) => dirent.isFile() && dirent.name !== ".gitkeep")
+    .map((dirent) => dirent.name)
+    .sort();
 
   assert.ok(files.length > 0, "no vendored files found");
   assert.deepEqual(
