@@ -136,13 +136,69 @@ buying one. The decision is:
 
 | Decision | Status | Gate |
 |---|---|---|
-| Tailscale Serve/Funnel on Android | **Answered (P0-03): no Serve/Funnel in Android app 1.104.2; Tailscale stays HTTP** | P0-09: ntfy remains the partner daily path; quick tunnel is testing-only |
+| Tailscale Serve/Funnel on Android | **Answered (P0-03): no Serve/Funnel in Android app 1.104.2; Tailscale stays HTTP** | §2.3: ntfy remains the partner daily path; quick tunnel is testing-only |
 | Termux `cloudflared` package source | **Answered (P0-03): no package; arm64 binary needs `termux-chroot` + `SSL_CERT_FILE`** | P1-04: wrapper, or run the tunnel on the VPS; do not spawn the raw binary |
 | Default model live availability | **Answered (P0-05): `mimo-v2.6-flash` passes; `deepseek-v4.1-flash` paid fallback** | P1-03/P4-08: re-probe with the app schema and startup cache |
-| ntfy acceptance | **Partially answered (P0-08): host local + category-only publish pass; the partner's iPhone is P0-10** | P0-09: if the partner rejects ntfy, in-app only or buy a domain; never silently drop notifications |
+| ntfy acceptance | **Partially answered (P0-08): host local + category-only publish pass; the partner's iPhone is P0-10** | **P0-10**: if the partner rejects ntfy or locked-phone latency fails, in-app only or buy a domain; never silently drop notifications |
 | Remote backup target | **Open: P0-07 drill used `scp`; rclone target not configured** | **P1-07** owns the job, the `rclone` remote and 14-day retention; local backup always; warning until configured |
 | App name/branding | Working title | Not blocking; `Pupkeep` until renamed |
 | Named Cloudflare Tunnel | Deferred | Only after a domain exists |
+
+### 2.3 Go/No-Go — Phase 0 decision record (P0-09, 2026-10-29)
+
+**Verdict: GO.** The Android phone is a viable host for this product, and Phase 1
+may start. The decision is recorded on a **single-device scope** — the host phone
+plus the development devcontainer. The partner's iPhone was not available; its
+rows are **P0-10**, and the documented fallback for them is *in-app only for the
+partner*. Nothing in Phase 1 depends on that device.
+
+Each row is a decision, its evidence, and the trigger that reverses it.
+
+| Area | Decision | Evidence | Reversed if |
+|---|---|---|---|
+| **Host runtime** | **GO.** F-Droid Termux on Android 15 (`SM-G998B`) runs Node `26.12.1`: a server-style `.ts` runs by type stripping with no build or flag, `node:sqlite` opens, `PRAGMA synchronous` reads `2` through the `FULL` sequence Pi Durable expects, `Intl` resolves `Europe/Paris` with correct winter/summer offsets, and one process owns the file. | P0-01 | Pi Durable cannot run on Termux → move the server to the VPS, same code and restore the backup (§6.10); never build an Android runtime |
+| **Access** | **GO.** Tailscale HTTP is the daily path: the host binds its `100.x` address only and fails closed (no-Tailscale → refuse, loopback fallback, never `0.0.0.0`). The Cloudflare quick tunnel serves HTTPS for PWA/Web Push **testing only**; its URL changes on every restart. Android app `1.104.2` has no Serve/Funnel control that this spike could find
+(feature-label scan of the installed APK, not a protocol-level test), so Tailscale
+HTTPS is neither available nor promised. Termux has no `cloudflared` package; the
+arm64 binary works only through `termux-chroot` + `SSL_CERT_FILE`. | P0-03 | Bind fails → LAN or the quick tunnel **explicitly** (§6.10). Serve/Funnel appears in a future app → re-open §2.1 |
+| **Notifications** | **GO, conditional.** Host: Termux:API local notification (custom channel, `--id` replaces instead of stacking, `Click`/`--action` at the tailnet URL). Partner: one 192-bit `ntfy.sh` topic at `0600`, **category-only** text, `Click` at the tailnet URL so the app stays unexposed. Conditional because the partner's own receipt and locked-phone latency are unmeasured (P0-10); the partner's device is iOS, where ntfy is tap-through only and self-hosting needs an `upstream_base_url` relay. | P0-08, P0-10 | Partner rejects ntfy, or locked-phone latency exceeds 15 min → in-app only, or buy a domain and use Web Push (§12.4). Never claim Web Push over Tailscale HTTP |
+| **Models and budget** | **GO.** Default `opencode-go/mimo-v2.6-flash`; paid fallback `opencode-go/deepseek-v4.1-flash`; free tier is available but never relied on; the allowlist comes from a bounded startup probe, not the catalog. Simulated use: light ~$0.35, normal ~$2.28, heavy ~$9.24 per month against the **$10 cap**, with `harness.usage()` authoritative. | P0-05 | Default unavailable → cheapest paid fallback; the cap stands. At 100% block paid models; never silently switch to free |
+| **Backup and restore** | **GO with a carry-over.** Encrypted bundle (`sqlite` + config + `push`, provider keys excluded, **VAPID deliberately inside** `push.json` so push subscriptions survive) restored on a clean phone directory and a clean container; `integrity_check` ok; auth hashes, VAPID, the open walk, transcript and sleeping reminder all survived, and it boots without `secrets.json`. One limitation recorded: the bundle is a cleanly-closed snapshot. The **job** — `rclone` remote, 14-day retention, passphrase rotation, with the passphrase off the backup host — is unbuilt and owned by **P1-07**. | P0-07 | Restore fails on the phone → no go until fixed; P5-02 drills the built job |
+| **Supervision** | **GO with caveats.** `termux-services`/runit restarts the Node child, Termux:Boot runs the boot script, `harness.resume()` continues pending work, parked tasks surface after `restartLimit`. Caveats: `sshd` must be started on demand (its pinned `ListenAddress` fails to bind if the tailnet address changes or sshd starts before Tailscale — the state found at the start of the P0-08 session); the wake-lock effect is not observable from Termux. | P0-06 | The phone kills Termux too often to keep the care loop → VPS, phone becomes a client. P5-05 owns the long run |
+
+**What G0 means, exactly.** G0 is *recorded*, not uniformly green:
+
+- The **host side** is measured end to end — every exit criterion above has a result,
+  an output and a note, and the two caveats (sshd on demand, wake-lock effect)
+  have named owners rather than silent dismissals.
+- The **partner path** is not measured. P0-03 and P0-08 stay **unchecked** in §16
+  because their partner-device rows — the iPhone opening the tailnet URL, its
+  PWA/Web Push run and re-subscribe, its ntfy receipt and locked-phone latency —
+  belong to **P0-10**. That is the documented fallback G0 allows for: if P0-10
+  fails or never runs, v1 ships **in-app only for the partner**, with the host
+  still notified locally.
+- Consequently the gate is met for **starting Phase 1**, and not for claiming the
+  partner is reached out-of-app. Two later claims stay gated on P0-10: P4-06's
+  notification centre is not done, and P5-03's two-client E2E does not run, until
+  it passes.
+
+**Constraints Phase 1 inherits.** P1-03 reconciles the phone's Node major (26
+measured here) with the devcontainer's pinned 24, and implements the startup model
+probe with the app schema. P1-04 calls P1-05's pid lock, starts `cloudflared` only
+through the §6.7 wrapper, owns the boot script, and starts `sshd` on demand with
+the Tailscale address **re-resolved**. P1-07 owns the harness sequence and the
+backup job. P1-06 and P1-10 treat Web Push as HTTPS-only, and the partner's daily
+client as a Safari tab, not an installed PWA. P1-13 and P4-09 write these into the
+runbook.
+
+**Not decided here:** the partner's acceptance (P0-10); the `rclone` target,
+retention and passphrase rotation (P1-07); the app name; a named tunnel or domain
+(deferred until a domain exists).
+
+**If this reverses.** Each row names its own trigger and fallback. The phone is
+load-bearing for the *host*, not for the *product*: moving to a VPS keeps the same
+code and restores the same backup, and the phone becomes a client (§6.9, §6.10).
+The decision would be re-recorded here, not in a spike note.
 
 ---
 
@@ -1573,9 +1629,10 @@ Pi Pocket style, simplified for two caregivers:
       this devcontainer** (not a phone), with the tap target observed in the
       payload but not tapped. The partner's own receipt is **P0-10**, and the
       in-app mirror is P4-06, not Phase 0.
-- [ ] **P0-09** Decide Go/No-Go for the phone host, access and notification
-      split; write the decision into this plan. It may record a single-device
-      scope with a documented fallback while the partner path is still P0-10.
+- [x] **P0-09** Decided **GO**, recorded in **§2.3** with the single-device scope:
+      the host side is measured end to end, and the partner-device rows are carried
+      by P0-10 with *in-app only* as the documented fallback. The gate is met for
+      starting Phase 1, not for claiming the partner is reached out-of-app.
 - [ ] **P0-10** Partner iPhone acceptance: the partner's device is an **iPhone**,
       so P0-03's partner reach/PWA/Web Push rows and P0-08's partner ntfy row are
       re-expressed for iOS and run on that phone. Device-gated: it can run any
@@ -1610,7 +1667,9 @@ Pi Pocket style, simplified for two caregivers:
 - **P0-09:** a written go/no-go decision with the chosen fallback.
 
 **Gate G0:** every spike has a measured answer or a documented fallback, and
-the Phase 0 exit criteria above are met.
+the Phase 0 exit criteria above are met. **Recorded in §2.3:** met for the host
+side; P0-03 and P0-08 stay unchecked because their partner-device rows are P0-10,
+whose documented fallback is in-app only. Phase 1 may start.
 
 ### Phase 1 — Repo, devcontainer, host skeleton, vertical slice
 
