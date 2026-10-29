@@ -7,6 +7,17 @@ The plan is the source of truth for product and architecture; the guide explains
 how to pick a task, branch, verify and report. Do not build app code beyond the
 current approved phase.
 
+**Current phase: Phase 1** (repo, devcontainer, host skeleton, vertical slice).
+Phase 0 is closed by the go/no-go in PLAN §2.3, except three device-gated checks
+on the partner's iPhone — P0-03's access ones, P0-08's notification ones — which
+are carried by **P0-10** and do not block Phase 1. App code goes under `src/`,
+`web/`, `bin/` and `scripts/` exactly as PLAN §4 lays out; directories that no
+task has filled yet hold a `.gitkeep` and nothing else.
+
+Agents run in this repo through the package pinned in `.pi/settings.json`
+(`my-agent-setup`, which targets pi `1.4.0`). Do not edit that pin to a floating
+ref: a later session must load the same tools.
+
 ## Shape
 
 - **Host:** Android phone → Termux → Node 24 → Pupkeep server → browser/PWA.
