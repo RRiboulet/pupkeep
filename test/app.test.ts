@@ -191,7 +191,7 @@ test("harness.closed failure exits non-zero so the supervisor restarts it", asyn
   try {
     const result = await startApp(
       { dataDir: dir, host: "127.0.0.1", port: 0 },
-      quietDeps({ openHarness: async () => fakeOpened(harness), ...noBootstrap }),
+      quietDeps({ openHarness: async () => fakeOpened(harness), thread: "scaffold", ...noBootstrap }),
     );
     assert.ok(result.ok);
     end.resolve({ reason: "failed", error: new Error("storage went away") });
@@ -219,6 +219,7 @@ test("a bootstrap failure exits non-zero and releases the lock when close comple
       { dataDir: dir, host: "127.0.0.1", port: 0 },
       quietDeps({
         openHarness: async () => fakeOpened(harness),
+        thread: "scaffold",
         bootstrap: async () => {
           throw new Error("config has no active member");
         },
@@ -252,7 +253,7 @@ test("a close that a stuck task never finishes is capped and exits non-zero", as
   try {
     const result = await startApp(
       { dataDir: dir, host: "127.0.0.1", port: 0, closeTimeoutMs: 25 },
-      quietDeps({ openHarness: async () => fakeOpened(harness), ...noBootstrap }),
+      quietDeps({ openHarness: async () => fakeOpened(harness), thread: "scaffold", ...noBootstrap }),
     );
     assert.ok(result.ok);
     const started = Date.now();
@@ -296,6 +297,7 @@ test("a retry that parks the task again leaves it visible", async () => {
           report = options.onReport;
           return fakeOpened(harness);
         },
+        thread: "scaffold",
         ...noBootstrap,
       }),
     );
@@ -340,7 +342,7 @@ test("a task parked before this process started is surfaced and retryable", asyn
   try {
     const result = await startApp(
       { dataDir: dir, host: "127.0.0.1", port: 0 },
-      quietDeps({ openHarness: async () => fakeOpened(harness), ...noBootstrap }),
+      quietDeps({ openHarness: async () => fakeOpened(harness), thread: "scaffold", ...noBootstrap }),
     );
     assert.ok(result.ok);
     assert.deepEqual(
