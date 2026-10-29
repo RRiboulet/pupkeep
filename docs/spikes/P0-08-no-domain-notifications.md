@@ -2,7 +2,9 @@
 
 **Task:** P0-08. **Date:** 2026-10-29. **Status:** partial — the host-local
 notification and the ntfy publish/receive mechanism are measured on the host
-phone; no partner phone was used, so P0-08 is **not** checked in PLAN §16.
+phone; no partner phone was used, so P0-08 is **not** checked in PLAN §16. The
+partner device is an **iPhone**, and the iOS-specific rows below are taken from
+upstream documentation, not measured here.
 
 **Verdict:** `termux-notification` delivers a host-local notification, including
 a custom high-importance channel, sound and pinning, and
@@ -24,7 +26,7 @@ partner phone itself was not exercised; that row keeps P0-08 open.
 | Node | `v26.12.1` |
 | Notification service | `ntfy.sh`, free tier, **no account, no token** |
 | Second device (receipt) | this devcontainer, `curl` SSE subscriber |
-| Partner phone | **not used** — the receipt row is a second tailnet/devcontainer device, not the partner's phone |
+| Partner phone | **iPhone, not used** — the receipt row is a second tailnet/devcontainer device, not the partner's phone |
 | App server during the test | **not running** — no Pupkeep server exists yet (P1) |
 
 ## Results
@@ -150,16 +152,49 @@ What a subscriber receives, including the private tap target:
 - **The relay is a third party.** Message text sits on ntfy.sh for 12 h; the
   category-only rule above is what makes that acceptable.
 
+## The partner device is iOS
+
+Upstream-documented, **not measured** — there was no iPhone in this session.
+Everything the Android client does natively is either absent or degraded on iOS,
+and one claim that would have been true on Android is false here:
+
+| Question | Answer | Source |
+|---|---|---|
+| Instant delivery | **not supported on iOS**; foreground services don't exist there, so delivery depends on Apple push plus background tasks | ntfy-ios `FEATURE_PARITY.md` (last updated 2023-05-23), `TECHNICAL_LIMITATIONS.md` |
+| How the App Store app gets pushed | topics on the **default server** are relayed through ntfy.sh's Firebase credentials; that is what makes an ntfy.sh topic arrive without the app running | ntfy-ios `TECHNICAL_LIMITATIONS.md` |
+| **Self-hosted** ntfy on iOS | reliable delivery only with [`upstream_base_url`](https://docs.ntfy.sh/config/#ios-instant-notifications), i.e. the self-hosted server relays to ntfy.sh. Without the relay the app relies on background polling, which the author measured as running *once in a day* — and a poll slower than the 12 h cache loses messages outright | ntfy-ios `TECHNICAL_LIMITATIONS.md` |
+| ntfy `Actions` buttons (`view, Open Today, …`) | **not available** — iOS lists `Click` as “only direct notification click” | `FEATURE_PARITY.md` |
+| ntfy priority filtering | not on iOS (“no priority filtering”); the priority is carried, its iOS presentation is unverified | `FEATURE_PARITY.md` |
+| Web Push | needs HTTPS **and** Add to Home Screen **and** iOS 16.4+. Over Tailscale HTTP there is no push on iOS at all | [WebKit: web push for web apps](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/) |
+| Add to Home Screen over HTTP | a web clip with its **own storage and cookie jar** and **no service worker** (insecure context): the partner would log in a second time and gain no offline or push | Apple/WebKit |
+| SSE while backgrounded | iOS suspends background tabs; live updates are foreground-only and the stream reconnects on return | Apple |
+
+Consequences for the daily path, which are what P0-03's and P0-08's remaining
+rows have to be re-expressed as:
+
+- The partner's daily UI is a **Safari tab or bookmark**, not an installed PWA.
+  A2HS on iOS over HTTP buys a separate login and nothing else.
+- A notification is **tap-through only**: the `Click` target still works (open
+  the tailnet URL in Safari), but there are no action buttons, so no approval or
+  feed-cancel flow may depend on one. Approvals stay in-app (PLAN §9.3).
+- Keeping topics on **ntfy.sh** is what gives the iPhone a real push. The
+  self-hosting upgrade is not free of consequence on iOS: it either relays
+  back to ntfy.sh (`upstream_base_url`) and keeps the third-party dependency it
+  was meant to remove, or it accepts lossy background polling.
+
 ## Fallback and upgrade path
 
 - **If the partner rejects ntfy:** in-app only (no reliable out-of-app signal on
   HTTP), or buy a domain and use Web Push over HTTPS. Do not pretend Tailscale
   HTTP has Web Push (PLAN §6.10, §12.4).
-- **Self-hosted upgrade, no change to the app code:** ntfy is a single binary
-  (or a container) that can run on the VPS fallback of PLAN §6.9; it then needs
-  its own HTTPS front and topic ACLs, and the partner's app points at the custom
-  server URL. This is the path to take if the 12 h third-party cache or the
-  unauthenticated-publish model is unacceptable.
+- **Self-hosted upgrade:** ntfy is a single binary (or a container) that can run
+  on the VPS fallback of PLAN §6.9; it then needs its own HTTPS front and topic
+  ACLs, and the partner's app points at the custom server URL. **On iOS this is
+  not a free swap** — see the table above: either configure `upstream_base_url`
+  (self-hosted, but still pushed through ntfy.sh) or accept background polling
+  that can silently drop reminders. Take this path only if the 12 h third-party
+  cache or the unauthenticated-publish model is unacceptable *and* the relay
+  caveat is accepted.
 - **Do not** put ntfy behind the Cloudflare quick tunnel: the URL changes on
   restart, and the partner client would lose its server on every restart.
 
@@ -174,8 +209,10 @@ What a subscriber receives, including the private tap target:
 - `termux-notification-list` / `termux-notification-remove <id>` are the
   measurable cancel/verify hooks for P4-04's reminder cancellation.
 - The partner path is one per-user topic in `~/.pupkeep/ntfy-topic` (`0600`),
-  category-only text from a shared constants module, `Click`/`Actions` at the
-  Tailscale URL, and priority `max` reserved for `approval`/`feed_overdue`.
+  category-only text from a shared constants module, `Click` at the Tailscale
+  URL, and priority `max` reserved for `approval`/`feed_overdue`. Design for
+  **tap-through only**: `Actions` buttons are Android-only, so a flow that needs
+  a decision from the notification itself does not exist for an iOS partner.
 - The transport is independent of the app origin: the app can stay
   tailnet-only, unexposed, and still notify the partner.
 
@@ -183,6 +220,9 @@ What a subscriber receives, including the private tap target:
 
 - The partner phone: ntfy app install, permission, notification rendering and
   actual arrival. The receipt row was this devcontainer.
+- **Every iOS row** in the iOS section above is upstream documentation, not a
+  measurement. Nothing here was tested on an iPhone: push timeliness, the
+  `Click` tap, priority presentation, background behaviour.
 - Delivery while the host phone is dozing, and the Play-vs-F-Droid ntfy build
   difference in practice.
 - Tapping a notification (`--action` / ntfy `Click`) — posted, not exercised.

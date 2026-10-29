@@ -1176,11 +1176,17 @@ displayed but not pushed in v1.
   SSE; push/ntfy are best-effort.
 - ntfy carries the **title and category text only**, from a shared constants
   module; urgency rides on the ntfy `priority` (P0-08 measured `default` 3,
-  `high` 4, `max` 5) and never on extra words. `Click`/`Actions` point at the
-  private Tailscale URL, so the partner can act on a notification while the app
-  stays unexposed; the topic itself is a bearer secret in `~/.pupkeep` (`0600`),
-  logged only as a prefix. ntfy.sh stores the text for 12 h, so category-only is
-  a property of the payload and not of the reader.
+  `high` 4, `max` 5) and never on extra words. `Click` points at the private
+  Tailscale URL, so the partner can act on a notification while the app stays
+  unexposed; the topic itself is a bearer secret in `~/.pupkeep` (`0600`), logged
+  only as a prefix. ntfy.sh stores the text for 12 h, so category-only is a
+  property of the payload and not of the reader.
+- **The partner’s phone is an iPhone**, where ntfy is tap-through only (no
+  `Actions` buttons), so no decision may live in a notification — approvals stay
+  in-app. Keeping topics on **ntfy.sh** is also what gives iOS a real push; a
+  self-hosted server must relay through `upstream_base_url` to keep it, and
+  without that relay delivery degrades to background polling that can outlast
+  the message cache (P0-08).
 - VAPID keys in `~/.pupkeep/push.json`; per-device subscriptions.
 - 404/410 subscriptions are removed.
 - A test-notification button is in Settings.
@@ -1191,10 +1197,15 @@ displayed but not pushed in v1.
 - HTTPS required; localhost is the host-phone exception.
 - On Tailscale (daily), the origin is HTTP: Web Push is unavailable, so daily
   notifications are in-app plus the host’s **Termux:API local notification
-  (v1)** and the partner’s **recommended ntfy** topic.
+  (v1)** and the partner’s **recommended ntfy** topic. On the partner’s iPhone
+  the daily client is a **Safari tab or bookmark**: a home-screen clip over HTTP
+  has its own cookie jar (a second login) and no service worker, so it buys
+  nothing over a bookmark.
 - On the Cloudflare quick tunnel (testing), PWA/Web Push works, but the origin
   changes on restart and subscriptions must be renewed.
-- iOS 16.4+ and Add to Home Screen; Android Chrome works.
+- Web Push on iOS needs HTTPS **and** Add to Home Screen **and** iOS 16.4+, so
+  for an iOS partner it is reachable only on the quick tunnel and is a test
+  path, never the daily one; Android Chrome works.
 - Notification click opens the relevant screen.
 - The in-app centre is the source of truth; unread badge.
 - A future native push bridge for the partner (without ntfy) is an upgrade, not
