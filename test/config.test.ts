@@ -88,9 +88,10 @@ test("the config is the auth authority: hashes, roles, removals", () => {
   const config: AppConfig = {
     schemaVersion: 1,
     ownerTokenHash: "owner-hash",
+    invites: [],
     members: [
       member({ id: "owner", role: "owner", displayName: "Ronan" }),
-      member({ id: "partner", inviteHash: "invite-hash" }),
+      member({ id: "partner", inviteHash: "invitehash0123456789abcdef" }),
       member({ id: "gone", removedAt: "2026-10-29T11:00:00.000Z" }),
     ],
   };

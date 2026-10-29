@@ -97,6 +97,8 @@ export interface SessionRecord {
   /** Hash of the session token; the token itself is only ever in a cookie. */
   tokenHash: string;
   createdAt: string;
+  /** Absent only for a session written before expiries existed. */
+  expiresAt?: string;
   lastSeenAt?: string;
 }
 
@@ -112,15 +114,25 @@ export interface MemberRecord {
   sessions: SessionRecord[];
 }
 
+/** A one-time invite: hash only, expiring, and it names the future member. */
+export interface InviteRecord {
+  codeHash: string;
+  role: MemberRole;
+  displayName: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
 export interface AppConfig {
   schemaVersion: typeof CONFIG_SCHEMA_VERSION;
   /** Hash of the owner sign-in token; null until the first mint. */
   ownerTokenHash: string | null;
   members: MemberRecord[];
+  invites: InviteRecord[];
 }
 
 export function emptyConfig(): AppConfig {
-  return { schemaVersion: CONFIG_SCHEMA_VERSION, ownerTokenHash: null, members: [] };
+  return { schemaVersion: CONFIG_SCHEMA_VERSION, ownerTokenHash: null, members: [], invites: [] };
 }
 
 export function activeMembers(config: AppConfig): MemberRecord[] {
@@ -146,14 +158,16 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function parseSession(value: unknown): SessionRecord | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
-  const { tokenHash, createdAt, lastSeenAt } = record;
+  const { tokenHash, createdAt, lastSeenAt, expiresAt } = record;
   // A raw token in the hash field would defeat "config.json holds hashes only".
   if (typeof tokenHash !== "string" || !HASH.test(tokenHash)) return undefined;
   if (!isDate(createdAt)) return undefined;
   if (lastSeenAt !== undefined && !isDate(lastSeenAt)) return undefined;
+  if (expiresAt !== undefined && !isDate(expiresAt)) return undefined;
   return {
     tokenHash,
     createdAt,
+    ...(expiresAt !== undefined ? { expiresAt: expiresAt as string } : {}),
     ...(lastSeenAt !== undefined ? { lastSeenAt: lastSeenAt as string } : {}),
   };
 }
@@ -202,6 +216,18 @@ export function parseConfig(raw: unknown): AppConfig | undefined {
     members.push(member);
   }
 
+  const invites: InviteRecord[] = [];
+  for (const item of Array.isArray(record.invites) ? record.invites : []) {
+    const invite = asRecord(item);
+    if (!invite) return undefined;
+    const { codeHash, role, displayName, createdAt, expiresAt } = invite;
+    if (typeof codeHash !== "string" || !HASH.test(codeHash)) return undefined;
+    if (role !== "owner" && role !== "member") return undefined;
+    if (typeof displayName !== "string" || displayName.trim() === "") return undefined;
+    if (!isDate(createdAt) || !isDate(expiresAt)) return undefined;
+    invites.push({ codeHash, role, displayName, createdAt, expiresAt });
+  }
+
   const ids = new Set(members.map((member) => member.id));
   if (ids.size !== members.length) return undefined;
 
@@ -227,6 +253,7 @@ export function parseConfig(raw: unknown): AppConfig | undefined {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     ownerTokenHash: record.ownerTokenHash as string | null,
     members,
+    invites,
   };
 }
 

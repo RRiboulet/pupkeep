@@ -18,7 +18,8 @@ import { lanAddress, resolveAccess, type AccessMode, type BindPlan, type Interfa
 import { Supervisor, type ChildLike } from "./supervisor.ts";
 import { detectTermux, parseTunnelUrl, tunnelCommand, tunnelChanged, type TunnelCommand } from "./tunnel.ts";
 import { announceOwnerLink, type AnnounceResult } from "./owner.ts";
-import { ensureDataDir, ownerLinkPath, type DataDir } from "../server/config.ts";
+import { dataStores, ensureDataDir, ownerLinkPath, type DataDir } from "../server/config.ts";
+import { Auth } from "../server/auth.ts";
 import { acquireLock, type LockHandle } from "../server/lock.ts";
 import { createLogger } from "../server/log.ts";
 import { scrub } from "../shared/redact.ts";
@@ -34,7 +35,7 @@ export interface LauncherDeps {
     dataDir: string,
     origin: string | undefined,
     reissue: boolean,
-  ) => Promise<{ link: string; minted: boolean }>;
+  ) => Promise<{ link: string; minted: boolean } | "no-origin" | undefined>;
   /** The server program. Missing until P1-07 lands, which is reported, not guessed. */
   serverEntry?: { command: string; args: string[] };
   /** True on the phone: the tunnel needs the termux-chroot wrapper. Auto-detected. */
@@ -172,6 +173,45 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
     }
     lock = acquired.lock;
 
+    // Owner mint runs before the server exists: the sign-in link is the trust
+    // root and `--reissue-owner` must work even when the server program is
+    // missing (P1-06). Only a mint or reissue writes the file.
+    let ownerLink: AnnounceResult | undefined;
+    const mint = deps.mintOwnerLink ?? defaultMintOwnerLink;
+    try {
+      // The origin the owner will actually open. Minting before the tunnel exists
+      // would otherwise print a loopback URL nobody can reach, and the cookie is
+      // origin-scoped, so it cannot be corrected later.
+      const origin = tunnelUrl ?? plan.displayUrl;
+      const minted = await mint(dataDir.path, origin, options.reissueOwner);
+      if (minted === "no-origin") {
+        log(
+          "the tunnel URL is not known yet, so no owner link can be printed for this origin. " +
+            "Run --reissue-owner once the tunnel is up.",
+        );
+      } else if (minted) {
+        ownerLink = await announceOwnerLink({
+          link: minted.link,
+          path: ownerLinkPath(dataDir.path),
+          interactive: options.interactive,
+          writeFile: minted.minted,
+          writeOut: out,
+          log,
+        });
+      } else {
+        log(
+          "an owner token already exists; its link is not recoverable from the hash. " +
+            "Run with --reissue-owner to rotate it and print a new link.",
+        );
+      }
+    } catch (error) {
+      // A mint that succeeded followed by a failed write would store the hash and
+      // lose the only copy of the link. Fail closed rather than boot "ownerless".
+      log(`fatal: the owner link could not be stored: ${(error as Error).message}`);
+      await stop();
+      return { ok: false, code: EXIT_DATA_DIR, message: (error as Error).message, plan, dataDir: dataDir.path };
+    }
+
     const entry = deps.serverEntry;
     if (!entry) {
       const message =
@@ -230,33 +270,6 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
       tunnel.start();
     }
 
-    let ownerLink: AnnounceResult | undefined;
-    const mint = deps.mintOwnerLink;
-    if (mint) {
-      try {
-        // The origin is passed in so P1-06 can mint a link for the URL the owner
-        // will actually open — the tunnel's, once it exists.
-        const { link, minted } = await mint(dataDir.path, tunnelUrl ?? plan.displayUrl, options.reissueOwner);
-        ownerLink = await announceOwnerLink({
-          link,
-          path: ownerLinkPath(dataDir.path),
-          interactive: options.interactive,
-          // Only a mint or reissue writes the file; an ordinary boot announces
-          // whatever already exists without touching it (PLAN §6.3).
-          writeFile: minted || options.reissueOwner,
-          writeOut: out,
-          log,
-        });
-      } catch (error) {
-        log(`owner link could not be announced: ${(error as Error).message}`);
-      }
-    } else {
-      log(
-        "no owner link to announce: the token is minted by P1-06's auth module, which is not " +
-          "implemented yet. The launcher is running without one.",
-      );
-    }
-
     if (plan.mode === "lan") {
       const address = lanAddress(interfaces);
       if (address) log(`LAN peers should open http://${address}:${options.port}`);
@@ -270,6 +283,34 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
       ...(ownerLink ? { ownerLink } : {}),
     };
   }
+}
+
+/**
+ * The launcher's default: mint on first run, rotate on `--reissue-owner`, and
+ * otherwise report that nothing was printed. The token is never stored, so an
+ * existing link cannot be shown again — only rotated.
+ */
+async function defaultMintOwnerLink(
+  dataDir: string,
+  origin: string | undefined,
+  reissue: boolean,
+): Promise<{ link: string; minted: boolean } | "no-origin" | undefined> {
+  const stores = dataStores(dataDir);
+  await stores.config.ensure();
+  const config = await stores.config.read();
+
+  // Housekeeping belongs on boot: expired invites otherwise live in config.json
+  // for ever, and the docstring that says "call on boot" should be true.
+  const auth = new Auth({ config: stores.config, push: stores.push });
+  await auth.pruneInvites();
+
+  if (config.ownerTokenHash !== null && !reissue) return undefined;
+  // No origin means no printable link: a loopback URL in `owner-link.txt` is a
+  // credential nobody can use.
+  if (!origin) return "no-origin";
+
+  const { link } = await auth.mintOwner(origin);
+  return { link, minted: true };
 }
 
 function serverEnv(bindHost: string, port: number): Record<string, string> {

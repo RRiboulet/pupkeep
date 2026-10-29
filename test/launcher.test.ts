@@ -39,6 +39,9 @@ function deps(overrides: LauncherDeps = {}): LauncherDeps & { logs: string[]; pr
     }),
     spawnChild: () => new FakeChild(),
     log: (line: string) => logs.push(line),
+    // Minting needs a real data directory; the launcher tests that are about
+    // supervision inject a no-op and test the owner path separately.
+    mintOwnerLink: async () => undefined,
     out: (text: string) => printed.push(text),
     ...overrides,
   } as LauncherDeps & { logs: string[]; printed: string[] };
@@ -154,13 +157,15 @@ test("interactive mode prints the owner link; boot mode writes it and logs only 
   }
 });
 
-test("nothing is announced when the auth module cannot mint a link yet", async () => {
-  const d = deps({ serverEntry: { command: "node", args: ["server.ts"] } });
+test("with no mint dependency the launcher says an owner token already exists, links included", async () => {
+  // The default mints on first run; a caller that supplies none is told the truth
+  // rather than shown a fabricated link.
+  const d = deps({ serverEntry: { command: "node", args: ["server.ts"] }, mintOwnerLink: async () => undefined });
   const launcher = createLauncher(options(), d);
   const result = await launcher.start();
   assert.equal(result.ok, true);
   assert.equal(result.ownerLink, undefined);
-  assert.match(d.logs.join("\n"), /P1-06/);
+  assert.match(d.logs.join("\n"), /--reissue-owner/);
   await launcher.stop();
 });
 
@@ -254,5 +259,42 @@ test("the owner link is minted for the origin the owner will actually open", asy
 
   await launcher.start();
   assert.deepEqual(origins, ["http://100.90.202.61:8787"]);
+  await launcher.stop();
+});
+
+test("first boot mints and stores the link; a later boot does not print it again", async () => {
+  const { mkdtemp, readFile, stat } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "pupkeep-mint-"));
+  const d = deps({ serverEntry: { command: "node", args: ["server.ts"] }, mintOwnerLink: undefined });
+
+  const launcher = createLauncher(options(["--access", "local", "--data", dir], true), d);
+  const first = await launcher.start();
+  assert.equal(first.ok, true);
+  const stored = await readFile(join(dir, "owner-link.txt"), "utf8");
+  assert.match(stored, /\/login\?token=/);
+  assert.equal((await stat(join(dir, "owner-link.txt"))).mode & 0o777, 0o600);
+  await launcher.stop();
+
+  const second = createLauncher(options(["--access", "local", "--data", dir], true), deps({ serverEntry: { command: "node", args: ["server.ts"] }, mintOwnerLink: undefined }));
+  const again = await second.start();
+  assert.equal(again.ok, true);
+  assert.equal(again.ownerLink, undefined, "the link cannot be recovered from the hash");
+  await second.stop();
+});
+
+test("cloudflare with no tunnel yet mints nothing rather than a loopback link", async () => {
+  const { mkdtemp } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "pupkeep-mint-"));
+  const d = deps({
+    serverEntry: { command: "node", args: ["server.ts"] },
+    mintOwnerLink: async (_dir, origin) => (origin ? { link: `${origin}/login?token=x`, minted: true } : "no-origin"),
+  });
+  const launcher = createLauncher(options(["--access", "cloudflare", "--data", dir]), d);
+  const result = await launcher.start();
+  assert.equal(result.ok, true);
+  assert.equal(result.ownerLink, undefined);
+  assert.match(d.logs.join("\n"), /tunnel URL is not known yet/);
   await launcher.stop();
 });
