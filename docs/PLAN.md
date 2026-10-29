@@ -1165,7 +1165,9 @@ models without a version bump. On 2026-10-28 OpenCode Go returned
 variant and 429 for `openrouter/free`. `mimo-v2.6-flash`, `beam-free` and
 `deepseek-v4.1-flash` passed a real tool-call probe. The allowlist is built by a
 **bounded, parallel startup probe**: one probe turn, ~15s timeout, once per
-boot, cached. Drop only 401/404/410/deprecated models; treat 429/network/offline
+boot, cached as `~/.pupkeep/models.json` in the `{version, checkedAt, results}`
+shape P1-03 defined (`parseModelProbeCache` refuses anything else rather than
+half-reading it). Drop only 401/404/410/deprecated models; treat 429/network/offline
 as “unknown” and keep the last-known-good cached allowlist instead of hiding a
 usable model. Record the result in the Settings sheet. `mimo-v2.6-flash` is the default only if it passes; otherwise the cheapest
 available paid fallback is used. Free models are best-effort; the probe decides,
@@ -1705,7 +1707,7 @@ that the partner is reached out-of-app is gated on P0-10.
 
 - [ ] **P1-01** Repo scaffold: directories, `README`, `AGENTS`, `LICENSE`,
       `NOTICE`, `.gitignore`, `.env.example`.
-- [ ] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.4.0`, shared package pin, persistent
+- [ ] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.4.0`, shared package pin (installed **locally** in the image or `postCreate` — never declared in this repo's `.pi/settings.json`, which duplicates the enclosing workspace's extensions and breaks subagent startup), persistent
       pi volume, `cloudflared`, `sqlite3`, `tmux`, `gh`, `jq`, `rclone`, port
       8787, `postCreate`, `tsc --noEmit`. Verify the
       `javascript-node:24-bookworm` tag and the shared package/pi compatibility
@@ -1733,8 +1735,11 @@ that the partner is reached out-of-app is gated on P0-10.
       `push.json`, mode `0700/0600`, serialized per-file writes, log scrub,
       logging, one-process pid lock (P0-01 deferred; P1-04 calls it). **Owns the
       log scrub**, which should absorb P1-03's `redactDetail` so every path gets
-      one implementation. Also owns the serialized write of the model-probe cache
-      (`models.json`), whose reader is P4-08.
+      one implementation, and move `statusFromMessage`/`fromCode` to
+      `src/shared/` so P4-08's "retry with fallback model" reuses them instead of
+      re-deriving 410/429/5xx. Also owns the serialized write of the model-probe
+      cache (`models.json`) in the shape `parseModelProbeCache` accepts
+      (`{version, checkedAt, results}`, P1-03); P4-08 is the reader.
 - [ ] **P1-06** Auth: owner token hash, **owner reissue/rotate**, one-time
       hashed invite, hashed sessions, cookie, owner/member roles, authz matrix,
       remove member + purge sessions, rate limit, per-origin cookies.

@@ -265,6 +265,29 @@ test("one hung target does not hold the whole probe open", async () => {
   );
 });
 
+test("the parenthesised provider format some adapters emit is classified", () => {
+  // openai-responses and azure-openai-responses format failures as
+  // "<prefix> (<status>): <body>". Missing this shape kept a 410 alive forever.
+  assert.equal(statusFromError(new Error("Azure OpenAI API error (410): Gone")), "deprecated");
+  assert.equal(statusFromError(new Error("OpenAI API error (404): no such model")), "not_found");
+  assert.equal(statusFromError(new Error("provider (429): slow down")), "rate_limited");
+  // Still narrow: prose with a parenthesised number is not an HTTP status.
+  assert.equal(statusFromError(new Error("retried (3) times")), "network");
+  assert.equal(statusFromError(new Error("model mimo-v4.1-410 (2026) failed")), "network");
+});
+
+test("a caller can cancel the whole sweep without waiting out a model", async () => {
+  const controller = new AbortController();
+  const started = Date.now();
+  setTimeout(() => controller.abort(), 10);
+  const result = await runProbe(target, () => new Promise<never>(() => {}), {
+    timeoutMs: 60_000, // far longer than the cancel
+    signal: controller.signal,
+  });
+  assert.equal(result.status, "timeout");
+  assert.ok(Date.now() - started < 1_000, "cancel must not wait for the deadline");
+});
+
 // --- allowlist -------------------------------------------------------------
 
 function result(
@@ -285,60 +308,62 @@ function result(
 }
 
 test("only deprecated, not_found and unauthorized drop a model", () => {
-  const fresh = [
-    result("a/ok", "ok"),
-    result("a/gone", "deprecated"),
-    result("a/missing", "not_found"),
-    result("a/keys", "unauthorized"),
-    result("a/busy", "rate_limited"),
-    result("a/flaky", "network"),
-    result("a/slow", "timeout"),
-  ];
-  const list = resolveAllowlist([], fresh);
+  const list = resolveAllowlist(
+    [],
+    [
+      result("a/ok", "ok"),
+      result("a/gone", "deprecated"),
+      result("a/missing", "not_found"),
+      result("a/keys", "unauthorized"),
+      result("a/busy", "rate_limited"),
+      result("a/flaky", "network"),
+      result("a/slow", "timeout"),
+    ],
+  );
 
-  assert.deepEqual(
-    list.allowed.map((entry) => entry.id),
-    ["a/ok"],
-  );
-  assert.deepEqual(
-    list.dropped.map((drop) => drop.entry.id),
-    ["a/gone", "a/missing", "a/keys"],
-  );
-  assert.deepEqual(
-    list.unverified.map((u) => u.entry.id),
-    ["a/busy", "a/flaky", "a/slow"],
-  );
-  // Unknown with no history is unverified, and the reason says which kind.
+  assert.deepEqual(list.allowed.map((e) => e.id), ["a/ok"]);
+  assert.deepEqual(list.dropped.map((e) => e.id), ["a/gone", "a/missing", "a/keys"]);
+  assert.deepEqual(list.unverified.map((u) => u.entry.id), ["a/busy", "a/flaky", "a/slow"]);
   assert.ok(list.unverified.every((u) => u.reason === "inconclusive"));
 });
 
 test("reachable is not usable: ok without a tool call will not be allowed", () => {
   const list = resolveAllowlist([], [result("a/chatty", "ok", false)]);
   assert.deepEqual(list.allowed, []);
-  assert.equal(list.unverified.length, 1);
   assert.equal(list.unverified[0]!.reason, "tool_call_missing");
 });
 
-test("a rate limit keeps the last known good entry, including its tool call", () => {
-  const list = resolveAllowlist([result("a/busy", "ok", true)], [result("a/busy", "rate_limited", false)]);
-  assert.deepEqual(
-    list.allowed.map((entry) => entry.id),
-    ["a/busy"],
+test("a rate limit keeps the last known good entry, with both timestamps", () => {
+  const list = resolveAllowlist(
+    [result("a/busy", "ok", true, "2026-10-01T09:00:00.000Z")],
+    [result("a/busy", "rate_limited", false, "2026-10-29T00:00:00.000Z")],
   );
-  assert.equal(list.allowed[0]!.toolCall, true);
+  assert.deepEqual(list.allowed.map((e) => e.id), ["a/busy"]);
+  const entry = list.allowed[0]!;
+  assert.equal(entry.toolCall, true);
+  // The attempt is today; the verification is the last real yes.
+  assert.equal(entry.checkedAt, "2026-10-29T00:00:00.000Z");
+  assert.equal(entry.verifiedAt, "2026-10-01T09:00:00.000Z");
+});
+
+test("an unknown status never resurrects a dropped model", () => {
+  // A 410 followed by a network blip must stay dropped, not become "unverified".
+  const list = resolveAllowlist([result("a/gone", "deprecated")], [result("a/gone", "network")]);
+  assert.deepEqual(list.dropped.map((e) => e.id), ["a/gone"]);
+  assert.equal(list.dropped[0]!.status, "deprecated");
   assert.deepEqual(list.unverified, []);
+
+  const revoked = resolveAllowlist([result("a/keys", "unauthorized")], [result("a/keys", "rate_limited")]);
+  assert.deepEqual(revoked.dropped.map((e) => e.status), ["unauthorized"]);
 });
 
 test("a drop beats history, and a later ok brings the model back", () => {
   const dropped = resolveAllowlist([result("a/x", "ok")], [result("a/x", "deprecated")]);
   assert.deepEqual(dropped.allowed, []);
-  assert.deepEqual(dropped.dropped.map((d) => d.status), ["deprecated"]);
+  assert.deepEqual(dropped.dropped.map((e) => e.status), ["deprecated"]);
 
   const revived = resolveAllowlist([result("a/x", "deprecated")], [result("a/x", "ok")]);
-  assert.deepEqual(
-    revived.allowed.map((entry) => entry.id),
-    ["a/x"],
-  );
+  assert.deepEqual(revived.allowed.map((e) => e.id), ["a/x"]);
   assert.deepEqual(revived.dropped, []);
 });
 
@@ -348,23 +373,18 @@ test("a model missing from the fresh run keeps its cached bucket", () => {
     [result("a/new", "ok")],
   );
 
-  assert.deepEqual(
-    list.allowed.map((entry) => entry.id).sort(),
-    ["a/new", "a/old"],
-  );
-  assert.deepEqual(
-    list.dropped.map((d) => d.entry.id),
-    ["a/dead"],
-  );
-  // A cached "unknown" is never probed again by this run, and says so.
-  assert.deepEqual(
-    list.unverified.map((u) => u.entry.id),
-    ["a/busy"],
-  );
+  assert.deepEqual(list.allowed.map((e) => e.id).sort(), ["a/new", "a/old"]);
+  assert.deepEqual(list.dropped.map((e) => e.id), ["a/dead"]);
+  assert.deepEqual(list.unverified.map((u) => u.entry.id), ["a/busy"]);
   assert.equal(list.unverified[0]!.reason, "never_probed");
 });
 
-test("the cache keeps the timestamp, so the picker can say how old it is", () => {
-  const list = resolveAllowlist([], [result("a/ok", "ok", true, "2026-10-01T09:00:00.000Z")]);
-  assert.equal(list.allowed[0]!.checkedAt, "2026-10-01T09:00:00.000Z");
+test("repeating an id cannot put a model in two buckets", () => {
+  const list = resolveAllowlist(
+    [result("a/x", "ok", true), result("a/x", "rate_limited", false)],
+    [result("a/x", "ok", true), result("a/x", "ok", true)],
+  );
+  assert.deepEqual(list.allowed.map((e) => e.id), ["a/x"]);
+  assert.deepEqual(list.unverified, []);
+  assert.deepEqual(list.dropped, []);
 });

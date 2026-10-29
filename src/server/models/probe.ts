@@ -90,6 +90,12 @@ export type ProbeCall = (
 export interface ProbeOptions {
   /** Per-model timeout. Default 15 s — one turn, as P0-05 recorded. */
   timeoutMs?: number;
+  /**
+   * Optional sweep-level cancel, so a boot budget can stop the whole probe
+   * without waiting out one model's timeout. Composed with the per-model
+   * deadline; a cancelled probe is recorded as `timeout` (unknown, kept).
+   */
+  signal?: AbortSignal;
   /** Clock, injected so `checkedAt`/latency are deterministic in tests. */
   now?: () => number;
   /** Runs targets concurrently. Default 4; the probe must not stampede a provider. */
@@ -117,10 +123,16 @@ export function statusFromError(error: unknown): ProbeStatus {
   const text = messageOf(error);
   if (!text) return "network";
 
-  // Pi AI formats a provider failure as `${status}: ${body}` (see
-  // `formatProviderError` in each adapter), so a leading code is the common case.
+  // Pi AI formats a provider failure in three shapes (see `formatProviderError`):
+  //   "410: {body}"                    — openai-completions
+  //   "Some API error (410): {body}"   — openai-responses, azure-openai-responses
+  //   a bare message.
+  // The parenthesised form matters: without it, a 410 from those adapters is
+  // `network` (kept forever) unless the body happens to say "deprecated".
   const leading = /^\s*(?:error[: ]\s*)?(?:http\s+|status\s*)?(\d{3})\b/i.exec(text);
   if (leading) return fromCode(Number(leading[1]));
+  const parenthesised = /^\s*[^0-9\s][^()]{0,60}\(\s*(\d{3})\s*\)\s*[:!]/i.exec(text);
+  if (parenthesised) return fromCode(Number(parenthesised[1]));
 
   if (/\b(?:model\s*deprecated|model_deprecated|410\s+gone)\b/i.test(text)) return "deprecated";
   if (/\b(?:too\s*many\s*requests|rate[\s-]?limit(?:ed)?)\b/i.test(text)) return "rate_limited";
@@ -200,7 +212,18 @@ export function statusFromMessage(message: AssistantMessage): ProbeStatus {
     const detail = message.errorMessage ?? "";
     return detail ? statusFromError(new Error(detail)) : "network";
   }
+  // Not finished is not "reachable": a deferred or pending resolution says
+  // nothing about this model yet, so it is unknown rather than ok.
+  if (message.stopReason === "deferred" || message.stopReason === "pending") return "network";
   return "ok";
+}
+
+function reasonOf(signal: AbortSignal | undefined): Error {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  const error = new Error(signal ? "probe cancelled" : "probe timeout");
+  error.name = "TimeoutError";
+  return error;
 }
 
 function timeoutError(timeoutMs: number): Error {
@@ -220,6 +243,12 @@ export async function runProbe(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const started = now();
   const controller = new AbortController();
+  const external = options.signal;
+  const cancel = () => controller.abort(reasonOf(external));
+  if (external) {
+    if (external.aborted) cancel();
+    else external.addEventListener("abort", cancel, { once: true });
+  }
 
   const base = {
     id: `${target.provider}/${target.model}`,
@@ -248,8 +277,19 @@ export async function runProbe(
     }, timeoutMs);
   });
 
+  // A call that ignores its signal still loses to a cancel; the deadline already
+  // covers the timer case.
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    if (controller.signal.aborted) reject(reasonOf(controller.signal));
+    else controller.signal.addEventListener("abort", () => reject(reasonOf(controller.signal)), { once: true });
+  });
+
   try {
-    const message = await Promise.race([call(target, context, controller.signal), deadline]);
+    const message = await Promise.race([
+      call(target, context, controller.signal),
+      deadline,
+      cancelled,
+    ]);
     return {
       ...base,
       status: statusFromMessage(message),
@@ -271,6 +311,7 @@ export async function runProbe(
     };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    external?.removeEventListener("abort", cancel);
   }
 }
 
