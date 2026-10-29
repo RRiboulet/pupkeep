@@ -34,7 +34,14 @@ import { Auth, RateLimiter } from "./auth.ts";
 import { acquireLock, SERVER_LOCK_FILE, type LockHandle } from "./lock.ts";
 import { closeHarness, openHarness, type OpenedHarness, type OpenHarnessOptions } from "./harness.ts";
 import { bootstrapSession, type BootstrapResult } from "./domain/bootstrap.ts";
-import { bindOrigins, createAppHandler, SUBMIT_LIMIT, SUBMIT_WINDOW_MS } from "./http.ts";
+import {
+  bindOrigins,
+  createAppHandler,
+  SIGNIN_LIMIT,
+  SIGNIN_WINDOW_MS,
+  SUBMIT_LIMIT,
+  SUBMIT_WINDOW_MS,
+} from "./http.ts";
 import { ThreadBus } from "./agent/bus.ts";
 import { pickInitialModel, SHARED_THREAD_INSTRUCTIONS } from "./agent/model.ts";
 import {
@@ -93,6 +100,11 @@ export interface AppHandle {
   readonly app: HarnessType;
   /** Bound origin of the scaffold listener, or "" when it never opened. */
   readonly url: string;
+  /**
+   * The shared-thread event fanout, exposed only for diagnostics (the waiter
+   * test). Absent when the scaffold listener is wired instead.
+   */
+  readonly threadBus?: ThreadBus;
   /** Resolves when the app has stopped; a healthy app never resolves it. */
   readonly done: Promise<AppEnd>;
   close(): Promise<AppEnd>;
@@ -537,6 +549,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         thread,
         bus,
         submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
+        signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
         allowedOrigins: () => bindOrigins(options.host, boundPort),
         logger,
       });
@@ -575,6 +588,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   const app: AppHandle = {
     app: opened.harness,
     url: listener?.url ?? "",
+    ...(bus !== undefined ? { threadBus: bus } : {}),
     done,
     close: () => shutdown("closed"),
     parkedTasks: () => [...parked.values()],

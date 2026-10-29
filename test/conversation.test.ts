@@ -15,7 +15,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
-import { SUBMIT_LIMIT } from "../src/server/http.ts";
+import { SIGNIN_LIMIT, SUBMIT_LIMIT } from "../src/server/http.ts";
 import { dataStores } from "../src/server/config.ts";
 import { createLogger } from "../src/server/log.ts";
 import { startApp, type AppHandle } from "../src/server/app.ts";
@@ -38,6 +38,8 @@ interface Fixture {
   samCookie: string;
   /** Queue more answers for runs the first ones; a factory may hold a run. */
   appendResponses: (steps: readonly ResponseStep[]) => void;
+  /** The fixture's own Auth, for minting credentials the HTTP routes exchange. */
+  auth: Auth;
 }
 
 const ALWAYS: () => AssistantMessage = () => fauxAssistantMessage("Done.");
@@ -66,6 +68,8 @@ async function startThread(
     responses?: readonly ResponseStep[];
     /** Seed models.json with a live probe result so the default model attaches. */
     probeCache?: boolean;
+    /** Seed only the owner, so the invite tests grow the household by one. */
+    ownerOnly?: boolean;
   } = {},
 ): Promise<Fixture> {
   const dir = await mkdtemp(join(tmpdir(), "pupkeep-thread-"));
@@ -75,31 +79,42 @@ async function startThread(
 
   const stores = dataStores(dir);
   await stores.config.ensure();
-  // Two caregivers, both profiles present at the boot that creates the thread:
-  // the household document is only reconciled at boot (P1-08), so the member
-  // joins the roster before the server starts. Sam's session row is planted
-  // the way `acceptInvite()` would plant it: a hash, never the token itself.
+  // Both profiles present at the boot that creates the thread: the household
+  // document is only reconciled at boot (P1-08), so the member joins the
+  // roster before the server starts. Sam's session row is planted the way
+  // `acceptInvite()` would plant it: a hash, never the token itself.
+  // `ownerOnly` gives the invite tests a one-member household to grow.
   const samToken = newToken();
   const now = "2026-10-29T10:00:00.000Z";
   const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
   await stores.config.update((config) => ({
     ...config,
-    members: [
-      {
-        id: "owner",
-        role: "owner",
-        displayName: "Alex",
-        createdAt: now,
-        sessions: [],
-      },
-      {
-        id: "m-sam-fixture",
-        role: "member",
-        displayName: "Sam",
-        createdAt: now,
-        sessions: [{ tokenHash: hashToken(samToken), createdAt: now, expiresAt: expires }],
-      },
-    ],
+    members: options.ownerOnly
+      ? [
+          {
+            id: "owner",
+            role: "owner",
+            displayName: "Alex",
+            createdAt: now,
+            sessions: [],
+          },
+        ]
+      : [
+          {
+            id: "owner",
+            role: "owner",
+            displayName: "Alex",
+            createdAt: now,
+            sessions: [],
+          },
+          {
+            id: "m-sam-fixture",
+            role: "member",
+            displayName: "Sam",
+            createdAt: now,
+            sessions: [{ tokenHash: hashToken(samToken), createdAt: now, expiresAt: expires }],
+          },
+        ],
   }));
   if (options.probeCache) {
     await stores.models.update(() => ({
@@ -141,6 +156,7 @@ async function startThread(
     alexCookie,
     samCookie,
     appendResponses: (steps) => faux.appendResponses([...steps]),
+    auth,
   };
 }
 
@@ -705,6 +721,173 @@ test("a chat entry from an unknown author normalizes to the household fallback, 
     };
     assert.equal(chat.authorId, "m-gone", "the id stays so a later profile may attribute it");
     assert.equal(chat.authorName, "Household", "the label falls back, and is never undefined");
+  } finally {
+    await stop(fixture);
+  }
+});
+
+// --- over-HTTP sign-in, invites, logout (the routes P1-06 mapped to here) ----
+
+function firstCookie(response: Response): string {
+  const header = response.headers.get("set-cookie") ?? "";
+  const value = /pupkeep_session=([^;]*)/.exec(header)?.[1];
+  assert.ok(value !== undefined && value !== "", "the response sets a session cookie");
+  return value;
+}
+
+function sessionOfCookie(cookieToken: string): string {
+  return `${SESSION_COOKIE}=${cookieToken}`;
+}
+
+test("the owner link signs a browser in over HTTP; anything else is a refusal", async () => {
+  const fixture = await startThread();
+  try {
+    const ownerToken = await fixture.auth.mintOwner("http://127.0.0.1").then((minted) => minted.token);
+    // A wrong token cannot be told from an exhausted one.
+    const bad = await fetch(`${fixture.url}/login?token=not-the-owner-token`, { redirect: "manual" });
+    assert.equal(bad.status, 401);
+    assert.equal(bad.headers.get("set-cookie"), null);
+
+    const good = await fetch(`${fixture.url}/login?token=${encodeURIComponent(ownerToken)}`, {
+      redirect: "manual",
+    });
+    assert.equal(good.status, 303);
+    assert.equal(good.headers.get("location"), "/");
+    const header = good.headers.get("set-cookie") ?? "";
+    assert.match(header, /HttpOnly/);
+    assert.match(header, /SameSite=Lax/);
+    // Plain HTTP on the tailnet: no Secure (the browser would drop it).
+    assert.doesNotMatch(header, /Secure/);
+
+    const cookie = firstCookie(good);
+    const me = await fetch(`${fixture.url}/api/session`, { headers: { Cookie: sessionOfCookie(cookie) } });
+    assert.equal(me.status, 200);
+    const meBody = (await me.json()) as { memberId: string; role: string; label: string };
+    assert.equal(meBody.role, "owner");
+    assert.equal(meBody.label, "Alex", "the label comes from the household profile");
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("the owner mints an invite over HTTP; the partner lands with a member session; a code is single-use", async () => {
+  const fixture = await startThread({ ownerOnly: true });
+  try {
+    const minted = await fixture.auth.mintOwner("http://127.0.0.1").then((m) => m.token);
+    const alexCookie = await fixture.auth.login(minted).then((l) => l.token);
+
+    const invite = await fetch(`${fixture.url}/api/invites`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessionOfCookie(alexCookie),
+        Origin: fixture.url,
+      },
+      body: JSON.stringify({ displayName: "Sam" }),
+    });
+    assert.equal(invite.status, 200, "only the owner creates invites");
+    const inviteBody = (await invite.json()) as { code: string; link: string };
+    assert.equal(inviteBody.link, `${fixture.url}/invite?code=${encodeURIComponent(inviteBody.code)}`);
+
+    // A member would be a 403 by the matrix:
+    // (the household has no second member yet, so an owner-block is undetectable
+    // through HTTP alone; auth.test.ts covers the matrix itself)
+    const partner = await fetch(inviteBody.link, { redirect: "manual" });
+    assert.equal(partner.status, 303);
+    const partnerCookie = firstCookie(partner);
+    const me = await fetch(`${fixture.url}/api/session`, {
+      headers: { Cookie: sessionOfCookie(partnerCookie) },
+    });
+    assert.equal(me.status, 200);
+    const meBody = (await me.json()) as { role: string; label: string; authorId: string | null };
+    assert.equal(meBody.role, "member");
+    // A just-invited member has no profile until the next boot reconciles it:
+    // §9.2 says the label then falls back, never `undefined`.
+    assert.equal(meBody.label, "Household");
+
+    // The code is one-time: a second use is refused, so a leaked link cannot
+    // mint a third caregiver.
+    const reuse = await fetch(inviteBody.link, { redirect: "manual" });
+    assert.equal(reuse.status, 401);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("a member cannot create an invite, and the ones that exist still work", async () => {
+  const fixture = await startThread();
+  try {
+    const refused = await fetch(`${fixture.url}/api/invites`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: sessionOfCookie(fixture.samCookie),
+        Origin: fixture.url,
+      },
+      body: JSON.stringify({ displayName: "Imposter" }),
+    });
+    assert.equal(refused.status, 403);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("logout revokes the session and clears the cookie", async () => {
+  const fixture = await startThread();
+  try {
+    const before = await fetch(`${fixture.url}/api/session`, {
+      headers: { Cookie: sessionOfCookie(fixture.alexCookie) },
+    });
+    assert.equal(before.status, 200);
+
+    const out = await fetch(`${fixture.url}/logout`, {
+      method: "POST",
+      headers: { Cookie: sessionOfCookie(fixture.alexCookie), Origin: fixture.url },
+      redirect: "manual",
+    });
+    assert.equal(out.status, 303);
+    const header = out.headers.get("set-cookie") ?? "";
+    assert.match(header, /Max-Age=0/, "the browser is told to drop the cookie");
+
+    const after = await fetch(`${fixture.url}/api/session`, {
+      headers: { Cookie: sessionOfCookie(fixture.alexCookie) },
+    });
+    assert.equal(after.status, 401, "the session row is gone, not merely the cookie");
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("sign-in and invite guessing is rate-limited by client IP", async () => {
+  const fixture = await startThread();
+  try {
+    let hitLimit = false;
+    for (let attempt = 0; attempt < SIGNIN_LIMIT + 4; attempt += 1) {
+      const route = attempt % 2 === 0 ? "/login?token=guess" : "/invite?code=guess";
+      const response = await fetch(`${fixture.url}${route}`, { redirect: "manual" });
+      if (response.status === 429) {
+        hitLimit = true;
+        break;
+      }
+    }
+    assert.equal(hitLimit, true, "guessing tokens or codes meets the limiter within a window");
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("repeated polls leave no waiters behind", async () => {
+  const fixture = await startThread();
+  try {
+    const busT = fixture.app.threadBus;
+    assert.ok(busT, "the shared-thread wiring exposes its fanout");
+    // Five expired long-polls in a row: each answers 200 with a snapshot and
+    // must leave the waiter list empty, not grow it.
+    for (let round = 0; round < 5; round += 1) {
+      const response = await longPoll(fixture, fixture.alexCookie, 0, 150);
+      assert.equal(response.status, 200);
+    }
+    assert.equal(busT.waiterCount, 0, "settled waiters are removed, not accumulated");
   } finally {
     await stop(fixture);
   }

@@ -1,10 +1,16 @@
-// The HTTP core of the server: one small router, session auth, origin-checked
-// mutations, rate limits, and the shared-thread routes (P1-09).
+// The HTTP core of the server: one small router, sign-in/invite/session
+// routes, origin-checked mutations, rate limits, and the shared-thread routes
+// (P1-06's decision mapped here, P1-09).
 //
 // This is deliberately a small functions-over-`node:http` router, not a frame-
 // work: the server runs on one phone for two caregivers, and the routes are
 //
 //   GET  /healthz                liveness (no version, no counts, no paths)
+//   GET  /login?token=          owner sign-in link: session cookie, 303 to /
+//   GET  /invite?code=          partner invite link: session cookie, 303 to /
+//   POST /logout                revoke the current session, clear the cookie
+//   GET  /api/session           who am I (label from the household, not auth)
+//   POST /api/invites           owner-only invite creation, returns {code,link}
 //   POST /api/agent/messages     submit into the shared thread (busy = 409)
 //   GET  /api/agent/thread       full snapshot (transcript/tool cards/busy)
 //   GET  /api/agent/events       SSE: snapshot first, then deltas
@@ -16,10 +22,13 @@
 //     `originAllowed` plus a same-origin `Host` check for the tailnet
 //     addresses this process cannot enumerate (it only knows its bind host);
 //   * every failure answers through one mapper, so no stack trace leaves.
+//   * sign-in/invite links are clicked from an SMS/chat client, so they are
+//     GETs without an Origin; tokens and codes are single-use credentials,
+//     and guessing them is met by an IP rate limit (§14.2).
 
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import type { AgentEvent } from "@earendil-works/pi-durable";
-import { THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
+import { HOUSEHOLD_FALLBACK_LABEL, THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
 import {
   Auth,
   AuthError,
@@ -30,6 +39,8 @@ import {
   Refusal,
   originAllowed,
   parseSessionCookie,
+  sessionCookie,
+  type CookieOptions,
   requireAction,
   type Session,
 } from "./auth.ts";
@@ -47,6 +58,9 @@ import type { ThreadBus } from "./agent/bus.ts";
 /** Generous click-submit cadence; a double-send dedupes before this counts. */
 export const SUBMIT_LIMIT = 20;
 export const SUBMIT_WINDOW_MS = 60_000;
+/** Sign-in/invite attempts: a token or code is a high-value guess. */
+export const SIGNIN_LIMIT = 10;
+export const SIGNIN_WINDOW_MS = 60_000;
 export const BODY_LIMIT_BYTES = 8_192;
 export const TEXT_LIMIT = 2000;
 export const CLIENT_ID_LIMIT = 100;
@@ -77,6 +91,8 @@ export interface HttpDeps {
   readonly bus: ThreadBus;
   /** Session-submit rate limiter, keyed per member. */
   readonly submitLimiter: RateLimiter;
+  /** Sign-in/invite rate limiter, keyed per client IP (PLAN §14.2). */
+  readonly signInLimiter: RateLimiter;
   /** Origins mutations may come from; a function because the tunnel origin moves. */
   readonly allowedOrigins: () => readonly string[];
   readonly logger: Logger;
@@ -108,11 +124,59 @@ function sameOrigin(origin: string | undefined, hostHeader: string | undefined):
   }
 }
 
+// --- proxy trust (PLAN §14.2) ----------------------------------------------
+
+/** A peer address is loopback only when it *is* one of the loopback addresses. */
+function peerIsLoopback(req: IncomingMessage): boolean {
+  const address = req.socket.remoteAddress ?? "";
+  return address === "::1" || address === "127.0.0.1" || address === "::ffff:127.0.0.1";
+}
+
+/**
+ * The scheme of the request as the browser saw it. `x-forwarded-proto` is
+ * trusted only from a loopback peer — the launcher's own cloudflared quick
+ * tunnel connects locally — never from an arbitrary client header.
+ */
+function requestScheme(req: IncomingMessage): "http" | "https" {
+  if (!peerIsLoopback(req)) return "http";
+  const forwarded = req.headers["x-forwarded-proto"];
+  const first = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  return typeof first === "string" && first.split(",")[0]?.trim() === "https" ? "https" : "http";
+}
+
+/**
+ * The client IP for rate limits: behind the local tunnel the real client is
+ * in `CF-Connecting-IP`, trusted only from a loopback peer (§14.2); elsewhere
+ * it is the peer address itself.
+ */
+function clientIp(req: IncomingMessage): string {
+  if (peerIsLoopback(req)) {
+    const forwarded = req.headers["cf-connecting-ip"];
+    const first = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+    if (typeof first === "string" && first.trim() !== "") return first.trim();
+  }
+  return req.socket.remoteAddress ?? "unknown";
+}
+
+// --- redirects and cookies --------------------------------------------------
+
+/** A sign-in/invite/logout answer is a browser click: 303 to the app root. */
+function redirect(res: ServerResponse, location: string): void {
+  res.statusCode = 303;
+  res.setHeader("Location", location);
+  res.setHeader("Cache-Control", "no-store");
+  res.end();
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.statusCode = status;
   res.end(JSON.stringify(body));
+}
+
+function cookieOptionsFor(req: IncomingMessage): CookieOptions {
+  return { secure: requestScheme(req) === "https" };
 }
 
 interface SubmitBody {
@@ -209,6 +273,32 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       throw new NotFoundError("no such method");
     }
 
+    if (pathname === "/login" && req.method === "GET") {
+      await handleLogin(deps, req, res);
+      return;
+    }
+
+    if (pathname === "/invite" && req.method === "GET") {
+      await handleInvite(deps, req, res);
+      return;
+    }
+
+    if (pathname === "/logout" && req.method === "POST") {
+      await handleLogout(deps, req, res, requireAgent(session));
+      return;
+    }
+
+    if (pathname === "/api/session" && req.method === "GET") {
+      await handleSession(deps, res, requireAgent(session));
+      return;
+    }
+
+    if (pathname === "/api/invites" && req.method === "POST") {
+      // Owner-only by the P1-06 matrix; requireAction refuses a member with 403.
+      await handleInvites(deps, req, res, requireAction(requireAgent(session), "invite"));
+      return;
+    }
+
     if (pathname === "/api/agent/messages" && req.method === "POST") {
       await handleMessage(deps, req, res, requireAgent(session));
       return;
@@ -220,6 +310,7 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       sendJson(res, 200, snapshot);
       return;
     }
+
 
     if (pathname === "/api/agent/events" && req.method === "GET") {
       await handleEvents(deps, req, res, requireAgent(session));
@@ -295,6 +386,104 @@ async function handleMessage(
   );
 }
 
+// --- sign-in / invites / session --------------------------------------------
+
+/**
+ * The owner link's target: exchange the link token for a session cookie.
+ * Token and cookie values never reach the log — the mapper logs only statuses.
+ */
+async function handleLogin(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (!deps.signInLimiter.hit(`signin:${clientIp(req)}`)) {
+    throw new RateLimitError("too many sign-in attempts; wait a minute");
+  }
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const token = url.searchParams.get("token") ?? "";
+  if (token === "") throw new AuthError("not signed in");
+  const login = await deps.auth.login(token);
+  res.setHeader("Set-Cookie", sessionCookie(login.token, cookieOptionsFor(req)));
+  redirect(res, "/");
+}
+
+/** The partner invite's target: exchange the one-time code for a session. */
+async function handleInvite(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (!deps.signInLimiter.hit(`signin:${clientIp(req)}`)) {
+    throw new RateLimitError("too many sign-in attempts; wait a minute");
+  }
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const code = url.searchParams.get("code") ?? "";
+  if (code === "") throw new AuthError("invite is not valid");
+  const accepted = await deps.auth.acceptInvite(code);
+  res.setHeader("Set-Cookie", sessionCookie(accepted.token, cookieOptionsFor(req)));
+  redirect(res, "/");
+}
+
+/** Sign-out this device: revoke the session row, then clear the cookie. */
+async function handleLogout(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const origin = req.headers.origin;
+  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
+    throw new ForbiddenError(session.role, "agent");
+  }
+  const token = parseSessionCookie(req.headers.cookie);
+  if (token) await deps.auth.revokeSession(token);
+  res.setHeader("Set-Cookie", sessionCookie("", { ...cookieOptionsFor(req), maxAgeSeconds: 0 }));
+  redirect(res, "/");
+}
+
+/** Who is asking — role from auth, but the label from the household profiles. */
+async function handleSession(deps: HttpDeps, res: ServerResponse, session: Session): Promise<void> {
+  const household = await readHousehold(deps.thread);
+  const profile = household.members.find((member) => member.id === session.memberId);
+  const label = profile?.name ?? HOUSEHOLD_FALLBACK_LABEL;
+  sendJson(res, 200, {
+    memberId: session.memberId,
+    role: session.role,
+    label,
+    // The household-fallback fence: a null author id goes with the fallback.
+    authorId: profile ? session.memberId : null,
+  });
+}
+
+/** Owner-only: mint the partner's invite until the Settings sheet exists (P4). */
+async function handleInvites(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  actor: Session,
+): Promise<void> {
+  const origin = req.headers.origin;
+  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
+    throw new ForbiddenError(actor.role, "invite");
+  }
+  if (!deps.signInLimiter.hit(`signin:${clientIp(req)}`)) {
+    throw new RateLimitError("too many attempts; wait a minute");
+  }
+  const body = (await readJsonBody(req)) as { displayName?: unknown };
+  const displayName = typeof body.displayName === "string" ? body.displayName.trim() : "";
+  if (displayName === "" || displayName.length > 64) {
+    throw new ConflictError("an invite needs a display name");
+  }
+  const code = await deps.auth.createInvite(actor, displayName);
+  // The link points wherever this owner is browsing right now — the browser's
+  // own origin — so the partner's phone lands on the same access mode.
+  const scheme = requestScheme(req);
+  const host = req.headers.host ?? "localhost";
+  const link = `${scheme}://${host}/invite?code=${encodeURIComponent(code)}`;
+  sendJson(res, 200, { code, link });
+}
+
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {
   return readThreadSnapshot(deps.thread, deps.bus.seq);
 }
@@ -317,36 +506,53 @@ async function handleEvents(
   res: ServerResponse,
   session: Session,
 ): Promise<void> {
+  // The snapshot is read before the SSE headers are set: a thread that cannot
+  // be read fails as a clean JSON 503, not as part-opened event stream.
+  const initial = await snapshotOf(deps);
+
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Connection", "keep-alive");
   res.statusCode = 200;
   res.write("retry: 3000\n\n");
 
-  // Snapshot first, then deltas — the §9.4 rule every attach obeys, including
-  // a browser that only misplaced a connection at the tunnel restart.
-  const initial = await snapshotOf(deps);
   let live = true;
+  let opened = false;
+  const queue: Array<{ type: "batch" | "reconnect"; events?: readonly AgentEvent[] }> = [];
+
+  const deliver = (item: { type: "batch" | "reconnect"; events?: readonly AgentEvent[] }): void => {
+    if (item.type === "batch") {
+      writeEvent(res, "batch", { seq: deps.bus.seq, ...(item.events ? { events: item.events } : {}) });
+      return;
+    }
+    // Not a fake event from another conversation: a marker to reattach.
+    writeEvent(res, "reconnect");
+    res.end();
+    live = false;
+  };
+
   const subscriber = {
     notice: (type: "snapshot" | "batch" | "reconnect", events?: readonly AgentEvent[]) => {
       if (!live) return;
-      if (type === "batch") {
-        writeEvent(res, "batch", { seq: deps.bus.seq, ...(events ? { events } : {}) });
+      // §9.4 on every attach: the snapshot is written first, so deltas that
+      // arrive between subscribe() and the snapshot write queue up here.
+      if (!opened) {
+        queue.push({ type: type === "batch" ? "batch" : "reconnect", ...(events ? { events } : {}) });
         return;
       }
-      if (type === "reconnect") {
-        // Not a fake event from another conversation: a marker to reattach.
-        writeEvent(res, "reconnect");
-        res.end();
-        live = false;
-      }
+      deliver({ type: type === "batch" ? "batch" : "reconnect", ...(events ? { events } : {}) });
     },
     onClose: () => {
       live = false;
     },
   };
-  const unsubscribe = deps.bus.subscribe(session!.memberId, subscriber);
+  const unsubscribe = deps.bus.subscribe(session.memberId, subscriber);
   writeEvent(res, "snapshot", initial);
+  opened = true;
+  for (const item of queue.splice(0)) {
+    if (!live) break;
+    deliver(item);
+  }
 
   const heartbeat = setInterval(() => {
     if (live && !res.writableEnded) writeEvent(res, "heartbeat");

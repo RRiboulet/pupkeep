@@ -33,7 +33,7 @@ interface Connection {
 interface Waiter {
   readonly since: number;
   readonly settle: (result: "changed" | "timeout" | "closed") => void;
-  timer: NodeJS.Timeout | undefined;
+  /** Set once no matter the outcome, so a re-settle cannot double-act. */
   finished: boolean;
 }
 
@@ -44,7 +44,6 @@ export interface ThreadBusOptions {
   readonly context: Context;
   /** Kept-unref'd timers default; tests inject a fake one. */
   setTimer?: (callback: () => void, ms: number) => NodeJS.Timeout | undefined;
-  clearTimer?: (timer: NodeJS.Timeout | undefined) => void;
   /** The stream ended by itself; logs only, never a credential. */
   onEnded?: (message: string) => void;
 }
@@ -67,6 +66,11 @@ export class ThreadBus {
   /** Current event counter; every snapshot and poll answer answers with it. */
   get seq(): number {
     return this.#seq;
+  }
+
+  /** Diagnostics for tests: settled waiters must not accumulate. */
+  get waiterCount(): number {
+    return this.#waiters.length;
   }
 
   get closed(): boolean {
@@ -120,8 +124,9 @@ export class ThreadBus {
     }
   }
 
-  #settleWaiter(waiter: Waiter, result: "changed" | "timeout" | "closed"): void {
-    this.#options.clearTimer?.(waiter.timer);
+  /** Settle with bookkeeping; the timer path cleans itself in the poll. */
+  #settleWaiter(waiter: Waiter, result: "changed" | "closed"): void {
+    this.#waiters = this.#waiters.filter((entry) => entry !== waiter);
     waiter.settle(result);
   }
 
@@ -164,21 +169,21 @@ export class ThreadBus {
   poll(userId: string, since: number, timeoutMs: number): Promise<"changed" | "timeout" | "closed"> {
     if (this.#closed) return Promise.resolve("closed");
     return new Promise((resolve) => {
-      let timer: NodeJS.Timeout | undefined;
-      let unsubscribe: (() => void) | undefined;
-      let finished = false;
       const waiter: Waiter = {
         since,
+        finished: false,
         settle: (result) => {
-          if (finished) return;
-          finished = true;
-          timer = undefined;
-          unsubscribe?.();
+          if (waiter.finished) return;
+          waiter.finished = true;
+          // Leave on any settle, whatever the path: a long stream of expired
+          // polls must never grow this list.
+          this.#waiters = this.#waiters.filter((entry) => entry !== waiter);
+          unsubscribe();
           resolve(result);
         },
-        timer: undefined,
-        finished: false,
       };
+      let unsubscribe = (): void => undefined;
+
       // The poll's slot: the same per-user cap governs the fallback.
       const subscriber: Subscriber = {
         notice: (type) => {
@@ -187,15 +192,20 @@ export class ThreadBus {
         onClose: () => waiter.settle("closed"),
       };
       unsubscribe = this.subscribe(userId, subscriber);
-      const cleanup = this.#options.setTimer ?? ((callback: () => void, ms: number) => {
-        const handle = setTimeout(callback, ms);
-        handle.unref?.();
-        return handle;
-      });
-      timer = cleanup(() => waiter.settle("timeout"), Math.max(0, timeoutMs));
-      waiter.timer = timer;
-      this.#waiters.push(waiter);
-      if (this.#seq > since) waiter.settle("changed");
+
+      // A poll evicted during subscribe was already settled and removed;
+      // pushing it afterwards would leak, so only a live waiter is tracked.
+      if (!waiter.finished) {
+        const arm = this.#options.setTimer
+          ?? ((callback: () => void, ms: number) => {
+            const handle = setTimeout(callback, ms);
+            handle.unref?.();
+            return handle;
+          });
+        arm(() => waiter.settle("timeout"), Math.max(0, timeoutMs));
+        this.#waiters.push(waiter);
+        if (this.#seq > since) waiter.settle("changed");
+      }
     });
   }
 }
