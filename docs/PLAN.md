@@ -699,7 +699,9 @@ Stop rules:
   `app.household` document carries display profiles only; boot reconciliation
   may create a missing profile from `config.json`, but must **never** create
   auth or resurrect a removed member from a profile. A removed member stays
-  removed.
+  removed. Once a profile exists, its `name` is the display authority: a rename
+  in the app is not overwritten by the config seed. `config.json`'s
+  `displayName` is what seeds a missing profile and what auth/invite flows use.
 - The data directory is mode `0700`; set `umask` before opening the DB.
 
 ### 7.2 The write rule
@@ -854,7 +856,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | Document | Contents | Invariants |
 |---|---|---|
 | `app.household` | Name, timezone, display-member profiles, settings, shared conversation ID, hidden system conversation ID, reminder task IDs | Max two members; auth/roles live in `config.json`; the system conversation never calls a model |
-| `app.puppy` | Name, birthday, breed, sex, target weight, shower interval | One puppy; birthday is a local date; age computed |
+| `app.puppy` | Name, birthday, breed, sex, target weight | One puppy; birthday is a local date; age computed; the shower interval is `app.household.settings.showerIntervalDays` (one source) |
 | `app.feeding` | Meal slots, feed events | One normal feed per slot per local date; extra feeds have no slot |
 | `app.walks` | One open walk + history | One open walk at a time; duration from server timestamps |
 | `app.growth` | Measurements (weight, height, note, who, when) | Ascending history; optional target weight |
@@ -866,6 +868,15 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.approvals` | Pending high-impact actions | Proposed by the agent; confirmed by a human; expiry |
 | `app.usage` | Derived monthly spend snapshot | `harness.usage()` is authoritative; this is a cache, never a second ledger |
 | `app.commands` | HTTP idempotency keys/results | Key + request hash + result + 24h expiry; committed with the action |
+
+P1-08 defines the first four documents. Each value carries `schemaVersion: 1`
+and its Pi Durable document version is 1; a future change increments both and
+adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
+value, fails boot rather than resetting the document — a reset would lose
+members, settings or pending idempotency records. `checkpointWhen` stores a
+base every 100 deltas. Activity keeps its last 200 entries and commands keep
+24h/1000; those caps are enforced by the domain maintenance in P2/P4, not by
+the bootstrap.
 
 ### 8.2 Host-side data
 
@@ -891,8 +902,8 @@ type Household = {
   name: string;
   timezone: string;                 // IANA
   members: MemberProfile[];
-  conversationId: string;           // one human-facing shared thread
-  systemConversationId: string;     // hidden; owns reminder tasks; no model
+  conversationId: number;           // one human-facing shared thread; Pi Durable id
+  systemConversationId: number;     // hidden; owns reminder tasks; no model
   createdAt: string;
   settings: {
     feedReminderDelayMin: number;   // default 15
@@ -1014,6 +1025,7 @@ or "Household" and the confirming human.
   tasks. It has **no model/provider attached** and is never shown in the agent
   UI. It exists only because Pi Durable tasks need an owner; it cannot spend
   budget or act with household authority. This is the only second conversation.
+  Boot clears a model on it if one was ever attached (P1-08).
 - Each user message is a custom `app.chat` entry:
   - data: `{ authorId, authorName, text, clientMessageId }`
   - model content: `"Alex: …"` so the model knows who spoke. The Harness ignores
@@ -1923,11 +1935,35 @@ that the partner is reached out-of-app is gated on P0-10.
       target is not configured in this environment (upload, retention and
       rotation are tested with a fake runner), and power-loss / clean-Termux
       restore stay P5-01/P5-02.
-- [ ] **P1-08** Session docs: `app.household`, `app.puppy`, `app.activity`,
+- [x] **P1-08** Session docs: `app.household`, `app.puppy`, `app.activity`,
       `app.commands`, with initial values, `schemaVersion` migration policy,
       `checkpointWhen`. Consumes P1-05's reconciliation plan (which now carries a
       removal reason) and settles its field names against §8.3's
       `MemberProfile = { id, name }` before the document shape is frozen.
+      **Landed:** `src/shared/domain.ts` holds the shared types and defaults;
+      `src/server/domain/docs.ts` defines the four documents (version 1,
+      `schemaVersion` 1, checkpoint every 100 deltas) and strict parsers;
+      `src/server/domain/bootstrap.ts` runs before `harness.resume()` in
+      `startApp`. A fresh boot is **one commit**: two ownerless conversations
+      (the human thread and the hidden system thread) plus household, puppy,
+      activity and commands. Every later boot repairs only what is missing:
+      profiles are seeded from `config.json`, a removed member's profile is
+      dropped and never resurrected, a missing profile is recreated from the
+      config seed, and a household rename is kept (reported as `nameDrift`, not
+      applied). Missing puppy/activity/commands documents are created; a
+      household that points at a missing conversation, an unknown
+      `schemaVersion`, a malformed document, zero active members or more than
+      two active members is a hard startup failure rather than a silent reset.
+      The system conversation's model is cleared on boot; its normal state and
+      the shared thread's state before P1-09 is no model. Conversation IDs are
+      stored as the numeric Pi Durable IDs. `app.puppy` starts empty and carries
+      no shower interval; the household setting is the one source.
+      **Verified:** 10 new bootstrap tests (fresh boot, second boot, removal,
+      repair, rename, missing conversation, member cap, schema refusal, system
+      model clearing, checkpoint policy) plus the updated app/config tests;
+      211 tests total, typecheck clean. **Not verified:** the shared thread's
+      model/tools and the UI that renders these documents are P1-09/P1-11; the
+      first-run wizard that fills the puppy profile is P1-14.
 - [ ] **P1-09** Shared conversation: custom `app.chat` entries, submit with
       `requestId`, **busy reject** (no queue/steer), `afterFailedRun:
       "continue"`, `watchEvents` → SSE, full snapshot on attach/reconnect.

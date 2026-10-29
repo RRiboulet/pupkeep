@@ -18,6 +18,7 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { JsonFileStore, type JsonFileOptions } from "./json-file.ts";
+import type { MemberProfile } from "../shared/domain.ts";
 import { parseModelProbeCache, PROBE_CACHE_VERSION, type ModelProbeCache } from "./models/cache.ts";
 
 export const DATA_DIR_MODE = 0o700;
@@ -430,44 +431,47 @@ export function dataStores(dataDir: string): DataStores {
 
 // --- reconciliation --------------------------------------------------------
 
-export interface HouseholdProfile {
-  memberId: string;
-  displayName: string;
-}
+export type HouseholdProfile = MemberProfile;
 
 export interface Reconciliation {
   /** Profiles to create for members that exist in config but not in the document. */
   createProfiles: HouseholdProfile[];
-  /** Display names that drifted from config; config wins. */
-  updateProfiles: Array<{ memberId: string; from: string; to: string }>;
+  /**
+   * Existing profiles whose name differs from the config seed. Informational:
+   * the household owns a display name once the profile exists, so a rename must
+   * not be clobbered back to `config.json`'s original value.
+   */
+  nameDrift: Array<{ id: string; profileName: string; configName: string }>;
   /** Profiles to drop, and the reason the applier should log differently. */
-  removeProfiles: Array<{ memberId: string; displayName: string; reason: "removed" | "missing" }>;
+  removeProfiles: Array<{ id: string; name: string; reason: "removed" | "missing" }>;
 }
 
 /**
- * PLAN §7.1: `config.json` is the authority. Boot may *mirror* a member into the
- * household document, and may remove a profile whose auth is gone — but it must
- * never create auth from a profile, so a removed member stays removed even if the
- * document still mentions them.
+ * PLAN §7.1: `config.json` is the authority for auth identities and roles. Boot
+ * may *mirror* a member into the household document and may remove a profile
+ * whose auth is gone, but it must never create auth from a profile, so a removed
+ * member stays removed even if the document still mentions them.
+ *
+ * Display names are the one field the household owns after creation:
+ * `config.json` seeds a missing profile (and drives invite/auth flows), while a
+ * profile that already exists keeps its name. Otherwise a caregiver who renames
+ * themselves from "Owner" would be reset on every boot.
  */
 export function reconcileMembers(
   config: AppConfig,
   profiles: readonly HouseholdProfile[],
 ): Reconciliation {
   const active = new Map(activeMembers(config).map((member) => [member.id, member]));
-  const existing = new Map(profiles.map((profile) => [profile.memberId, profile]));
+  const existing = new Map(profiles.map((profile) => [profile.id, profile]));
 
   const createProfiles: HouseholdProfile[] = [];
+  const nameDrift: Reconciliation["nameDrift"] = [];
   for (const member of active.values()) {
     const profile = existing.get(member.id);
-    if (!profile) createProfiles.push({ memberId: member.id, displayName: member.displayName });
-  }
-
-  const updateProfiles: Reconciliation["updateProfiles"] = [];
-  for (const member of active.values()) {
-    const profile = existing.get(member.id);
-    if (profile && profile.displayName !== member.displayName) {
-      updateProfiles.push({ memberId: member.id, from: profile.displayName, to: member.displayName });
+    if (!profile) {
+      createProfiles.push({ id: member.id, name: member.displayName });
+    } else if (profile.name !== member.displayName) {
+      nameDrift.push({ id: member.id, profileName: profile.name, configName: member.displayName });
     }
   }
 
@@ -476,16 +480,16 @@ export function reconcileMembers(
   );
   const removeProfiles: Reconciliation["removeProfiles"] = [];
   for (const profile of profiles) {
-    if (profile.memberId.trim() === "") continue; // nothing to delete
-    if (active.has(profile.memberId)) continue;
+    if (profile.id.trim() === "") continue; // nothing to delete
+    if (active.has(profile.id)) continue;
     removeProfiles.push({
-      memberId: profile.memberId,
-      displayName: profile.displayName,
+      id: profile.id,
+      name: profile.name,
       // "removed" is a decision; "missing" means the auth record vanished, which
       // an applier should find suspicious rather than routine.
-      reason: removed.has(profile.memberId) ? "removed" : "missing",
+      reason: removed.has(profile.id) ? "removed" : "missing",
     });
   }
 
-  return { createProfiles, updateProfiles, removeProfiles };
+  return { createProfiles, nameDrift, removeProfiles };
 }
