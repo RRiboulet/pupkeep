@@ -84,10 +84,37 @@ Agents work in this repository through the shared package pinned in
 same pi version the plan pins for the runtime. Pi loads project packages only
 after project trust is granted.
 
+**The development agent is not the product agent, and they must never be
+confused.** The pi coding agent used to build this repo has shell, file and web
+tools — that is how the code gets written. The agent *inside* Pupkeep has only
+app tools (`get_context`, `update_puppy_profile`, feeding, walks, and so on): no
+shell, no filesystem, no browser, no arbitrary HTTP, no SQL (PLAN §10, §14.3). A
+change that hands the product agent a general-purpose tool is a security defect,
+not a convenience.
+
+Node: `engines.node` is `>=24`. The devcontainer and CI use Node 24; the phone
+measured Node 26.12.1 in Phase 0. That difference is deliberate and recorded (the
+runtime floor is 24, and P5-01 re-measures on the phone) rather than pinned to a
+single major that would make one of the two environments non-conforming.
+
+## Commands
+
+```bash
+npm ci                 # installs the pinned runtime deps (no native modules)
+npm run typecheck      # tsc --noEmit; erasable-only syntax, so node can strip it
+npm test               # node --test, TypeScript directly, no build step
+npm start              # the launcher — not implemented yet (P1-04)
+```
+
+`npm start` exits with an explanation until P1-04 lands. The browser client needs
+no build step either: `web/vendor/` holds the pinned Preact/htm ES modules,
+checked against `NOTICE.md` by `test/vendor.test.ts`.
+
 ## Planned commands
 
-These are the commands the finished repo will expose; they are listed now so the
-plan is concrete, not because they run yet.
+These are the commands the finished repo will expose. `npm ci`, `npm test` and
+`npm run typecheck` already work; `npm start` is the launcher and arrives with
+P1-04.
 
 ```bash
 npm ci

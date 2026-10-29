@@ -328,6 +328,7 @@ pupkeep/
 │   │   ├── options.ts
 │   │   └── term.ts
 │   ├── server/
+│   │   ├── models/            # startup probe, allowlist (P1-03, P4-08)
 │   │   ├── app.ts             # harness, docs, tools, routes
 │   │   ├── auth.ts            # owner token, invites, cookies
 │   │   ├── config.ts          # data dir, config.json, secrets
@@ -1695,19 +1696,23 @@ that the partner is reached out-of-app is gated on P0-10.
 
 - [ ] **P1-01** Repo scaffold: directories, `README`, `AGENTS`, `LICENSE`,
       `NOTICE`, `.gitignore`, `.env.example`.
-- [ ] **P1-02** Devcontainer: Node 24, pi `1.4.0`, shared package pin, persistent
+- [ ] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.4.0`, shared package pin, persistent
       pi volume, `cloudflared`, `sqlite3`, `tmux`, `gh`, `jq`, `rclone`, port
       8787, `postCreate`, `tsc --noEmit`. Verify the
       `javascript-node:24-bookworm` tag and the shared package/pi compatibility
       at build time.
-- [ ] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
+- [x] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
       vendored browser files** with pinned versions/checksums in `NOTICE.md`,
       not server runtime deps; no native modules; `npm ci` and `node --test`
       work. State the dev pi coding agent vs product agent distinction.
-      Also reconcile the phone's Node major with the pinned devcontainer Node
-      (P0-01: Termux measured on Node 26, the devcontainer pins 24 — either pin
-      both to 26 or record why they differ), and implement the **startup model
-      probe with the app schema** whose result shape is specified in P0-05.
+      Also reconcile the phone's Node major with the pinned devcontainer Node,
+      and implement the **startup model probe with the app schema** whose result
+      shape is specified in P0-05. **Decided:** `engines.node` is `>=24`, not a
+      pin to one major — the phone measured Node 26 and the devcontainer keeps 24
+      (P1-02), so the difference is recorded rather than papered over, and P5-01
+      re-measures on the phone. Probe and allowlist are in
+      `src/server/models/`; both are tested offline through an injected provider
+      call, and the live path is `createPiAiProbeCall()`.
 - [ ] **P1-04** Launcher: `local`/`lan`/`cloudflare`/`tailscale`, bind addresses,
       server child, restart/backoff, tunnel supervisor, owner link + QR. Inherits
       three Phase 0 constraints: it **calls** P1-05's pid lock; it starts

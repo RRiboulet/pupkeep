@@ -63,13 +63,23 @@ ref: a later session must load the same tools.
 back through a pull request. Tag releases; the phone deploys a tag or a commit
 from `main`.
 
-## Commands (planned)
+## Commands
 
 ```bash
 npm ci
-node --test
-npm start -- --access local
+npm run typecheck      # tsc --noEmit; only erasable syntax, so node strips it
+npm test               # node --test runs the TypeScript directly
+npm start              # launcher: not implemented until P1-04
 ```
+
+`npm start` exits with a message naming P1-04, deliberately, so a missing launcher
+is not mistaken for a broken install. The client needs no build step: `web/vendor/`
+holds pinned Preact/htm ES modules that `test/vendor.test.ts` verifies against
+`NOTICE.md`.
+
+The development pi agent (the one reading this file) has shell and file tools.
+The **product** agent must never: it gets app tools only — no shell, filesystem,
+browser, network or SQL. Adding a general-purpose tool to it is a security defect.
 
 On the phone:
 

@@ -51,6 +51,24 @@ code is copied.
 - Use: no-build browser UI and safe Markdown rendering, with the licence
   notices and pinned versions/checksums kept when the vendor files are added.
 
+### Vendored browser files (committed, not npm dependencies)
+
+These live in `web/vendor/` byte-for-byte from the published tarballs and are
+**not** server runtime dependencies. `test/vendor.test.ts` recomputes the
+checksums below and fails if a file changes without its line here changing too —
+that is the whole point of vendoring them.
+
+| File | Package | Version | SHA-256 |
+|---|---|---|---|
+| `web/vendor/preact.mjs` | `preact` (dist/preact.mjs) | `11.1.0` | `25288b8d9d60f7885df6c487a813a495e98c9addbeaf7c0e8f59683c71d426b5` |
+| `web/vendor/preact-hooks.mjs` | `preact` (hooks/dist/hooks.mjs) | `11.1.0` | `24231102dc3e509c9c657bca591524e348eb8a5272c9d40538faef9beeeb654c` |
+| `web/vendor/htm.mjs` | `htm` (dist/htm.mjs) | `3.1.1` | `ab33dd3f38059b9be4d5f5350128eefb2356639c4e0bbe9d9e8b3ba75847e9e4` |
+| `web/vendor/htm-preact.mjs` | `htm` (preact/index.module.js) | `3.1.1` | `b3f51db71c12eabba61819feb74ace7cadc2744af41866c3fcad2ab960415746` |
+
+The two files that import bare `preact` / `htm` specifiers are unmodified: the
+page resolves them with an import map (`web/index.html`, P1-10), so the checksums
+stay honest instead of an edited copy nobody can diff against upstream.
+
 ## Cloudflare Tunnel
 
 - Service: <https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/>
