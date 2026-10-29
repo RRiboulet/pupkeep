@@ -59,11 +59,16 @@ jobs:
           imageName: pupkeep-devcontainer
           userDataFolder: .devcontainer/.cache
           push: never
-          # postCreateCommand runs during `devcontainer up`; these checks prove
-          # it ran (`.env`, node_modules, the shared package) and then run the
-          # suite again for an explicit CI result.
+          # The action's `devcontainer up` did not run postCreateCommand on the
+          # first hosted attempt (`.env` was absent), so run the same script
+          # explicitly when the container does not already have its fingerprint.
+          # Normal Dev Containers still run it via devcontainer.json; this makes
+          # the CI proof independent of that lifecycle detail.
           runCmd: |
             set -eux
+            if [ ! -f .env ]; then
+              bash .devcontainer/postCreate.sh
+            fi
             test -f .env
             test -d node_modules
             test -d /tmp/pupkeep-dev
