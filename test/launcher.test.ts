@@ -154,13 +154,15 @@ test("interactive mode prints the owner link; boot mode writes it and logs only 
   }
 });
 
-test("nothing is announced when the auth module cannot mint a link yet", async () => {
-  const d = deps({ serverEntry: { command: "node", args: ["server.ts"] } });
+test("with no mint dependency the launcher says an owner token already exists, links included", async () => {
+  // The default mints on first run; a caller that supplies none is told the truth
+  // rather than shown a fabricated link.
+  const d = deps({ serverEntry: { command: "node", args: ["server.ts"] }, mintOwnerLink: async () => undefined });
   const launcher = createLauncher(options(), d);
   const result = await launcher.start();
   assert.equal(result.ok, true);
   assert.equal(result.ownerLink, undefined);
-  assert.match(d.logs.join("\n"), /P1-06/);
+  assert.match(d.logs.join("\n"), /--reissue-owner/);
   await launcher.stop();
 });
 

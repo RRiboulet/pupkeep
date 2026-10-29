@@ -18,13 +18,6 @@ if (options.help) {
   process.exit(0);
 }
 
-if (options.reissueOwner) {
-  // The token belongs to P1-06's auth module; until it exists, say so instead of
-  // pretending to rotate anything.
-  console.error("pupkeep: --reissue-owner needs the auth module (P1-06); nothing was rotated.");
-  process.exit(4);
-}
-
 const launcher = createLauncher(options, {
   // The server program arrives with P1-07. Until then this is undefined and the
   // launcher reports it rather than crash-looping on a missing file.

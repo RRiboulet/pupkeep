@@ -1763,9 +1763,19 @@ that the partner is reached out-of-app is gated on P0-10.
       `src/shared/` so P4-08 reuses it; and `reconcileMembers`, which mirrors
       config into household profiles and **never resurrects a removed member**.
       The lock and `ensureDataDir` landed with P1-04.
-- [ ] **P1-06** Auth: owner token hash, **owner reissue/rotate**, one-time
+- [x] **P1-06** Auth: owner token hash, **owner reissue/rotate**, one-time
       hashed invite, hashed sessions, cookie, owner/member roles, authz matrix,
-      remove member + purge sessions, rate limit, per-origin cookies.
+      remove member + purge sessions, rate limit, per-origin cookies. **Landed:**
+      `src/server/auth.ts` — 256-bit tokens stored only as SHA-256, constant-time
+      compare, single-use invites with a 15-minute expiry and a two-person cap
+      (the owner is a member row, so the cap and reconciliation count rows), owner
+      rotation that kills owner sessions and unused invites but not member
+      sessions, session revocation, the authz matrix as data (owner-only routes
+      throw 403), `SameSite=Lax`/`HttpOnly` cookies with `Secure` only on HTTPS,
+      and an origin allow-list helper. **Removal now also purges push
+      subscriptions, prefs and the ntfy topic** — the P1-05 carry-over. The
+      launcher mints on first run and rotates on `--reissue-owner`, writing the
+      link 0600 in boot mode and printing it only on a TTY.
       **Carried from P1-05:** removing a member must also purge their push
       subscriptions and ntfy topic from `push.json` — reconciliation touches only
       profiles, so a removed caregiver would otherwise keep receiving
