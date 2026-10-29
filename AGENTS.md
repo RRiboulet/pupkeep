@@ -35,7 +35,10 @@ current approved phase.
   `~/.pupkeep/owner-link.txt` (0600) only when a token is minted or reissued;
   ordinary boots log only its path.
 - The data directory is `~/.pupkeep` (mode 0700); secrets are mode 0600 and are
-  excluded from off-device database backups.
+  excluded from off-device database backups. **VAPID private keys are the
+  deliberate exception:** they live in `push.json` and ride inside the encrypted
+  backup so push subscriptions survive a restore. The backup passphrase stays
+  off the backup host; provider keys stay in `secrets.json` and are excluded.
 - The agent must not receive shell, filesystem, browser or network tools.
 - Do not add native modules to the phone runtime. `node:sqlite` only.
 - Do not run SQLite on the Windows/9p workspace mount. Use `/tmp` or a volume in

@@ -23,7 +23,7 @@ The evidence below is the F-Droid run.
 | ABI | `arm64-v8a`; `uname -m` = `aarch64` |
 | Termux | `0.118.3`; installer `org.fdroid.fdroid` |
 | Termux:API | `0.60.0`; `com.termux.api` installer `org.fdroid.fdroid`; `termux-notification` present |
-| Termux:Boot | not installed; P0-06 |
+| Termux:Boot | not installed at P0-01; installed during P0-06 |
 | Node | `v26.12.1` |
 | npm | `11.21.1` |
 | SQLite | `node:sqlite` / CLI `3.54.1` |
@@ -75,7 +75,8 @@ node probe.ts
 | First probe run | **4.418 s** wall |
 | First open / commit / close | **112 ms** |
 | Close / reopen / read / resume / close | **13 ms** |
-| SIGKILL child startup (open + commit) | **1,894 ms** |
+| SIGKILL child startup (spawn + open + commit) | **1,894 ms** |
+| Child open + commit (reported by the child) | **85 ms** |
 | Reopen after SIGKILL / read / resume / commit / close | **30 ms** |
 | Second restart / read / resume / close | **12 ms** |
 
@@ -167,11 +168,12 @@ The runtime itself has no blocker. The F-Droid install source is now satisfied.
   Include `pkg update && pkg upgrade -y` in the phone install runbook.
 - **Termux:API:** `0.60.0` is installed and `termux-notification` exists; actual
   notification delivery is P0-08, not tested here.
-- **Termux:Boot:** not installed; P0-06 owns boot/wake-lock/supervision.
+- **Termux:Boot:** not installed at P0-01; installed during P0-06, which owns
+  boot/wake-lock/supervision.
 - **One-process lock:** PLAN §16’s P0-01 bullet also names an application-level
   one-process lock. This spike did not test that lock module; P0-02 reviewed
-  `lock.ts` for reuse and P0-06/P1-07 own the lock and supervision test. The
-  probe only kept one process on the DB at a time and proved the runtime’s
+  `lock.ts` for reuse, **P1-05 owns the pid lock**, and P1-04 calls it. The probe
+  only kept one process on the DB at a time and proved the runtime’s
   crash/reopen path.
 - **If the runtime ever fails on Termux** — apply PLAN §6.10: move the server to
   Docker/VPS, keep the same code, restore the backup, and make the phone a
@@ -199,6 +201,6 @@ separately installed.
 - The DB belongs on Termux home (`/data`, `f2fs`), not the Windows/9p workspace
   mount, and one process must own it.
 - P1-07 still needs to prove the production schema/tools/tasks, the
-  application-level one-process lock, `harness.resume()` with live
+  application-level one-process lock (P1-05), `harness.resume()` with live
   tasks/reminders, OS-level process death, power-loss limits, and the
   Termux:API/Boot notification path. This spike did not test those.
