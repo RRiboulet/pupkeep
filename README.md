@@ -123,6 +123,9 @@ seeds `.env` only when it is absent.
   extensions.
 - Port 8787 is forwarded. The server is still a scaffold: `/healthz` answers and
   every other route is 503 until P1-09/P1-10.
+- CI builds this image on `.github/workflows/devcontainer.yml`; a devcontainer
+  or package-manifest change cannot merge without a real build, a `postCreate`
+  run and the test suite.
 
 ## Commands
 

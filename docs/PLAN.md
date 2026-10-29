@@ -1781,11 +1781,14 @@ that the partner is reached out-of-app is gated on P0-10.
       prints the start command. Port 8787 is forwarded; the dev database is
       `/tmp/pupkeep-dev`, never the workspace mount. Six static guards live in
       `test/devcontainer.test.ts` (201 tests total); `npm start` loads `.env`
-      with `--env-file-if-exists`, so the seed is not inert. **Not verified:** no Docker
-      daemon in this environment, so the image was not built here; the base tag,
-      pi package, cloudflared release and shared-package tag were checked
-      against their registries, and the files are statically tested. A real
-      `devcontainer build`/rebuild remains a manual or CI step.
+      with `--env-file-if-exists`, so the seed is not inert. **Verified by
+      CI:** `.github/workflows/devcontainer.yml` builds the image on
+      `ubuntu-latest` with `devcontainers/ci`, runs `postCreate.sh`, and
+      reported Node `24.22.1`, pi `1.4.0`, gh `2.103.2`, cloudflared
+      `2026.10.5`, sqlite3 `3.40.1`, rclone `1.60.1`, the shared package
+      `v1.9.0`, and **201/201 tests** (run `40947860932`). The base tag still
+      floats Node 24 patch releases by design; pin it by digest if exact
+      patches matter. P1-12 still owns the general application CI.
 - [x] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
       vendored browser files** with pinned versions/checksums in `NOTICE.md`,
       not server runtime deps; no native modules; `npm ci` and `node --test`
