@@ -1,11 +1,10 @@
 // The server process the launcher supervises: one data directory, one harness,
 // one HTTP listener, and an exit that tells the supervisor what happened.
 //
-// P1-07's job is the harness half. There is deliberately no application route
-// here yet — P1-09 adds the shared thread and SSE, P1-10 the static shell — so
-// the listener answers `/healthz` and refuses everything else. That is enough
-// for this task to be honest: `npm start` really starts a server, the port is
-// really bound, and a storage failure really exits instead of idling as a
+// P1-07 wired the harness half; P1-09 wires the real HTTP handler behind it:
+// the shared household thread, its snapshots, and its SSE fanout
+// (src/server/http.ts, src/server/agent/). P1-10 adds the static PWA shell and
+// the care routes. A storage failure still exits instead of idling as a
 // "running" process with a dead database.
 //
 // The exit contract, from PLAN §7.1:
@@ -29,10 +28,27 @@ import type {
   ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { createLogger, type Logger } from "./log.ts";
-import { dataPaths, dataStores, ensureDataDir, type DataDir } from "./config.ts";
+import { dataPaths, dataStores, ensureDataDir, type AppConfig, type DataDir } from "./config.ts";
+import type { JsonFileStore } from "./json-file.ts";
+import { Auth, RateLimiter } from "./auth.ts";
 import { acquireLock, SERVER_LOCK_FILE, type LockHandle } from "./lock.ts";
 import { closeHarness, openHarness, type OpenedHarness, type OpenHarnessOptions } from "./harness.ts";
 import { bootstrapSession, type BootstrapResult } from "./domain/bootstrap.ts";
+import {
+  bindOrigins,
+  createAppHandler,
+  SIGNIN_LIMIT,
+  SIGNIN_WINDOW_MS,
+  SUBMIT_LIMIT,
+  SUBMIT_WINDOW_MS,
+} from "./http.ts";
+import { ThreadBus } from "./agent/bus.ts";
+import { pickInitialModel, SHARED_THREAD_INSTRUCTIONS } from "./agent/model.ts";
+import {
+  configureSharedThread,
+  readHousehold,
+  type ThreadRef,
+} from "./agent/thread.ts";
 
 /** Long enough to let task code notice its abort, short enough to beat the
  * launcher's 3 s SIGTERM -> SIGKILL ladder (src/launcher/supervisor.ts). */
@@ -70,6 +86,9 @@ export interface AppOptions {
   context?: Context;
 }
 
+/** Set to skip the shared-thread wiring; the harness-level tests use it. */
+export type ThreadWiring = "scaffold" | undefined;
+
 export type AppEndReason = "closed" | "failed" | "close_timeout";
 
 export interface AppEnd {
@@ -81,6 +100,11 @@ export interface AppHandle {
   readonly app: HarnessType;
   /** Bound origin of the scaffold listener, or "" when it never opened. */
   readonly url: string;
+  /**
+   * The shared-thread event fanout, exposed only for diagnostics (the waiter
+   * test). Absent when the scaffold listener is wired instead.
+   */
+  readonly threadBus?: ThreadBus;
   /** Resolves when the app has stopped; a healthy app never resolves it. */
   readonly done: Promise<AppEnd>;
   close(): Promise<AppEnd>;
@@ -106,6 +130,8 @@ export interface BootstrapInput {
   opened: OpenedHarness;
   context: Context;
   now: () => Date;
+  /** The auth authority, shared with the HTTP layer's `Auth`. */
+  config: JsonFileStore<AppConfig>;
 }
 
 /** Creates/repairs the session documents; injected in lifecycle tests. */
@@ -113,6 +139,8 @@ export type BootstrapRunner = (input: BootstrapInput) => Promise<BootstrapResult
 
 export interface AppDeps {
   openHarness?: (options: OpenHarnessOptions) => Promise<OpenedHarness>;
+  /** Default: wire the P1-09 shared thread. `"scaffold"` keeps the old listener. */
+  thread?: ThreadWiring;
   bootstrap?: BootstrapRunner;
   acquireLock?: (
     dataDir: string,
@@ -132,11 +160,10 @@ export interface AppDeps {
 }
 
 /**
- * The scaffold listener. It exists so the server is a real supervised process
- * while the routes are still P1-09/P1-10; it never serves data and never reads
- * the harness. `/healthz` is liveness only: no version, no counts, no paths.
+ * The scaffold listener. It exists so the harness-level contract tests run
+ * without a household: `/healthz` answers, everything else refuses.
  */
-export function scaffoldRequestHandler(req: IncomingMessage, res: ServerResponse): void {
+function scaffoldRequestHandler(req: IncomingMessage, res: ServerResponse): void {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -196,12 +223,49 @@ async function defaultBootstrap(input: BootstrapInput): Promise<BootstrapResult>
   // config.json is the auth authority and the seed for profiles; the launcher
   // ensures it exists before spawning the server. A missing config here is a
   // partial restore or a direct server start, and must fail loudly.
-  const config = await dataStores(input.dataDir).config.read();
+  const config = await input.config.read();
   return bootstrapSession(input.opened.harness, {
     config,
     context: input.context,
     now: input.now,
   });
+}
+
+/**
+ * The run policy P1-09 needs on every process that hosts the shared thread:
+ * a failed run must not strand the next caregiver's message (§9.1). A caller's
+ * own settings win per remaining field, object or function alike.
+ */
+export const THREAD_FAILED_RUN_POLICY: HarnessSettings = { afterFailedRun: "continue" };
+
+function threadSettings(options: AppOptions): HarnessSettings | (() => HarnessSettings | undefined) {
+  const given = options.settings;
+  if (typeof given === "function") {
+    return () => ({ afterFailedRun: THREAD_FAILED_RUN_POLICY.afterFailedRun, ...(given() ?? {}) });
+  }
+  if (given !== undefined) return { afterFailedRun: THREAD_FAILED_RUN_POLICY.afterFailedRun, ...given };
+  return THREAD_FAILED_RUN_POLICY;
+}
+/**
+ * Attach the event fanout to the shared conversation. The conversation id comes
+ * from the bootstrapped household document; no other conversation is ever
+ * watched, so a bus participant cannot see another thread's events.
+ */
+async function attachThreadBus(
+  thread: ThreadRef,
+  logger: Logger,
+): Promise<ThreadBus> {
+  const household = await readHousehold(thread);
+  const bus = new ThreadBus({
+    harness: thread.harness,
+    conversationId: household.conversationId,
+    context: thread.context,
+    onEnded: (reason) => {
+      logger.warn("the shared thread stream ended; browsers will reattach", { reason });
+    },
+  });
+  await bus.start();
+  return bus;
 }
 
 async function releaseQuietly(lock: LockHandle | undefined, logger: Logger): Promise<void> {
@@ -277,7 +341,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       path: dataPaths(directory.path).database,
       ...(options.models !== undefined ? { models: options.models } : {}),
       ...(options.registry !== undefined ? { registry: options.registry } : {}),
-      ...(options.settings !== undefined ? { settings: options.settings } : {}),
+      settings: threadSettings(options),
       ...(options.now !== undefined ? { now: options.now } : {}),
       ...(options.setTimer !== undefined ? { setTimer: options.setTimer } : {}),
       onReport: report,
@@ -297,10 +361,14 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   });
   let stopping: Promise<AppEnd> | undefined;
 
+  let bus: ThreadBus | undefined;
   const shutdown = (reason: "closed" | "failed"): Promise<AppEnd> => {
     if (stopping) return stopping;
     stopping = (async () => {
       logger.info(reason === "failed" ? "the harness failed; shutting down for a restart" : "shutting down");
+      // Tell the attached browsers to reattach before the sockets disappear;
+      // they restart on a fresh connection instead of waiting out a dead SSE.
+      bus?.stop();
       // Stop accepting work before waiting for task code to return.
       if (listener) {
         try {
@@ -357,6 +425,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       opened,
       context,
       now: () => new Date(options.now?.() ?? Date.now()),
+      config: dataStores(directory.path).config,
     });
   } catch (error) {
     const message = `session bootstrap failed: ${(error as Error).message}`;
@@ -432,8 +501,75 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   }
 
   // If the storage failed while resuming or inspecting, do not open a port for
-  // a process that is already leaving.
-  if (!stopping) {
+  // a process that is already leaving. `deps.thread === "scaffold"` keeps the
+  // P1-07 scaffold listener for the harness-level contract tests.
+  if (!stopping && deps.thread !== "scaffold") {
+    // One store set for the process: the HTTP auth and the bootstrap share it.
+    const stores = dataStores(directory.path);
+    const auth = new Auth({ config: stores.config });
+    const thread: ThreadRef = { harness: opened.harness, context };
+
+    try {
+      bus = await attachThreadBus(thread, logger);
+    } catch (error) {
+      const message = `could not attach the shared thread: ${(error as Error).message}`;
+      logger.error("refusing to start", { error: message });
+      const closed = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
+      if (closed === "closed") await releaseQuietly(lock, logger);
+      return { ok: false, code: EXIT_OPEN_FAILED, message };
+    }
+
+    try {
+      const household = await readHousehold(thread);
+      const model = pickInitialModel(await stores.models.read(), options.models);
+      const configured = await configureSharedThread(thread, {
+        instructions: SHARED_THREAD_INSTRUCTIONS,
+        ...(model ? { model: { provider: model.provider, modelId: model.modelId } } : {}),
+      });
+      logger.info("the shared thread is configured", {
+        changed: configured.changed,
+        model: configured.model,
+      });
+    } catch (error) {
+      const message = `could not configure the shared thread: ${(error as Error).message}`;
+      logger.error("refusing to start", { error: message });
+      bus.stop();
+      bus = undefined;
+      const closed = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
+      if (closed === "closed") await releaseQuietly(lock, logger);
+      return { ok: false, code: EXIT_OPEN_FAILED, message };
+    }
+
+    try {
+      // The actual bound port can differ from `options.port` (port 0 in tests);
+      // the origin list follows whatever the listener really bound.
+      let boundPort = options.port;
+      const handler = createAppHandler({
+        auth,
+        thread,
+        bus,
+        submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
+        signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
+        allowedOrigins: () => bindOrigins(options.host, boundPort),
+        logger,
+      });
+      listener = await (deps.listen ?? listenHttp)(options.host, options.port, handler);
+      const bound = Number(new URL(listener.url).port);
+      if (Number.isInteger(bound) && bound > 0) boundPort = bound;
+      logger.info("listening", { url: listener.url });
+    } catch (error) {
+      logger.error("could not bind the HTTP listener", { error });
+      bus.stop();
+      bus = undefined;
+      const closeResult = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
+      if (closeResult === "closed") await releaseQuietly(lock, logger);
+      return {
+        ok: false,
+        code: EXIT_OPEN_FAILED,
+        message: `could not bind ${options.host}:${options.port}: ${(error as Error).message}`,
+      };
+    }
+  } else if (!stopping) {
     try {
       listener = await (deps.listen ?? listenHttp)(options.host, options.port, scaffoldRequestHandler);
       logger.info("listening", { url: listener.url });
@@ -452,6 +588,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   const app: AppHandle = {
     app: opened.harness,
     url: listener?.url ?? "",
+    ...(bus !== undefined ? { threadBus: bus } : {}),
     done,
     close: () => shutdown("closed"),
     parkedTasks: () => [...parked.values()],
