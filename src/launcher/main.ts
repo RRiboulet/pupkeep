@@ -20,6 +20,7 @@ import { detectTermux, parseTunnelUrl, tunnelCommand, tunnelChanged, type Tunnel
 import { announceOwnerLink, type AnnounceResult } from "./owner.ts";
 import { ensureDataDir, ownerLinkPath, type DataDir } from "../server/config.ts";
 import { acquireLock, type LockHandle } from "../server/lock.ts";
+import { createLogger } from "../server/log.ts";
 
 export interface LauncherDeps {
   /** Network view; defaults to the real interfaces. */
@@ -71,7 +72,11 @@ export interface LauncherHandle {
 }
 
 export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}): LauncherHandle {
-  const log = deps.log ?? ((line: string) => console.error(line));
+  // The launcher's stdout/stderr is redirected into `~/.pupkeep/server.log` by the
+  // boot script, so its own log lines go through the scrubbing logger too — the
+  // owner link is only one of the things that could otherwise land there.
+  const defaultLogger = createLogger({ scope: "launcher" });
+  const log = deps.log ?? ((line: string) => defaultLogger.info(line));
   const out = deps.out ?? ((text: string) => process.stdout.write(text));
   const spawnChild =
     deps.spawnChild ??
