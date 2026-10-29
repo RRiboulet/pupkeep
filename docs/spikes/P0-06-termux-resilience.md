@@ -30,7 +30,7 @@ controls. P0-06 is checked in PLAN §16.
 | 6 | Parked task at `restartLimit` | task `p0_06.hang`, `restartLimit: 1`: attempt 1 `running`; SIGKILL; attempt 2 `blocked` / `restart_limit`; `retryTask()` + finish flag → terminal `completed` | **pass** |
 | 7 | Boot script | `~/.termux/boot/p0-06.sh` created; manual run exit 0; after reboot it wrote `boot.log`, started wake lock, sshd, `service-daemon`, `sv up p0-06` | **pass** |
 | 8 | Termux:Boot companion app | `com.termux.boot` installed; boot script in `~/.termux/boot/p0-06.sh` | **pass** |
-| 9 | Phone reboot / boot script | new boot id (redacted); `boot.log` start 19:04:38, done 19:04:40; `sshd=13955`; service pid 13973 | **pass** |
+| 9 | Phone reboot / boot script | new boot id; `boot.log` start 19:04:38, done 19:04:40; `sshd=13955`; service pid 13973 | **pass** |
 | 10 | `harness.resume()` after reboot | service log `start pid=13973 dbStarts=4 previousStarts=3 scheduling=running` | **pass** |
 | 11 | Kill the Termux app itself | user ran `am force-stop com.termux`, then reopened Termux: boot id unchanged, no new boot log; a new `runsvdir` (7113) and service (7117) started, log `dbStarts=5 previousStarts=4 scheduling=running`; sshd did **not** auto-start. Exact force-stop time was not captured; lower pids indicate a new app process, not a surviving boot-time supervisor. | **pass for service restart; sshd manual; timing caveat** |
 | 12 | Battery optimisation / phantom-process / OEM settings | user set Termux battery to **Unrestricted** and enabled Developer options → **Disable child process restrictions** (phantom-process killer); Android blocks `settings get` / `dumpsys` from Termux, so this is user-confirmed, not shell-observed | **pass (user-confirmed)** |
@@ -95,8 +95,15 @@ to open the Tailscale app before SSH was reachable.
   Termux:Boot only covers a reboot.
 - **SSH exposure:** after the security review, `sshd_config` was changed to
   `ListenAddress` the Tailscale address plus `127.0.0.1`; the LAN address is
-  refused and the old config is backed up beside it. P1-04/P1-13 should start
-  SSH only on demand (or bind it to the tailnet), never all interfaces.
+  refused. **This pinned address is itself fragile:** if the tailnet address
+  changes, or if sshd starts before Tailscale (which does not reconnect by
+  itself after a reboot — next bullet), sshd fails to bind and the operator path
+  is silently gone. That is the state this session found the phone in: on the
+  tailnet, sshd not listening. P1-04/P1-13 must re-resolve the address when
+  starting sshd, start it on demand, and never bind all interfaces. The old
+  all-interfaces config is backed up beside the live one
+  (`sshd_config.p0-review.bak`) and **must not be reinstated**; delete it once
+  the on-demand start exists.
 - **Tailscale auto-connect:** it did not reconnect by itself after reboot. For a
   daily host, set Android’s “Always-on VPN” for Tailscale (or accept a manual
   start). This is an access-path finding for P0-03/P1-04.

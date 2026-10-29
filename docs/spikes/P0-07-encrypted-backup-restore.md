@@ -150,9 +150,12 @@ change the bundle contents or the auth/push/reminder result.
 - Owner/session/invite **hashes** restore auth without raw tokens; VAPID keys,
   the push subscription and the ntfy topic survive in `push.json`.
 - A clean restore can read the open walk, the transcript and a sleeping reminder;
-  a future clock makes the reminder fire, so the task state is real.
+  with the clock moved forward the reminder **completes**, which shows the task
+  state is real. Delivery itself was not exercised here (P4-05/P4-06).
 - Age passphrase encryption + `scp` is a workable drill path; `age` is available
-  on Termux and the devcontainer. The production `rclone` remote and retention
-  remain P5-02.
+  on Termux and the devcontainer. The production job — `rclone` remote,
+  retention, passphrase rotation — is owned by **P1-07** (PLAN §7.5); the drill
+  that exercises it is P5-02. The drill put the passphrase on the same machine as
+  the archive, which violates the §7.5 rule and is recorded as such.
 - The in-progress-generation restore and the clean-Termux/VPS drill are still
   open; do not claim them from this spike.

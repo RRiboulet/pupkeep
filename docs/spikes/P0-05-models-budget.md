@@ -27,7 +27,11 @@ app's schema.
 | `openrouter/minimax/minimax-m3.1-flash:free` | 404 retired | 0 tok | the 404 hint names a paid `minimax/minimax-m3.1-flash` at $0.15/$0.60, but that id is **not in the Pi AI 1.4.0 catalog** and is not selectable without a catalog refresh |
 | `openrouter/openrouter/free` | 429 rate-limited | 7.4k total tok, 5 turns | free router; it picked `xingchen-agi/xing4.0-29b-a4b:free`, then was throttled. Optional, not a default. |
 
-## Probe result shape
+## Probe result shape (planned contract, not a measured result)
+
+Nothing below was exercised: the probes in this note produced the status strings
+in the table above. This is the shape **P1-03 and P4-08 must implement**; the
+drop rule it depends on is owned by PLAN §11.2 and is not restated here.
 
 Each startup probe records one object per provider/model:
 
@@ -40,9 +44,8 @@ Each startup probe records one object per provider/model:
 | `usage` / `cost` | input, output, cache and cost from the provider; absent when no request succeeded |
 | `checkedAt` | probe timestamp |
 
-Only `deprecated`, `not_found`, `unauthorized` (401/404/410) drop a model;
-`rate_limited`/`network` keep the last-known-good allowlist. The stored result
-is the startup cache; the UI shows the last check.
+The stored result is the startup cache. PLAN §11.2 owns the rule for which status
+drops a model from the allowlist and which keeps the last-known-good entry.
 
 ## Budget simulation
 

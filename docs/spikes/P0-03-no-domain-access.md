@@ -108,14 +108,20 @@ repeat install/subscribe across a third URL.
 
 ## Tailscale Serve/Funnel vs exit node
 
-The Android app exposes **exit node** controls, not Serve/Funnel. The host phone
+The Android app exposes **exit node** controls, and no Serve/Funnel **control
+was found**. That last part is a negative established indirectly — a
+feature-label string scan of the installed APK (`aapt dump strings`: `Run as
+exit node` and friends, no Funnel or Serve label) plus the exit-node /
+`ExitNodeOption` cross-check — not a protocol-level test, so it is stated as
+“not found in 1.104.2”, not as “cannot exist”. The host phone
 was set to `Run as exit node` during the test; the app strings confirm that mode
 (`Run as exit node`, `Now running as exit node`, `Stop running as exit node`).
 The owner confirmed the app switch is **off** afterward. The tailnet seen from
 the devcontainer also reports `ExitNode: false`, `ExitNodeOption: false` for the
 phone. That is a different feature from Serve/Funnel: an exit node routes
-internet traffic, while Serve/Funnel publishes a local service. The app has no
-Funnel or Serve control, so Tailscale HTTPS is not available from this host.
+internet traffic, while Serve/Funnel publishes a local service. No such control
+was found, so Tailscale HTTPS is not available from this host as far as this
+spike can tell.
 
 ## Blockers and fallback
 
@@ -131,7 +137,8 @@ Funnel or Serve control, so Tailscale HTTPS is not available from this host.
   `termux-chroot` + `SSL_CERT_FILE`, which the production launcher must either
   implement or avoid by running the tunnel on a VPS/devcontainer. This is a
   P1-04 implementation constraint, not a reason to bind publicly.
-- **Serve/Funnel:** the Android app does not expose it, so the plan’s
+- **Serve/Funnel:** no such control was found in Android app `1.104.2`
+  (feature-label scan, not an exhaustive test), so the plan’s
   Tailscale-HTTPS alternative is not available. Tailscale stays HTTP; the quick
   tunnel stays testing-only. If a domain appears, a named tunnel is the upgrade.
 - **Exit node:** the app’s `Run as exit node` switch is not readable from
