@@ -7,8 +7,8 @@
 // vanished or a session that came back from the dead. So every file has exactly
 // one write queue, and a store for the same path shares it.
 
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 
 export class JsonFileError extends Error {
   readonly path: string;
@@ -91,6 +91,30 @@ export interface JsonFileOptions<T> {
   parse: (raw: unknown) => T | undefined;
   /** Value for a file that does not exist yet. */
   initial: () => T;
+  /**
+   * What a missing file means. "initial" is right for `secrets.json`/`push.json`
+   * (a new install has no keys yet); `config.json` uses "error", because reading
+   * it as an empty authority after a `--data` typo or a partial restore would
+   * start the app with no owner and no invites, silently.
+   */
+  missing?: "initial" | "error";
+}
+
+/** Paths whose stale temp files have already been swept this process. */
+const swept = new Set<string>();
+
+async function sweepStaleTemps(path: string): Promise<void> {
+  if (swept.has(path)) return;
+  swept.add(path);
+  const directory = dirname(path);
+  const prefix = `${basename(path)}.tmp-`;
+  try {
+    for (const name of await readdir(directory)) {
+      if (name.startsWith(prefix)) await rm(resolve(directory, name), { force: true });
+    }
+  } catch {
+    // No directory yet, or not readable: the first write will create it.
+  }
 }
 
 export class JsonFileStore<T> {
@@ -108,8 +132,13 @@ export class JsonFileStore<T> {
     try {
       text = await readFile(this.path, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return this.#options.initial();
-      throw new JsonFileError(this.path, `could not read (${(error as Error).message})`);
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new JsonFileError(this.path, `could not read (${(error as Error).message})`);
+      }
+      if ((this.#options.missing ?? "initial") === "error") {
+        throw new JsonFileError(this.path, "is missing (expected an existing file — wrong --data?)");
+      }
+      return this.#options.initial();
     }
 
     let raw: unknown;
@@ -123,9 +152,31 @@ export class JsonFileStore<T> {
     }
     const parsed = this.#options.parse(raw);
     if (parsed === undefined) {
-      throw new JsonFileError(this.path, "does not match the expected shape (schemaVersion?)");
+      const found = (raw as { schemaVersion?: unknown })?.schemaVersion;
+      throw new JsonFileError(
+        this.path,
+        typeof found === "number"
+          ? `is not a shape or schemaVersion this build understands (found ${found})`
+          : "does not match the expected shape",
+      );
     }
     return parsed;
+  }
+
+  /** Create the file with its initial value if it is missing. Queued. */
+  async ensure(): Promise<boolean> {
+    if ((this.#options.missing ?? "initial") === "initial") return false;
+    try {
+      await readFile(this.path, "utf8");
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+    const initial = this.#options.initial();
+    const text = `${JSON.stringify(initial, null, 2)}\n`;
+    await sweepStaleTemps(this.path);
+    await atomicWrite(this.path, text, { mode: this.#options.mode ?? 0o600 });
+    return true;
   }
 
   /**
@@ -136,9 +187,15 @@ export class JsonFileStore<T> {
     const run = async (): Promise<T> => {
       const current = await this.read();
       const next = await mutator(current);
-      await atomicWrite(this.path, `${JSON.stringify(next, null, 2)}\n`, {
-        mode: this.#options.mode ?? 0o600,
-      });
+      const text = `${JSON.stringify(next, null, 2)}\n`;
+      // Validate the bytes being written, not just the ones being read. A mutator
+      // with a dropped field would otherwise write a file this store can never
+      // read again — a permanently bricked auth file from one spread bug.
+      if (this.#options.parse(JSON.parse(text)) === undefined) {
+        throw new JsonFileError(this.path, "would write a value the parser rejects");
+      }
+      await sweepStaleTemps(this.path);
+      await atomicWrite(this.path, text, { mode: this.#options.mode ?? 0o600 });
       return next;
     };
 

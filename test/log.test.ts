@@ -131,3 +131,41 @@ test("redactDetail bounds and scrubs; redactValue never echoes the secret", () =
   assert.doesNotMatch(value, /SUPERSECRET/);
   assert.match(value, /redacted \d+ chars/);
 });
+
+test("the 22-character Web Push auth secret does not survive", () => {
+  // A 16-byte key is exactly 22 base64url chars: below any sane length floor, and
+  // it is the whole AES-GCM key for a subscription.
+  const auth = "ibq4DWfzHRPqc-qjFAtadA";
+  assert.ok(!scrub(`subscription={"keys":{"auth":"${auth}"}}`).includes(auth));
+  assert.ok(!scrub(`auth=${auth}`).includes(auth));
+  assert.ok(!redactDetail(`push failed {"keys":{"auth":"${auth}"}}`).includes(auth));
+});
+
+test("a short invite code and a signed-URL signature are redacted by name", () => {
+  assert.ok(!scrub("invite created code=ABC123").includes("ABC123"));
+  assert.ok(!scrub("https://x.test/c?X-Amz-Signature=Zx987bad").includes("Zx987bad"));
+  assert.ok(!scrub("x-api-key: short23chars").includes("short23chars"));
+});
+
+test("standard base64 is redacted whole, not just its leading run", () => {
+  const value = "AAAAAAAAAAAAAAAAAAAA/BBBB";
+  assert.ok(!scrub(`vapid ${value}`).includes("/BBBB"));
+});
+
+test("correlation ids survive when the caller says they are ids", () => {
+  const ulid = "01J8ZP4M7Q9XBR2W3Y4Z5A6B7C";
+  const lines: string[] = [];
+  const logger = createLogger({ sink: (line) => lines.push(line), level: "debug" });
+  logger.info("busy reject", { requestId: ulid, memberId: ulid });
+  assert.match(lines.join(""), new RegExp(ulid), "a request id is what makes the line useful");
+});
+
+test("an Error field keeps its message and stack, and a newline cannot forge a line", () => {
+  const lines: string[] = [];
+  const logger = createLogger({ sink: (line) => lines.push(line), level: "debug" });
+  logger.error("turn failed", { error: new Error("provider exploded"), note: "a\n2026-01-01 INFO forged" });
+  const output = lines.join("\n");
+  assert.match(output, /provider exploded/);
+  assert.equal(lines.length, 1, "one event must be one line");
+  assert.match(output, /a\\n2026-01-01 INFO forged/);
+});

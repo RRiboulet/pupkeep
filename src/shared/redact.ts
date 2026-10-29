@@ -3,34 +3,63 @@
 // module scrubbing what it remembers to scrub — is how an owner token ends up in
 // `server.log` (PLAN §6.3, §14.4).
 //
-// The rule it encodes: redact by *shape*, not by parameter name. P1-06 has not
-// fixed the owner-link format yet, and a scrubber that only knows `?token=`
-// would leak a `#fragment` or a `/login/<opaque>` path the day that changes.
+// Two rules, learned by being wrong twice:
+//   * redact by *shape* and by *name*, not by parameter name alone. P1-06 has not
+//     fixed the owner-link format, and a Web Push `auth` secret is exactly 22
+//     characters, so a 24-character floor misses a real key while destroying every
+//     ULID in the same log line.
+//   * know when *not* to redact. A correlation id (`requestId`, `memberId`) is
+//     what makes a log useful; callers mark those fields and `keepOpaque` lets
+//     them through the catch-all while the named rules still apply.
 
-const PATTERNS: Array<{ pattern: RegExp; replace: string | ((...args: string[]) => string) }> = [
-  // `Authorization: Bearer …`, `Cookie: …`, `Set-Cookie: …`
-  { pattern: /\b(authorization|cookie|set-cookie)\s*:\s*[^\n\r]+/gi, replace: "$1: [redacted]" },
+const PARAM = "token|key|code|invite|secret|password|sig|signature|auth|apikey|api_key|topic";
+
+const PATTERNS: Array<{ pattern: RegExp; replace: string }> = [
+  // Headers whose whole value is a credential.
+  { pattern: /\b(authorization|cookie|set-cookie|x-api-key|api-key)\s*:\s*[^\n\r]+/gi, replace: "$1: [redacted]" },
   { pattern: /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, replace: "Bearer [redacted]" },
   // Provider keys by prefix: sk-…, pk-…, rk-…
   { pattern: /\b(?:sk|pk|rk)[-_][A-Za-z0-9_-]{8,}/g, replace: "[key]" },
-  // A URL fragment or query: whatever it carries, drop the value.
-  { pattern: /#([^\s"'<>]+)/g, replace: "#[redacted]" },
+  // A URL query value, whatever its length, when the name says it is a secret.
   {
-    pattern: /([?&][A-Za-z0-9_]*(?:token|key|code|invite|secret|password)[A-Za-z0-9_]*=)([^&\s"'<>#]+)/gi,
+    pattern: new RegExp(`([?&][A-Za-z0-9_]*(?:${PARAM})[A-Za-z0-9_]*=)([^&\\s"'<>#]+)`, "gi"),
     replace: "$1[redacted]",
   },
-  // A token riding a known auth route, e.g. `/login/<token>` or `/invite/<code>`.
+  // A JSON pair with a secret-shaped key: `"tokenHash": "…"`, `"keys":{"auth":"…"}`.
+  {
+    pattern: new RegExp(`("(?:[A-Za-z0-9_]*?(?:${PARAM})[A-Za-z0-9_]*)"\\s*:\\s*")[^"]*(")`, "gi"),
+    replace: "$1[redacted]$2",
+  },
+  // `key=value` in free text, e.g. a logged error string.
+  {
+    pattern: new RegExp(`\\b([A-Za-z0-9_]*(?:${PARAM})[A-Za-z0-9_]*)\\s*[=:]\\s*(?!\\[redacted\\])([^\\s,;)}\\]'"]{4,})`, "gi"),
+    replace: "$1=[redacted]",
+  },
+  // A token riding a known auth route, e.g. `/login/<token>`.
   { pattern: /(\/(?:login|invite|auth|join|s|session)\/)[A-Za-z0-9_-]{6,}/gi, replace: "$1[redacted]" },
-  // Any remaining long opaque value: invite codes, session tokens, ntfy topics,
-  // VAPID keys. 24+ characters of base64url is never prose in this app.
-  { pattern: /\b[A-Za-z0-9_-]{24,}\b/g, replace: "[redacted]" },
+  // A fragment only when it looks like a token; `#12` is a pull request number.
+  { pattern: /#([A-Za-z0-9_~+/-]{12,})/g, replace: "#[redacted]" },
+  // Catch-all for long opaque values, including standard base64 (`+`, `/`, `=`).
+  { pattern: /[A-Za-z0-9+/=_-]{24,}/g, replace: "[redacted]" },
 ];
 
+/** Patterns that must still apply when a caller asks to keep opaque values. */
+const NAMED_RULES = PATTERNS.slice(0, -1);
+
+export interface ScrubOptions {
+  /**
+   * Skip the long-opaque-value catch-all. Used for fields whose *name* marks them
+   * as correlation ids: the named rules above still scrub them if they look like a
+   * credential, but a 26-character ULID survives.
+   */
+  keepOpaque?: boolean;
+}
+
 /** Scrub secrets out of a single line. Idempotent. */
-export function scrub(text: string): string {
+export function scrub(text: string, options: ScrubOptions = {}): string {
   let value = text;
-  for (const { pattern, replace } of PATTERNS) {
-    value = value.replace(pattern, replace as string);
+  for (const { pattern, replace } of options.keepOpaque ? NAMED_RULES : PATTERNS) {
+    value = value.replace(pattern, replace);
   }
   return value;
 }

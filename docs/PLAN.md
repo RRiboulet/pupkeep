@@ -1766,18 +1766,29 @@ that the partner is reached out-of-app is gated on P0-10.
 - [ ] **P1-06** Auth: owner token hash, **owner reissue/rotate**, one-time
       hashed invite, hashed sessions, cookie, owner/member roles, authz matrix,
       remove member + purge sessions, rate limit, per-origin cookies.
+      **Carried from P1-05:** removing a member must also purge their push
+      subscriptions and ntfy topic from `push.json` — reconciliation touches only
+      profiles, so a removed caregiver would otherwise keep receiving
+      notifications; and every config read-modify-write goes through
+      `JsonFileStore.update`, never a second write path.
 - [ ] **P1-07** Harness: exact open sequence
       (`openNodeSqliteDatabase` → `PRAGMA synchronous=FULL` →
       `SqliteStorage.open({prefix:"pi_"})` → `Harness.open`), `pi_` docs,
       `harness.resume()` on start, `harness.closed` failed-exit, close timeout,
       parked-task reporting, post-backup verification and restore of an
-      interrupted generation. **Also owns the backup job** (`scripts/backup.ts`,
+      interrupted generation. **Carried from P1-05:** the server must take or
+      verify the pid lock itself at open — the JSON write queue is in-process
+      only, so a launcher that was SIGKILLed while its detached child survives
+      would otherwise leave two writers on one data directory. A backup or restore
+      job must not write these files while the server runs. **Also owns the backup job** (`scripts/backup.ts`,
       `scripts/restore.ts`): the `rclone` remote, 14-day retention enforcement,
       and passphrase recovery/rotation, with the passphrase kept off the backup
       host (§7.5). P5-02 only drills it.
 - [ ] **P1-08** Session docs: `app.household`, `app.puppy`, `app.activity`,
       `app.commands`, with initial values, `schemaVersion` migration policy,
-      `checkpointWhen`.
+      `checkpointWhen`. Consumes P1-05's reconciliation plan (which now carries a
+      removal reason) and settles its field names against §8.3's
+      `MemberProfile = { id, name }` before the document shape is frozen.
 - [ ] **P1-09** Shared conversation: custom `app.chat` entries, submit with
       `requestId`, **busy reject** (no queue/steer), `afterFailedRun:
       "continue"`, `watchEvents` → SSE, full snapshot on attach/reconnect.

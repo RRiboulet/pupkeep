@@ -137,3 +137,34 @@ test("atomicWrite replaces a file and keeps the requested mode", async () => {
   assert.equal(await readFile(path, "utf8"), "second\n");
   assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
+
+test("a mutator that would write an unreadable value is rejected, not persisted", async () => {
+  const dir = await tempDir();
+  const path = join(dir, "config.json");
+  const store = storeAt(path);
+
+  await assert.rejects(
+    // A spread bug that drops a required field: the file must not be bricked.
+    store.update(() => ({ counter: "not-a-number" }) as unknown as Shape),
+    /would write a value the parser rejects/,
+  );
+  // The old value is still there and readable.
+  assert.deepEqual(await store.read(), { counter: 0, items: [] });
+});
+
+test("a value written by a previous version names the version it found", async () => {
+  const dir = await tempDir();
+  const path = join(dir, "config.json");
+  await writeFile(path, JSON.stringify({ schemaVersion: 7, counter: 1, items: [] }), "utf8");
+  const strict = new JsonFileStore<Shape>({
+    path,
+    parse: (raw) => {
+      const record = raw as { schemaVersion?: unknown; counter?: unknown; items?: unknown };
+      if (record?.schemaVersion !== 1) return undefined;
+      if (typeof record.counter !== "number" || !Array.isArray(record.items)) return undefined;
+      return { counter: record.counter, items: record.items.map(String) };
+    },
+    initial: () => ({ counter: 0, items: [] }),
+  });
+  await assert.rejects(strict.read(), /found 7/);
+});

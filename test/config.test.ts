@@ -24,6 +24,8 @@ function member(overrides: Partial<MemberRecord> = {}): MemberRecord {
     id: "m1",
     role: "member",
     displayName: "Ronan",
+    // Distinct names are required by the parser: two active members with one
+    // display name make the shared thread's actor attribution ambiguous.
     createdAt: "2026-10-29T10:00:00.000Z",
     sessions: [],
     ...overrides,
@@ -69,10 +71,11 @@ test("the four files live where the plan says, all inside the data dir", async (
 test("every store writes 0600 files", async () => {
   const dir = await ensureDataDir(await tempDir());
   const stores = dataStores(dir.path);
+  await stores.config.ensure();
 
-  await stores.config.update((config) => ({ ...config, ownerTokenHash: "hash" }));
-  await stores.secrets.update((secrets) => ({ ...secrets, providerKeys: { "opencode-go": "k" } }));
-  await stores.push.update((push) => ({ ...push, ntfy: { m1: { topic: "t" } } }));
+  await stores.config.update((config) => ({ ...config, ownerTokenHash: "ownerhash0123456789abcdef" }));
+  await stores.secrets.update((secrets) => ({ ...secrets, providerKeys: { "opencode-go": "sk-test-0123456789" } }));
+  await stores.push.update((push) => ({ ...push, ntfy: { m1: { topic: "abcdefghijklmnopqrstuvwx" } } }));
 
   for (const path of [stores.paths.config, stores.paths.secrets, stores.paths.push]) {
     assert.equal((await stat(path)).mode & 0o777, 0o600, path);
@@ -127,12 +130,12 @@ test("unknown notification categories are refused", () => {
 test("push keeps the VAPID pair and per-user ntfy topics", () => {
   const parsed = parsePush({
     ...emptyPush(),
-    vapid: { publicKey: "pub", privateKey: "priv" },
-    ntfy: { partner: { topic: "topic-abc" } },
+    vapid: { publicKey: "p".repeat(80), privateKey: "s".repeat(40) },
+    ntfy: { partner: { topic: "abcdefghijklmnopqrstuvwx" } },
     prefs: { partner: { enabled: true, categories: ["fed", "feed_overdue"] } },
   });
-  assert.deepEqual(parsed?.vapid, { publicKey: "pub", privateKey: "priv" });
-  assert.equal(parsed?.ntfy.partner?.topic, "topic-abc");
+  assert.deepEqual(parsed?.vapid, { publicKey: "p".repeat(80), privateKey: "s".repeat(40) });
+  assert.equal(parsed?.ntfy.partner?.topic, "abcdefghijklmnopqrstuvwx");
   assert.deepEqual(parsed?.prefs.partner?.categories, ["fed", "feed_overdue"]);
 });
 
@@ -156,7 +159,7 @@ test("a member in config with no profile gets one", () => {
 test("a profile whose member is gone from config is removed", () => {
   const config: AppConfig = { ...emptyConfig(), members: [] };
   const plan = reconcileMembers(config, [{ memberId: "ghost", displayName: "Ghost" }]);
-  assert.deepEqual(plan.removeProfiles, ["ghost"]);
+  assert.deepEqual(plan.removeProfiles, [{ memberId: "ghost", displayName: "Ghost", reason: "missing" }]);
   assert.deepEqual(plan.createProfiles, []);
 });
 
@@ -167,7 +170,11 @@ test("a removed member is not resurrected from a stale profile", () => {
   };
   const plan = reconcileMembers(config, [{ memberId: "gone", displayName: "Ronan" }]);
 
-  assert.deepEqual(plan.removeProfiles, ["gone"], "the profile goes, the auth record stays removed");
+  assert.deepEqual(
+    plan.removeProfiles,
+    [{ memberId: "gone", displayName: "Ronan", reason: "removed" }],
+    "the profile goes, the auth record stays removed",
+  );
   assert.deepEqual(plan.createProfiles, [], "and boot must not recreate either");
 });
 
@@ -188,33 +195,40 @@ test("a member who is up to date causes no work", () => {
 test("a config written by the store reads back with its hashes intact", async () => {
   const dir = await ensureDataDir(await tempDir());
   const stores = dataStores(dir.path);
+  await stores.config.ensure();
 
   await stores.config.update((config) => ({
     ...config,
-    ownerTokenHash: "owner-hash",
-    members: [member({ inviteHash: "invite-hash", sessions: [{ tokenHash: "session-hash", createdAt: "2026-10-29T10:00:00.000Z" }] })],
+    ownerTokenHash: "ownerhash0123456789abcdef",
+    members: [
+      member({
+        inviteHash: "invitehash0123456789abcdef",
+        sessions: [{ tokenHash: "sessionhash0123456789abcdef", createdAt: "2026-10-29T10:00:00.000Z" }],
+      }),
+    ],
   }));
 
   const reread = await stores.config.read();
-  assert.equal(reread.ownerTokenHash, "owner-hash");
-  assert.equal(reread.members[0]!.inviteHash, "invite-hash");
-  assert.equal(reread.members[0]!.sessions[0]!.tokenHash, "session-hash");
+  assert.equal(reread.ownerTokenHash, "ownerhash0123456789abcdef");
+  assert.equal(reread.members[0]!.inviteHash, "invitehash0123456789abcdef");
+  assert.equal(reread.members[0]!.sessions[0]!.tokenHash, "sessionhash0123456789abcdef");
 
   // Hashes only: nothing in the file is a usable credential.
   const text = await readFile(stores.paths.config, "utf8");
-  assert.match(text, /owner-hash/);
+  assert.match(text, /ownerhash/);
   assert.doesNotMatch(text, /token=|invite=|Bearer /);
 });
 
 test("concurrent config updates lose nothing", async () => {
   const dir = await ensureDataDir(await tempDir());
   const stores = dataStores(dir.path);
+  await stores.config.ensure();
 
   await Promise.all(
     Array.from({ length: 20 }, (_, index) =>
       stores.config.update((config) => ({
         ...config,
-        members: [...config.members, member({ id: `m${index}` })],
+        members: [...config.members, member({ id: `m${index}`, displayName: `Person ${index}` })],
       })),
     ),
   );
@@ -247,4 +261,20 @@ test("the models cache round-trips through its store", async () => {
   const cache = await stores.models.read();
   assert.equal(cache.results.length, 1);
   assert.equal(cache.results[0]!.status, "ok");
+});
+
+test("a missing config is an error, not an empty authority; other files may be absent", async () => {
+  const dir = await ensureDataDir(await tempDir());
+  const stores = dataStores(dir.path);
+
+  // A typo'd --data or a partial restore must fail loudly: reading "no owner, no
+  // members" as valid would start the app and lose every invite, silently.
+  await assert.rejects(stores.config.read(), /is missing/);
+  assert.deepEqual(await stores.secrets.read(), emptySecrets());
+  assert.deepEqual(await stores.push.read(), emptyPush());
+
+  // First run creates it deliberately.
+  assert.equal(await stores.config.ensure(), true);
+  assert.equal(await stores.config.ensure(), false, "ensure is idempotent");
+  assert.deepEqual(await stores.config.read(), emptyConfig());
 });

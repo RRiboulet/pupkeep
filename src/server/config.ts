@@ -24,6 +24,10 @@ export const DATA_DIR_MODE = 0o700;
 export const FILE_MODE = 0o600;
 export const OWNER_LINK_MODE = 0o600;
 export const CONFIG_SCHEMA_VERSION = 1;
+// Separate versions: P4-05 will add the push outbox, and bumping push.json must
+// not force every existing config.json/secrets.json on the phone to be rewritten.
+export const SECRETS_SCHEMA_VERSION = 1;
+export const PUSH_SCHEMA_VERSION = 1;
 
 export interface DataDir {
   path: string;
@@ -123,6 +127,16 @@ export function activeMembers(config: AppConfig): MemberRecord[] {
   return config.members.filter((member) => member.removedAt === undefined);
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+/** A hash or opaque token: long enough that it is not a hand-typed word. */
+const HASH = /^[A-Za-z0-9_-]{16,}$/;
+/** An ntfy topic must be unguessable: 22 base64url chars ≈ 132 bits. */
+const NTFY_TOPIC = /^[A-Za-z0-9_-]{22,}$/;
+
+function isDate(value: unknown): value is string {
+  return typeof value === "string" && ISO_DATE.test(value);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -131,13 +145,16 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function parseSession(value: unknown): SessionRecord | undefined {
   const record = asRecord(value);
-  if (!record || typeof record.tokenHash !== "string" || typeof record.createdAt !== "string") {
-    return undefined;
-  }
+  if (!record) return undefined;
+  const { tokenHash, createdAt, lastSeenAt } = record;
+  // A raw token in the hash field would defeat "config.json holds hashes only".
+  if (typeof tokenHash !== "string" || !HASH.test(tokenHash)) return undefined;
+  if (!isDate(createdAt)) return undefined;
+  if (lastSeenAt !== undefined && !isDate(lastSeenAt)) return undefined;
   return {
-    tokenHash: record.tokenHash,
-    createdAt: record.createdAt,
-    ...(typeof record.lastSeenAt === "string" ? { lastSeenAt: record.lastSeenAt } : {}),
+    tokenHash,
+    createdAt,
+    ...(lastSeenAt !== undefined ? { lastSeenAt: lastSeenAt as string } : {}),
   };
 }
 
@@ -145,10 +162,13 @@ function parseMember(value: unknown): MemberRecord | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
   const { id, role, displayName, createdAt, removedAt, inviteHash, sessions } = record;
-  if (typeof id !== "string" || id === "") return undefined;
+  if (typeof id !== "string" || id.trim() === "") return undefined;
   if (role !== "owner" && role !== "member") return undefined;
-  if (typeof displayName !== "string") return undefined;
-  if (typeof createdAt !== "string") return undefined;
+  if (typeof displayName !== "string" || displayName.trim() === "") return undefined;
+  if (!isDate(createdAt)) return undefined;
+  // An empty or non-date `removedAt` would parse and silently deactivate a member.
+  if (removedAt !== undefined && !isDate(removedAt)) return undefined;
+  if (inviteHash !== undefined && (typeof inviteHash !== "string" || !HASH.test(inviteHash))) return undefined;
 
   const parsedSessions: SessionRecord[] = [];
   for (const item of Array.isArray(sessions) ? sessions : []) {
@@ -185,6 +205,24 @@ export function parseConfig(raw: unknown): AppConfig | undefined {
   const ids = new Set(members.map((member) => member.id));
   if (ids.size !== members.length) return undefined;
 
+  // A session hash must identify exactly one member, or "who is this request?"
+  // becomes ambiguous; and two active members with one display name make the
+  // actor attribution in the shared thread a guess (P0-04).
+  const hashes = new Set<string>();
+  for (const member of members) {
+    for (const session of member.sessions) {
+      if (hashes.has(session.tokenHash)) return undefined;
+      hashes.add(session.tokenHash);
+    }
+  }
+  const names = new Set<string>();
+  for (const member of members) {
+    if (member.removedAt !== undefined) continue;
+    const key = member.displayName.trim().toLowerCase();
+    if (names.has(key)) return undefined;
+    names.add(key);
+  }
+
   return {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     ownerTokenHash: record.ownerTokenHash as string | null,
@@ -195,27 +233,27 @@ export function parseConfig(raw: unknown): AppConfig | undefined {
 // --- secrets.json ----------------------------------------------------------
 
 export interface SecretsConfig {
-  schemaVersion: typeof CONFIG_SCHEMA_VERSION;
+  schemaVersion: typeof SECRETS_SCHEMA_VERSION;
   /** provider id → API key. Never leaves this file except to a provider call. */
   providerKeys: Record<string, string>;
 }
 
 export function emptySecrets(): SecretsConfig {
-  return { schemaVersion: CONFIG_SCHEMA_VERSION, providerKeys: {} };
+  return { schemaVersion: SECRETS_SCHEMA_VERSION, providerKeys: {} };
 }
 
 export function parseSecrets(raw: unknown): SecretsConfig | undefined {
   const record = asRecord(raw);
-  if (!record || record.schemaVersion !== CONFIG_SCHEMA_VERSION) return undefined;
+  if (!record || record.schemaVersion !== SECRETS_SCHEMA_VERSION) return undefined;
   const keys = asRecord(record.providerKeys);
   if (!keys) return undefined;
 
   const providerKeys: Record<string, string> = {};
   for (const [provider, value] of Object.entries(keys)) {
-    if (typeof value !== "string") return undefined;
+    if (typeof value !== "string" || value.trim() === "") return undefined;
     providerKeys[provider] = value;
   }
-  return { schemaVersion: CONFIG_SCHEMA_VERSION, providerKeys };
+  return { schemaVersion: SECRETS_SCHEMA_VERSION, providerKeys };
 }
 
 // --- push.json -------------------------------------------------------------
@@ -237,7 +275,7 @@ export interface NotificationPrefs {
 }
 
 export interface PushConfig {
-  schemaVersion: typeof CONFIG_SCHEMA_VERSION;
+  schemaVersion: typeof PUSH_SCHEMA_VERSION;
   /** Absent until P4-05 generates a key pair; rotating it invalidates every subscription. */
   vapid: { publicKey: string; privateKey: string } | null;
   subscriptions: PushSubscriptionRecord[];
@@ -248,7 +286,7 @@ export interface PushConfig {
 }
 
 export function emptyPush(): PushConfig {
-  return { schemaVersion: CONFIG_SCHEMA_VERSION, vapid: null, subscriptions: [], prefs: {}, ntfy: {} };
+  return { schemaVersion: PUSH_SCHEMA_VERSION, vapid: null, subscriptions: [], prefs: {}, ntfy: {} };
 }
 
 const CATEGORIES: ReadonlySet<string> = new Set<NotificationCategory>([
@@ -266,6 +304,11 @@ function parseSubscription(value: unknown): PushSubscriptionRecord | undefined {
   if ([id, memberId, endpoint, p256dh, auth, createdAt].some((field) => typeof field !== "string")) {
     return undefined;
   }
+  // A subscription with an empty key is accepted by the browser but fails at send
+  // time; `auth` is a 16-byte secret (22 base64url chars).
+  if (id === "" || memberId === "" || !/^https:\/\//.test(endpoint as string)) return undefined;
+  if ((p256dh as string).length < 40 || (auth as string).length < 16) return undefined;
+  if (!isDate(createdAt)) return undefined;
   return {
     id: id as string,
     memberId: memberId as string,
@@ -278,7 +321,7 @@ function parseSubscription(value: unknown): PushSubscriptionRecord | undefined {
 
 export function parsePush(raw: unknown): PushConfig | undefined {
   const record = asRecord(raw);
-  if (!record || record.schemaVersion !== CONFIG_SCHEMA_VERSION) return undefined;
+  if (!record || record.schemaVersion !== PUSH_SCHEMA_VERSION) return undefined;
   if (!Array.isArray(record.subscriptions)) return undefined;
 
   const subscriptions: PushSubscriptionRecord[] = [];
@@ -292,6 +335,7 @@ export function parsePush(raw: unknown): PushConfig | undefined {
   if (record.vapid !== null && record.vapid !== undefined) {
     const keys = asRecord(record.vapid);
     if (!keys || typeof keys.publicKey !== "string" || typeof keys.privateKey !== "string") return undefined;
+    if (keys.publicKey.length < 32 || keys.privateKey.length < 32) return undefined;
     vapid = { publicKey: keys.publicKey, privateKey: keys.privateKey };
   }
 
@@ -314,10 +358,13 @@ export function parsePush(raw: unknown): PushConfig | undefined {
   for (const [memberId, value] of Object.entries(rawNtfy)) {
     const ntfyRecord = asRecord(value);
     if (!ntfyRecord || typeof ntfyRecord.topic !== "string") return undefined;
+    // A short topic is guessable on a public relay — and it also escapes the
+    // log scrubber's opaque-value floor.
+    if (!NTFY_TOPIC.test(ntfyRecord.topic)) return undefined;
     ntfy[memberId] = { topic: ntfyRecord.topic };
   }
 
-  return { schemaVersion: CONFIG_SCHEMA_VERSION, vapid, subscriptions, prefs, ntfy };
+  return { schemaVersion: PUSH_SCHEMA_VERSION, vapid, subscriptions, prefs, ntfy };
 }
 
 // --- stores ----------------------------------------------------------------
@@ -338,7 +385,9 @@ export function dataStores(dataDir: string): DataStores {
   const paths = dataPaths(dataDir);
   return {
     paths,
-    config: store({ path: paths.config, parse: parseConfig, initial: emptyConfig }),
+    // The auth authority must exist: a typo'd --data or a partial restore must
+    // fail loudly, not start with no owner and no invites.
+    config: new JsonFileStore({ path: paths.config, parse: parseConfig, initial: emptyConfig, missing: "error", mode: FILE_MODE }),
     secrets: store({ path: paths.secrets, parse: parseSecrets, initial: emptySecrets }),
     push: store({ path: paths.push, parse: parsePush, initial: emptyPush }),
     models: store({
@@ -361,8 +410,8 @@ export interface Reconciliation {
   createProfiles: HouseholdProfile[];
   /** Display names that drifted from config; config wins. */
   updateProfiles: Array<{ memberId: string; from: string; to: string }>;
-  /** Profiles to drop: their config record is gone or the member was removed. */
-  removeProfiles: string[];
+  /** Profiles to drop, and the reason the applier should log differently. */
+  removeProfiles: Array<{ memberId: string; displayName: string; reason: "removed" | "missing" }>;
 }
 
 /**
@@ -392,9 +441,20 @@ export function reconcileMembers(
     }
   }
 
-  const removeProfiles: string[] = [];
+  const removed = new Map(
+    config.members.filter((member) => member.removedAt !== undefined).map((member) => [member.id, member]),
+  );
+  const removeProfiles: Reconciliation["removeProfiles"] = [];
   for (const profile of profiles) {
-    if (!active.has(profile.memberId)) removeProfiles.push(profile.memberId);
+    if (profile.memberId.trim() === "") continue; // nothing to delete
+    if (active.has(profile.memberId)) continue;
+    removeProfiles.push({
+      memberId: profile.memberId,
+      displayName: profile.displayName,
+      // "removed" is a decision; "missing" means the auth record vanished, which
+      // an applier should find suspicious rather than routine.
+      reason: removed.has(profile.memberId) ? "removed" : "missing",
+    });
   }
 
   return { createProfiles, updateProfiles, removeProfiles };
