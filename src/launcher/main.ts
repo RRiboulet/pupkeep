@@ -20,7 +20,7 @@ import { detectTermux, parseTunnelUrl, tunnelCommand, tunnelChanged, type Tunnel
 import { announceOwnerLink, type AnnounceResult } from "./owner.ts";
 import { dataStores, ensureDataDir, ownerLinkPath, type DataDir } from "../server/config.ts";
 import { Auth } from "../server/auth.ts";
-import { acquireLock, type LockHandle } from "../server/lock.ts";
+import { acquireLock, inspectLock, SERVER_LOCK_FILE, type LockHandle } from "../server/lock.ts";
 import { createLogger } from "../server/log.ts";
 import { scrub } from "../shared/redact.ts";
 
@@ -173,6 +173,27 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
     }
     lock = acquired.lock;
 
+    // The launcher lock does not cover a detached server left behind by an
+    // earlier launcher that was SIGKILLed: that server still holds
+    // `server.pid`. Refusing here turns a crash-loop of "the child keeps
+    // exiting 3" into one clear message, and the server's own lock remains the
+    // authority if this check races with a start.
+    const serverLock = await inspectLock(dataDir.path, SERVER_LOCK_FILE);
+    if (serverLock.state === "held") {
+      const reason =
+        `a server already owns ${dataDir.path} (pid ${serverLock.pid}); ` +
+        "one process per SQLite file — stop it before starting another launcher";
+      log(`refusing to start: ${reason}`);
+      await stop();
+      return { ok: false, code: EXIT_LOCKED, message: reason, plan, dataDir: dataDir.path };
+    }
+    if (serverLock.state === "error") {
+      const reason = `could not inspect the server lock in ${dataDir.path}: ${serverLock.message}`;
+      log(`refusing to start: ${reason}`);
+      await stop();
+      return { ok: false, code: EXIT_DATA_DIR, message: reason, plan, dataDir: dataDir.path };
+    }
+
     // Owner mint runs before the server exists: the sign-in link is the trust
     // root and `--reissue-owner` must work even when the server program is
     // missing (P1-06). Only a mint or reissue writes the file.
@@ -224,7 +245,7 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
 
     server = new Supervisor({
       name: "server",
-      spawn: () => spawnChild(entry.command, entry.args, serverEnv(plan.bindHost, options.port)),
+      spawn: () => spawnChild(entry.command, entry.args, serverEnv(plan.bindHost, options.port, dataDir.path)),
       // Server stdout is what the boot script redirects into server.log, so it is
       // scrubbed like the launcher's own lines rather than passed through.
       onOutput: (line, stream) => (stream === "stderr" ? log(line) : out(`${scrub(line)}\n`)),
@@ -313,8 +334,10 @@ async function defaultMintOwnerLink(
   return { link, minted: true };
 }
 
-function serverEnv(bindHost: string, port: number): Record<string, string> {
-  return { PUPKEEP_BIND_HOST: bindHost, PUPKEEP_PORT: String(port) };
+function serverEnv(bindHost: string, port: number, dataDir: string): Record<string, string> {
+  // The server must own the same directory the launcher took the lock in; it
+  // is passed rather than re-derived from a default that could drift.
+  return { PUPKEEP_BIND_HOST: bindHost, PUPKEEP_PORT: String(port), PUPKEEP_DATA_DIR: dataDir };
 }
 
 function networkInterfacesList(): InterfaceAddress[] {

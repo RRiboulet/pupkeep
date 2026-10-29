@@ -37,7 +37,9 @@ A standalone clone may add the package to its own local settings.
   schedule-changing writes require a human confirmation.
 - **Durability:** every acknowledged **care action** is one Pi Durable commit.
   Auth/push config writes use serialized atomic JSON. One process owns one
-  SQLite file. Run `harness.resume()` on every start.
+  SQLite file: the launcher holds `launcher.pid` and the server takes
+  `server.pid` itself at open, because a SIGKILLed launcher can leave its
+  detached server alive. Run `harness.resume()` on every start.
 - **Multiplayer:** one household, two caregivers, live state over SSE, and an
   explicit conflict instead of a silent overwrite.
 
@@ -71,13 +73,15 @@ from `main`.
 npm ci
 npm run typecheck      # tsc --noEmit; only erasable syntax, so node strips it
 npm test               # node --test runs the TypeScript directly
-npm start              # launcher: not implemented until P1-04
+npm start              # launcher -> server; the HTTP routes arrive with P1-09/P1-10
+npm run backup -- ...  # encrypted SQLite + config + push archive (P1-07)
+npm run restore -- ... # restore one archive; the server must be stopped
 ```
 
-`npm start` exits with a message naming P1-04, deliberately, so a missing launcher
-is not mistaken for a broken install. The client needs no build step: `web/vendor/`
-holds pinned Preact/htm ES modules that `test/vendor.test.ts` verifies against
-`NOTICE.md`.
+`npm start` starts the launcher and the server. The server's listener is a
+scaffold until P1-09/P1-10: `/healthz` answers and every other route is 503. The
+client needs no build step: `web/vendor/` holds pinned Preact/htm ES modules that
+`test/vendor.test.ts` verifies against `NOTICE.md`.
 
 The development pi agent (the one reading this file) has shell and file tools.
 The **product** agent must never: it gets app tools only — no shell, filesystem,

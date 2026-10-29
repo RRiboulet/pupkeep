@@ -2,6 +2,7 @@
 // `npm start`. Parses arguments, then hands the launch to the launcher module.
 // The CLI stays tiny on purpose: everything worth testing lives in src/launcher.
 
+import { fileURLToPath } from "node:url";
 import { parseOptions, USAGE } from "../src/launcher/options.ts";
 import { createLauncher } from "../src/launcher/main.ts";
 
@@ -19,8 +20,18 @@ if (options.help) {
 }
 
 const launcher = createLauncher(options, {
-  // The server program arrives with P1-07. Until then this is undefined and the
-  // launcher reports it rather than crash-looping on a missing file.
+  // The server is a separate process on purpose: the launcher can then restart
+  // a failed harness without touching the tunnel, and the server's own lock
+  // (`server.pid`) survives a launcher crash. Same Node binary, no shell.
+  serverEntry: {
+    command: process.execPath,
+    args: [fileURLToPath(new URL("./server.js", import.meta.url))],
+  },
+  // A supervisor that gave up must look failed to whatever supervises *it*
+  // (termux-services, a boot script, systemd): exiting 0 after the server
+  // crash-looped is indistinguishable from a clean stop. The launcher has
+  // already stopped its children and released the lock when this runs.
+  onFatal: () => process.exit(1),
   termux: process.env.PUPKEEP_TERMUX === "1",
 });
 
@@ -39,4 +50,6 @@ if (!result.ok) {
 }
 
 const urls = launcher.urls();
-if (urls.display) console.error(`pupkeep: serving on ${urls.display}`);
+// The server child is spawned, not necessarily bound yet; P1-04 has no
+// readiness handshake, so do not claim it is serving.
+if (urls.display) console.error(`pupkeep: starting on ${urls.display}`);

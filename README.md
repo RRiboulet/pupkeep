@@ -5,8 +5,9 @@ A shared, agent-operated puppy care app for two caregivers, built on
 
 > **Status: Phase 1 — the skeleton is being built.** Phase 0's spikes are
 > complete and their go/no-go is recorded in
-> [`docs/PLAN.md`](docs/PLAN.md) §2.3. There is still no app logic: `src/`, `web/`,
-> `scripts/` and `test/` hold placeholders until their Phase 1 tasks land. The
+> [`docs/PLAN.md`](docs/PLAN.md) §2.3. The launcher, auth, data files, harness,
+> storage and encrypted backup job are in place; the HTTP/UI layer and the first
+> domain documents are still P1-08/P1-09/P1-10. The
 > source of truth is [`docs/PLAN.md`](docs/PLAN.md);
 > [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says how to pick the next task.
 >
@@ -106,17 +107,22 @@ single major that would make one of the two environments non-conforming.
 npm ci                 # installs the pinned runtime deps (no native modules)
 npm run typecheck      # tsc --noEmit; erasable-only syntax, so node can strip it
 npm test               # node --test, TypeScript directly, no build step
-npm start              # the launcher — not implemented yet (P1-04)
+npm start              # launcher -> server
+npm run backup -- --data ~/.pupkeep --remote <rclone:path>
+npm run restore -- --data ~/.pupkeep --archive <file.age> --force
 ```
 
-`npm start` exits with an explanation until P1-04 lands. The browser client needs
-no build step either: `web/vendor/` holds the pinned Preact/htm ES modules,
-checked against `NOTICE.md` by `test/vendor.test.ts`.
+`npm start` starts the launcher and the server. The server's listener is a
+scaffold until P1-09/P1-10: `/healthz` answers and every other route is 503. The
+backup passphrase comes from `PUPKEEP_BACKUP_PASSPHRASE` or a `--passphrase-file`
+outside the data and backup directories; it is never stored beside the archive.
+The browser client needs no build step either: `web/vendor/` holds the pinned
+Preact/htm ES modules, checked against `NOTICE.md` by `test/vendor.test.ts`.
 
 ## On the phone
 
 ```bash
-pkg install nodejs git termux-api sqlite rclone termux-services tmux
+pkg install nodejs git termux-api sqlite rclone age expect tar termux-services tmux
 # cloudflared is NOT in the Termux package repo (P0-03). Use the arm64 release
 # binary in ~/.pupkeep/bin, and run it only through the wrapper in PLAN §6.7.
 git clone <repo> ~/pupkeep

@@ -28,9 +28,20 @@ export type LockResult =
   | { ok: false; reason: "error"; message: string };
 
 export const LOCK_FILE = "launcher.pid";
+/**
+ * The server takes a lock of its own, not the launcher's.
+ *
+ * A child cannot hold the lock its parent already holds, and the failure this
+ * closes is exactly that pair drifting apart: a SIGKILLed launcher leaves its
+ * detached server alive, a new launcher sees the launcher lock's dead pid and
+ * clears it, then spawns a second server. The surviving server's own lock is
+ * still live, so the second server refuses at open and the one-writer rule
+ * holds without depending on the launcher being alive. P1-07's carry-over.
+ */
+export const SERVER_LOCK_FILE = "server.pid";
 
-export function lockPath(dataDir: string): string {
-  return join(dataDir, LOCK_FILE);
+export function lockPath(dataDir: string, file: string = LOCK_FILE): string {
+  return join(dataDir, file);
 }
 
 /**
@@ -82,8 +93,11 @@ async function readOwner(path: string): Promise<ReadOwner> {
   const [pidText, ticks] = text.trim().split(/\s+/);
   const pid = Number(pidText);
   // An empty or garbled lock is *not* evidence of a dead owner. Unlinking it on
-  // a guess lets two simultaneous starters remove each other's lock.
-  if (!Number.isInteger(pid) || pid <= 0) {
+  // a guess lets two simultaneous starters remove each other's lock. The ticks
+  // field is load-bearing: a non-numeric value would compare unequal to every
+  // real process and silently mark a live holder stale.
+  const validTicks = ticks === undefined || ticks === "-" || /^\d+$/.test(ticks);
+  if (!Number.isInteger(pid) || pid <= 0 || !validTicks) {
     return { ok: false, reason: `lock file is unreadable: ${path}` };
   }
   return { ok: true, owner: { pid, ...(ticks ? { startTicks: ticks } : {}) } };
@@ -95,13 +109,20 @@ async function readOwner(path: string): Promise<ReadOwner> {
  * A stale file — pid gone — is replaced rather than treated as an error: a phone
  * that lost power or had Termux killed leaves one behind, and refusing to boot
  * after a normal crash would be worse than the race it protects against.
+ *
+ * That takeover is read → unlink → exclusive create, not a compare-and-swap.
+ * Two *simultaneous manual* starts on the same stale lock can in principle both
+ * clear it; the supervisor spawns one child at a time, and `flock` would need a
+ * native module the phone runtime forbids (PLAN §3.2). This is the accepted
+ * Phase 1 residual, not a silent claim of atomicity.
  */
 export async function acquireLock(
   dataDir: string,
   pid: number = process.pid,
   startedAt: Date = new Date(),
+  file: string = LOCK_FILE,
 ): Promise<LockResult> {
-  const path = lockPath(dataDir);
+  const path = lockPath(dataDir, file);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -128,19 +149,22 @@ export async function acquireLock(
       }
 
       const holder = read.owner;
-      if (holder && holder.pid !== pid && isAlive(holder.pid)) {
-        // Alive — but is it *our* predecessor, or a recycled pid? Compare start
-        // ticks when both sides have them.
+      if (holder && isAlive(holder.pid)) {
+        // Alive — but is it the recorded owner, or has the pid been recycled?
+        // The start ticks are the only evidence that distinguishes them. When
+        // both sides have ticks and they differ, the pid now belongs to another
+        // process: the lock is stale whether that pid is ours or a stranger's.
+        // When either side cannot tell, stay conservative and refuse.
         const currentTicks = await processStartTicks(holder.pid);
-        const sameProcess =
-          holder.startTicks === undefined || currentTicks === undefined || holder.startTicks === currentTicks;
+        const canTell = holder.startTicks !== undefined && currentTicks !== undefined;
+        const sameProcess = !canTell || holder.startTicks === currentTicks;
         if (sameProcess) {
           return { ok: false, reason: "held", path, pid: holder.pid, alive: true };
         }
       }
 
-      // Stale, our own pid from a previous incarnation, or a recycled pid: clear
-      // and retry once.
+      // Stale: the pid is gone, or it was recycled (same number, different
+      // start ticks). Clear and retry once.
       try {
         await unlink(path);
       } catch {
@@ -150,6 +174,38 @@ export async function acquireLock(
   }
 
   return { ok: false, reason: "error", message: `could not take the lock at ${path}` };
+}
+
+export type LockInspection =
+  | { state: "free" }
+  | { state: "held"; pid: number }
+  | { state: "error"; message: string };
+
+/**
+ * Read a lock without taking it. A dead pid, or a pid whose start ticks no
+ * longer match, is free: that is what a crash leaves behind. An unreadable lock
+ * is an error for the same reason `acquireLock` refuses to unlink it on a
+ * guess — there is no evidence that its owner is gone.
+ */
+export async function inspectLock(
+  dataDir: string,
+  file: string = LOCK_FILE,
+): Promise<LockInspection> {
+  const path = lockPath(dataDir, file);
+  const read = await readOwner(path);
+  if (!read.ok) return { state: "error", message: read.reason };
+  if (!read.owner) return { state: "free" };
+
+  const holder = read.owner;
+  // No same-pid shortcut: a lock naming this pid can be a leftover from a
+  // previous boot whose pid was reused, and the start ticks are what tell them
+  // apart.
+  if (!isAlive(holder.pid)) return { state: "free" };
+
+  const currentTicks = await processStartTicks(holder.pid);
+  const sameProcess =
+    holder.startTicks === undefined || currentTicks === undefined || holder.startTicks === currentTicks;
+  return sameProcess ? { state: "held", pid: holder.pid } : { state: "free" };
 }
 
 async function releaseLock(path: string, pid: number): Promise<void> {

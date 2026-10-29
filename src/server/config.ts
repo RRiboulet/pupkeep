@@ -66,6 +66,7 @@ export async function ensureDataDir(path: string): Promise<DataDir> {
 
 export interface DataPaths {
   root: string;
+  database: string;
   config: string;
   secrets: string;
   push: string;
@@ -77,6 +78,8 @@ export function dataPaths(dataDir: string): DataPaths {
   const root = resolve(dataDir);
   return {
     root,
+    // The one SQLite file, Pi Durable tables only (PLAN §7.1, §8.2).
+    database: join(root, "pupkeep.sqlite"),
     config: join(root, "config.json"),
     secrets: join(root, "secrets.json"),
     push: join(root, "push.json"),
