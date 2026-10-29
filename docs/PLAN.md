@@ -318,7 +318,8 @@ pupkeep/
 │   ├── postCreate.sh
 │   └── pi/
 ├── .pi/
-│   └── settings.json          # shared my-agent-setup package pin
+│   └── todos/                 # local task files (gitignored); no package pin here —
+│                              #   see README "Development tooling" for why
 ├── bin/
 │   └── pupkeep.js             # launcher: access, server, tunnel, QR
 ├── src/
@@ -328,6 +329,7 @@ pupkeep/
 │   │   ├── options.ts
 │   │   └── term.ts
 │   ├── server/
+│   │   ├── models/            # startup probe, allowlist (P1-03, P4-08)
 │   │   ├── app.ts             # harness, docs, tools, routes
 │   │   ├── auth.ts            # owner token, invites, cookies
 │   │   ├── config.ts          # data dir, config.json, secrets
@@ -382,9 +384,11 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
 - `cloudflared` installed in the image or `postCreate` (amd64 build for the
   devcontainer; the phone uses Termux’s package).
 - **pi coding agent `1.4.0`**, pin exact.
-- `.pi/settings.json` pins the shared package
-  `git:github.com/RRiboulet/my-agent-setup@v1.9.0` (or the tag current at build
-  time). Bump pi and the package together.
+- The shared package (`my-agent-setup`) is **not** declared in this repo's
+  `.pi/settings.json`: when pupkeep sits inside a workspace that already loads
+  those extensions, a second declaration loads every extension twice and
+  subagents fail at startup on a duplicate flag. A standalone clone may add it to
+  its own local settings; bump pi and that package together when it does.
 - Persistent `pi-config` volume at `/home/vscode/.pi`.
 - Optional Docker-in-Docker only for testing the VPS fallback. Not required for
   the phone host.
@@ -1148,14 +1152,22 @@ coding agent's tool schema; P1-03/P4-08 must repeat them with the app schema.
 | `openrouter/free` | openrouter | $0 | $0 | free router; rate-limited during the probe; optional |
 
 Every model must pass a **live tool-calling probe** before it appears in the
-picker. The table is a catalog snapshot, not a promise: providers deprecate
+picker: `status: "ok"` is not enough, the model must actually emit the probe tool
+call. The probe records one of `ok`, `deprecated`, `not_found`, `unauthorized`,
+`rate_limited`, `network`, `timeout` per model. **Timeouts and aborts are resolved
+messages in Pi AI, not exceptions** — adapters set `stopReason: "aborted"` or
+`"error"` and resolve — so a probe that only inspects thrown errors records a hung
+provider as healthy and a 410-dead model as alive. P1-03's implementation maps
+from the message; keep it that way. The table is a catalog snapshot, not a promise: providers deprecate
 models without a version bump. On 2026-10-28 OpenCode Go returned
 `410 ModelDeprecated` for `minimax-m3.1-flash-free` **and**
 `longcat-2.5-preview-free`; OpenRouter returned 404 for the `minimax` free
 variant and 429 for `openrouter/free`. `mimo-v2.6-flash`, `beam-free` and
 `deepseek-v4.1-flash` passed a real tool-call probe. The allowlist is built by a
 **bounded, parallel startup probe**: one probe turn, ~15s timeout, once per
-boot, cached. Drop only 401/404/410/deprecated models; treat 429/network/offline
+boot, cached as `~/.pupkeep/models.json` in the `{version, checkedAt, results}`
+shape P1-03 defined (`parseModelProbeCache` refuses anything else rather than
+half-reading it). Drop only 401/404/410/deprecated models; treat 429/network/offline
 as “unknown” and keep the last-known-good cached allowlist instead of hiding a
 usable model. Record the result in the Settings sheet. `mimo-v2.6-flash` is the default only if it passes; otherwise the cheapest
 available paid fallback is used. Free models are best-effort; the probe decides,
@@ -1695,19 +1707,23 @@ that the partner is reached out-of-app is gated on P0-10.
 
 - [ ] **P1-01** Repo scaffold: directories, `README`, `AGENTS`, `LICENSE`,
       `NOTICE`, `.gitignore`, `.env.example`.
-- [ ] **P1-02** Devcontainer: Node 24, pi `1.4.0`, shared package pin, persistent
+- [ ] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.4.0`, shared package pin (installed **locally** in the image or `postCreate` — never declared in this repo's `.pi/settings.json`, which duplicates the enclosing workspace's extensions and breaks subagent startup), persistent
       pi volume, `cloudflared`, `sqlite3`, `tmux`, `gh`, `jq`, `rclone`, port
       8787, `postCreate`, `tsc --noEmit`. Verify the
       `javascript-node:24-bookworm` tag and the shared package/pi compatibility
       at build time.
-- [ ] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
+- [x] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
       vendored browser files** with pinned versions/checksums in `NOTICE.md`,
       not server runtime deps; no native modules; `npm ci` and `node --test`
       work. State the dev pi coding agent vs product agent distinction.
-      Also reconcile the phone's Node major with the pinned devcontainer Node
-      (P0-01: Termux measured on Node 26, the devcontainer pins 24 — either pin
-      both to 26 or record why they differ), and implement the **startup model
-      probe with the app schema** whose result shape is specified in P0-05.
+      Also reconcile the phone's Node major with the pinned devcontainer Node,
+      and implement the **startup model probe with the app schema** whose result
+      shape is specified in P0-05. **Decided:** `engines.node` is `>=24`, not a
+      pin to one major — the phone measured Node 26 and the devcontainer keeps 24
+      (P1-02), so the difference is recorded rather than papered over, and P5-01
+      re-measures on the phone. Probe and allowlist are in
+      `src/server/models/`; both are tested offline through an injected provider
+      call, and the live path is `createPiAiProbeCall()`.
 - [ ] **P1-04** Launcher: `local`/`lan`/`cloudflare`/`tailscale`, bind addresses,
       server child, restart/backoff, tunnel supervisor, owner link + QR. Inherits
       three Phase 0 constraints: it **calls** P1-05's pid lock; it starts
@@ -1717,7 +1733,13 @@ that the partner is reached out-of-app is gated on P0-10.
       when sshd starts before Tailscale — P0-06).
 - [ ] **P1-05** Data dir/config: `~/.pupkeep`, `config.json`, `secrets.json`,
       `push.json`, mode `0700/0600`, serialized per-file writes, log scrub,
-      logging, one-process pid lock (P0-01 deferred; P1-04 calls it).
+      logging, one-process pid lock (P0-01 deferred; P1-04 calls it). **Owns the
+      log scrub**, which should absorb P1-03's `redactDetail` so every path gets
+      one implementation, and move `statusFromMessage`/`fromCode` to
+      `src/shared/` so P4-08's "retry with fallback model" reuses them instead of
+      re-deriving 410/429/5xx. Also owns the serialized write of the model-probe
+      cache (`models.json`) in the shape `parseModelProbeCache` accepts
+      (`{version, checkedAt, results}`, P1-03); P4-08 is the reader.
 - [ ] **P1-06** Auth: owner token hash, **owner reissue/rotate**, one-time
       hashed invite, hashed sessions, cookie, owner/member roles, authz matrix,
       remove member + purge sessions, rate limit, per-origin cookies.
@@ -1814,7 +1836,11 @@ process kill; both clients see the same state; the partner notification
 - [ ] **P4-08** Budget with `harness.usage()` authoritative + model picker +
       provider keys + usage UI. Re-probe the allowlist with the **app schema**
       (P0-05's result shape) rather than trusting the spike's catalog probe, and
-      show the last probe result in Settings.
+      show the last probe result in Settings. Supplies the `Models` collection to
+      `createPiAiProbeCall(models)` — credentials come from `secrets.json` via
+      P1-05, never the environment — and reads/writes the cache P1-05 owns. Probe
+      spend is **not** in `harness.usage()`; record it in the ledger or state the
+      exception.
 - [ ] **P4-09** Tailscale runbook for daily access; ntfy onboarding; Cloudflare
       quick-tunnel runbook for testing; PWA install/push test; named tunnel
       deferred until a domain exists.

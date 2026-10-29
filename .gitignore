@@ -13,3 +13,5 @@ backups/
 coverage/
 .pupkeep/
 .pi/todos/
+# pi fetches declared packages here; it is a checkout, not source
+.pi/git/

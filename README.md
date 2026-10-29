@@ -78,24 +78,42 @@ carry a `.gitkeep` and nothing else — no `android/`, no rootfs, no Gradle.
 
 ## Development tooling
 
-Agents work in this repository through the shared package pinned in
-[`.pi/settings.json`](.pi/settings.json):
-`git:github.com/RRiboulet/my-agent-setup@v1.9.0`, which targets pi `1.4.0` — the
-same pi version the plan pins for the runtime. Pi loads project packages only
-after project trust is granted.
+**No pi package is declared here on purpose.** This repository usually lives
+inside a workspace that already loads the shared `my-agent-setup` extensions, and
+declaring the same package again makes every extension load twice — the first
+version of this repo did, and subagents launched in this directory failed at
+startup with `Flag "--attach-subagent" conflicts with …`. A standalone clone can
+add the package to its own local settings; the repo does not force it. The pi
+runtime the plan pins is `1.4.0`, enforced by the devcontainer (P1-02) rather
+than by a file here.
 
-## Planned commands
+**The development agent is not the product agent, and they must never be
+confused.** The pi coding agent used to build this repo has shell, file and web
+tools — that is how the code gets written. The agent *inside* Pupkeep has only
+app tools (`get_context`, `update_puppy_profile`, feeding, walks, and so on): no
+shell, no filesystem, no browser, no arbitrary HTTP, no SQL (PLAN §10, §14.3). A
+change that hands the product agent a general-purpose tool is a security defect,
+not a convenience.
 
-These are the commands the finished repo will expose; they are listed now so the
-plan is concrete, not because they run yet.
+Node: `engines.node` is `>=24`. The devcontainer and CI use Node 24; the phone
+measured Node 26.12.1 in Phase 0. That difference is deliberate and recorded (the
+runtime floor is 24, and P5-01 re-measures on the phone) rather than pinned to a
+single major that would make one of the two environments non-conforming.
+
+## Commands
 
 ```bash
-npm ci
-node --test
-npm start -- --access local
+npm ci                 # installs the pinned runtime deps (no native modules)
+npm run typecheck      # tsc --noEmit; erasable-only syntax, so node can strip it
+npm test               # node --test, TypeScript directly, no build step
+npm start              # the launcher — not implemented yet (P1-04)
 ```
 
-On the phone:
+`npm start` exits with an explanation until P1-04 lands. The browser client needs
+no build step either: `web/vendor/` holds the pinned Preact/htm ES modules,
+checked against `NOTICE.md` by `test/vendor.test.ts`.
+
+## On the phone
 
 ```bash
 pkg install nodejs git termux-api sqlite rclone termux-services tmux
