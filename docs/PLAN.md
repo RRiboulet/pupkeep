@@ -496,7 +496,9 @@ restarting the launcher; the app’s pid lock prevents a second server.
 #!/data/data/com.termux/files/usr/bin/bash
 termux-wake-lock
 cd ~/pupkeep
-exec "$PREFIX/bin/npm" start -- --access tailscale --data ~/.pupkeep >> ~/.pupkeep/server.log 2>&1
+# `--boot` is belt and braces: the launcher treats a non-TTY stdout as
+# non-interactive anyway, so a redirected boot never prints the owner token.
+exec "$PREFIX/bin/npm" start -- --access tailscale --boot --data ~/.pupkeep >> ~/.pupkeep/server.log 2>&1
 ```
 
 - Install **Termux:Boot**.
@@ -1724,17 +1726,35 @@ that the partner is reached out-of-app is gated on P0-10.
       re-measures on the phone. Probe and allowlist are in
       `src/server/models/`; both are tested offline through an injected provider
       call, and the live path is `createPiAiProbeCall()`.
-- [ ] **P1-04** Launcher: `local`/`lan`/`cloudflare`/`tailscale`, bind addresses,
+- [x] **P1-04** Launcher: `local`/`lan`/`cloudflare`/`tailscale`, bind addresses,
       server child, restart/backoff, tunnel supervisor, owner link + QR. Inherits
       three Phase 0 constraints: it **calls** P1-05's pid lock; it starts
       `cloudflared` only through the §6.7 wrapper; and it owns the boot script
       plus starting `sshd` on demand, **re-resolving the Tailscale address** each
       time (a pinned `ListenAddress` fails to bind when the address changes or
-      when sshd starts before Tailscale — P0-06).
+      when sshd starts before Tailscale — P0-06). **Landed:** access resolution
+      (fails closed, `lan` is the only wildcard bind and it warns), option
+      parsing, the pid lock, the tunnel command wrapper and URL parsing, child
+      supervision with capped backoff, and owner-link announce rules (0600 file
+      on mint/reissue; a boot logs the path, never the token). **Two carry-overs:**
+      the **QR** moves to P1-06, because the launcher cannot mint the link (the
+      token is auth's) and a QR needs an encoder the phone runtime should not
+      carry for a terminal convenience — it belongs in Settings. The **boot
+      script and on-demand `sshd`** are still to come with P1-13's runbook; the
+      launcher itself is what the script will exec. Reviewed and repaired before
+      merge: a failed spawn now restarts instead of hanging silently, `stop()`
+      waits for children (TERM → grace → KILL on the process group) before the
+      data-directory lock is released, Termux is detected rather than opted into,
+      the owner-link file is `chmod`ed even when it already existed, redaction
+      assumes no particular link shape, and the lock compares process start ticks
+      so a recycled pid cannot block a reboot.
 - [ ] **P1-05** Data dir/config: `~/.pupkeep`, `config.json`, `secrets.json`,
       `push.json`, mode `0700/0600`, serialized per-file writes, log scrub,
-      logging, one-process pid lock (P0-01 deferred; P1-04 calls it). **Owns the
-      log scrub**, which should absorb P1-03's `redactDetail` so every path gets
+      logging, one-process pid lock (P0-01 deferred; P1-04 calls it). **The lock
+      and the data-directory resolution landed with P1-04** (`src/server/lock.ts`,
+      `ensureDataDir` in `config.ts`) because the launcher cannot promise "one
+      process" without them; what remains here is `config.json`, `secrets.json`,
+      `push.json` and their serialized writes. **Owns the log scrub**, which should absorb P1-03's `redactDetail` so every path gets
       one implementation, and move `statusFromMessage`/`fromCode` to
       `src/shared/` so P4-08's "retry with fallback model" reuses them instead of
       re-deriving 410/429/5xx. Also owns the serialized write of the model-probe
