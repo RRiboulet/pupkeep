@@ -107,7 +107,7 @@ Next: <task IDs>
 
 | Phase | Gate | Meaning |
 |---|---|---|
-| P0 | G0 | Runtime, access, notifications, attribution, models, backup and Termux resilience measured; decision record written — **recorded 2026-10-29**, §2.3: host side met, partner rows carried by P0-10 with *in-app only* as the documented fallback |
+| P0 | G0 | Runtime, access, notifications, attribution, models, backup and Termux resilience measured; decision record written — **recorded 2026-10-29**, PLAN §2.3 |
 | P1 | G1 | Two caregivers, one household, profile, shared thread, restart-safe |
 | P2 | G2 | One feed event under concurrency, durable walk, notification intent |
 | P3 | G3 | Growth, milestones, showers correct and agent-accessible |
@@ -164,14 +164,14 @@ Next: <task IDs>
 | `P4-03` | Appointment reminder tasks | P4-01, P1-07 | phase-4, notifications, durability |
 | `P4-04` | Daily feed planner and reminder tasks | P2-02, P4-03 | phase-4, notifications, durability |
 | `P4-05` | Notification outbox, Web Push and service worker | P4-03, P4-04, P1-05 | phase-4, notifications, security |
-| `P4-06` | Notification centre, prefs, host local and ntfy | P4-05, P1-10 | phase-4, notifications, web |
+| `P4-06` | Notification centre, prefs, host local and ntfy (partner-delivery *claim* gated on P0-10) | P4-05, P1-10 | phase-4, notifications, web |
 | `P4-07` | Approvals and one-commit confirmation | P1-06, P1-09 | phase-4, agent, security |
 | `P4-08` | Budget ledger, model picker and provider keys | P1-06, P4-05 | phase-4, models, security, web |
 | `P4-09` | Daily access and notification runbook | P4-05, P1-13 | phase-4, docs, host, access |
 | `P4-10` | Phase 4 tests | P4-03..P4-07 | phase-4, tests |
 | `P5-01` | Kill/restart matrix on the phone | G4 | phase-5, durability, host |
 | `P5-02` | Backup/restore drill | P0-07, G4 | phase-5, durability, security |
-| `P5-03` | Two-client E2E | G4 | phase-5, tests, web |
+| `P5-03` | Two-client E2E (partner leg also needs P0-10) | G4 | phase-5, tests, web |
 | `P5-04` | Termux scripts and runbook polish | P1-13, P4-09 | phase-5, docs, host |
 | `P5-05` | Daily-phone battery/heat/phantom checks | P0-06 | phase-5, host, docs |
 | `P5-06` | Security review | P5-03 | phase-5, security, tests |
