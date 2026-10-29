@@ -20,21 +20,32 @@ devcontainer and does not wait for this.
 
 ## Before the session — host side (~10 minutes)
 
-Run all of this from the devcontainer, in this repository's checkout.
+**Already on the phone from P0-03/P0-08 — reuse, don't rebuild:**
+
+| Path | What it is |
+|---|---|
+| `~/p0-03/pwa/server.mjs` | scratch PWA server, binds `127.0.0.1:8788`, serves the page, manifest, service worker and icons, plus `POST /subscribe` and `GET /status` |
+| `~/p0-03/pwa/{index.html,sw.js,manifest.webmanifest,icon-192.png,icon-512.png}` | the test PWA itself |
+| `~/.pupkeep/bin/cloudflared` | arm64 binary; only works as `SSL_CERT_FILE=/etc/tls/cert.pem termux-chroot ~/.pupkeep/bin/cloudflared …` |
+| `~/.pupkeep/ntfy-topic` | the **P0-08 spike topic** — do not reuse it; mint a fresh one |
+
+**What P0-10 needs and does not exist yet:** a scratch server bound to the
+**tailnet address** with an **SSE endpoint**. P0-03 only had a trivial `:8787`
+responder bound that way, and the PWA server above binds loopback for the tunnel.
+Smallest path: copy `server.mjs` to `~/p0-10/`, take the bind address from argv
+(`100.x.x.61`, never `0.0.0.0`), and add a `/sse` route that emits a tick every
+few seconds. Roughly 30 lines; without it, A3 and A4 cannot be checked.
 
 ```bash
 # 1. phone reachable? (expected: "OK")
 timeout 20 ssh phone 'echo OK'
 
-# 2. a scratch server bound ONLY to the tailnet address, never 0.0.0.0
-#    (P0-03's fail-closed rule; the real launcher is P1-04)
-ssh phone 'cd ~/p0-10 && node server.mjs' &   # serves the PWA test page + /sse + /status
-
-# 3. a FRESH ntfy topic — do not reuse the P0-08 spike topic
+# 2. fresh ntfy topic (192 bits) — store it 0600 on the phone
 node -e 'console.log(require("crypto").randomBytes(24).toString("base64url"))'
-#    store it on the phone at ~/.pupkeep/ntfy-topic, mode 0600
 
-# 4. an invite link / session for the scratch login, and the current tunnel URL
+# 3. scratch server on the tailnet address + the tunnel pointed at loopback
+ssh phone 'node ~/p0-10/server.mjs 100.x.x.61 8787'
+ssh phone 'SSL_CERT_FILE=/etc/tls/cert.pem termux-chroot ~/.pupkeep/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8788'
 ```
 
 Have ready, and **do not paste them into this file or into any issue**: the ntfy
