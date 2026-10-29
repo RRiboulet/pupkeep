@@ -139,7 +139,7 @@ buying one. The decision is:
 | Tailscale Serve/Funnel on Android | **Answered (P0-03): no Serve/Funnel in Android app 1.104.2; Tailscale stays HTTP** | P0-09: ntfy remains the partner daily path; quick tunnel is testing-only |
 | Termux `cloudflared` package source | **Answered (P0-03): no package; arm64 binary needs `termux-chroot` + `SSL_CERT_FILE`** | P1-04: wrapper, or run the tunnel on the VPS; do not spawn the raw binary |
 | Default model live availability | **Answered (P0-05): `mimo-v2.6-flash` passes; `deepseek-v4.1-flash` paid fallback** | P1-03/P4-08: re-probe with the app schema and startup cache |
-| ntfy acceptance | Recommended, not forced | P0-08: if rejected, in-app only or buy a domain; never silently drop notifications |
+| ntfy acceptance | **Partially answered (P0-08): host local + category-only publish pass; the partner's iPhone is P0-10** | P0-09: if the partner rejects ntfy, in-app only or buy a domain; never silently drop notifications |
 | Remote backup target | **Open: P0-07 drill used `scp`; rclone target not configured** | **P1-07** owns the job, the `rclone` remote and 14-day retention; local backup always; warning until configured |
 | App name/branding | Working title | Not blocking; `Pupkeep` until renamed |
 | Named Cloudflare Tunnel | Deferred | Only after a domain exists |
@@ -1174,6 +1174,19 @@ displayed but not pushed in v1.
   intent to the partner’s configured **ntfy** topic (generic text only), then
   marks sent/failed with retry/backoff. In-app items are immediately visible via
   SSE; push/ntfy are best-effort.
+- ntfy carries the **title and category text only**, from a shared constants
+  module; urgency rides on the ntfy `priority` (P0-08 measured `default` 3,
+  `high` 4, `max` 5) and never on extra words. `Click` points at the private
+  Tailscale URL, so the partner can act on a notification while the app stays
+  unexposed; the topic itself is a bearer secret in `~/.pupkeep` (`0600`), logged
+  only as a prefix. ntfy.sh stores the text for 12 h, so category-only is a
+  property of the payload and not of the reader.
+- **The partner’s phone is an iPhone**, where ntfy is tap-through only (no
+  `Actions` buttons), so no decision may live in a notification — approvals stay
+  in-app. Keeping topics on **ntfy.sh** is also what gives iOS a real push; a
+  self-hosted server must relay through `upstream_base_url` to keep it, and
+  without that relay delivery degrades to background polling that can outlast
+  the message cache (P0-08).
 - VAPID keys in `~/.pupkeep/push.json`; per-device subscriptions.
 - 404/410 subscriptions are removed.
 - A test-notification button is in Settings.
@@ -1184,10 +1197,16 @@ displayed but not pushed in v1.
 - HTTPS required; localhost is the host-phone exception.
 - On Tailscale (daily), the origin is HTTP: Web Push is unavailable, so daily
   notifications are in-app plus the host’s **Termux:API local notification
-  (v1)** and the partner’s **recommended ntfy** topic.
+  (v1)** and the partner’s **recommended ntfy** topic. On the partner’s iPhone
+  the daily client is a **Safari tab or bookmark**: a home-screen clip over HTTP
+  has its own cookie jar (a second login) and no service worker, so it buys
+  nothing over a bookmark.
 - On the Cloudflare quick tunnel (testing), PWA/Web Push works, but the origin
   changes on restart and subscriptions must be renewed.
-- iOS 16.4+ and Add to Home Screen; Android Chrome works.
+- Web Push needs HTTPS on every platform. iOS additionally needs Add to Home
+  Screen **and** iOS 16.4+, so for an iOS partner it is reachable only on the
+  quick tunnel and is a test path, never the daily one; Android Chrome works on
+  the HTTPS test path too, not on Tailscale HTTP.
 - Notification click opens the relevant screen.
 - The in-app centre is the source of truth; unread badge.
 - A future native push bridge for the partner (without ntfy) is an upgrade, not
@@ -1197,6 +1216,11 @@ displayed but not pushed in v1.
 
 - The host phone runs the server; if the process is dead, no push or ntfy is
   sent.
+- The host-local path is `termux-notification`: create its channel once with the
+  positional `termux-notification-channel <id> <name>`, post with an `--id` per
+  `(category, subject)` so an update replaces rather than stacks, and remember
+  that an invalid channel id is **dropped while still exiting `0`** — verify
+  with `termux-notification-list` or don't use a channel at all (P0-08).
 - Termux wake lock + boot + battery settings improve delivery, but do not
   guarantee it.
 - A VPS fallback is the reliable-notification answer if needed.
@@ -1542,9 +1566,21 @@ Pi Pocket style, simplified for two caregivers:
 - [ ] **P0-08** Daily notification path: host Termux:API local notification;
       **recommended** per-user ntfy topic for the partner; **category-only**
       payload; confirm it works while the app is served over HTTP (ntfy uses its
-      own HTTPS endpoint) and without exposing the app.
+      own HTTPS endpoint) and without exposing the app. Partial evidence:
+      `docs/spikes/P0-08-no-domain-notifications.md` — on the host phone the
+      notification, custom channel and category-only payloads pass; the publish
+      path was measured from the phone and the receipt on a **second device in
+      this devcontainer** (not a phone), with the tap target observed in the
+      payload but not tapped. The partner's own receipt is **P0-10**, and the
+      in-app mirror is P4-06, not Phase 0.
 - [ ] **P0-09** Decide Go/No-Go for the phone host, access and notification
-      split; write the decision into this plan.
+      split; write the decision into this plan. It may record a single-device
+      scope with a documented fallback while the partner path is still P0-10.
+- [ ] **P0-10** Partner iPhone acceptance: the partner's device is an **iPhone**,
+      so P0-03's partner reach/PWA/Web Push rows and P0-08's partner ntfy row are
+      re-expressed for iOS and run on that phone. Device-gated: it can run any
+      time, and Phase 0 does not wait for it. Procedure, per-check pass criteria,
+      failure routing and evidence list: `docs/partner-ios-checklist.md`.
 
 **Phase 0 exit criteria (measurable):**
 

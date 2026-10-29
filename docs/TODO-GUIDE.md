@@ -126,6 +126,7 @@ Next: <task IDs>
 | `P0-07` | Encrypted backup and restore spike | P0-01 | phase-0, spike, durability, security |
 | `P0-08` | No-domain notification path | P0-01, P0-03 | phase-0, spike, notifications, host |
 | `P0-09` | Phase 0 decision record | P0-01..P0-08 | phase-0, decision, docs |
+| `P0-10` | Partner iPhone acceptance (device-gated, `docs/partner-ios-checklist.md`) | uses assets from P0-03/P0-08; not blocked by them | phase-0, spike, access, notifications, ios |
 | `P1-01` | Scaffold the app repository | G0 / P0-09 | phase-1, repo |
 | `P1-02` | Devcontainer with Node, pi and host tooling | P1-01 | phase-1, devcontainer, host |
 | `P1-03` | Dependencies, scripts and no-build runtime | P1-01 | phase-1, runtime, web |
