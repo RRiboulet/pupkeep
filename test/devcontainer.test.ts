@@ -91,8 +91,9 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
   assert.doesNotMatch(apt[1]!, /android|openjdk|gradle|sdkmanager/i, "no Android/JDK/Gradle belongs in this image");
 
   assert.match(dockerfile, /git config --system credential\.https:\/\/github\.com\.helper/);
-  assert.match(dockerfile, /USER vscode/);
   assert.match(dockerfile, /WORKDIR \/workspace/);
+  // The base image has no vscode user; the common-utils feature creates it.
+  assert.doesNotMatch(dockerfile, /^USER vscode$/m);
 });
 
 test("postCreate seeds .env, runs the suite, checks versions and installs the shared package personally", async () => {

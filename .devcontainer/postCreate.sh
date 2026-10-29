@@ -14,7 +14,7 @@ export GH_CONFIG_DIR="${GH_CONFIG_DIR:-/home/vscode/.pi/gh}"
 
 # The pi-config volume can arrive root-owned on its first mount. Fix that before
 # pi or gh write anything. The image already creates both directories.
-sudo chown -R vscode:vscode /home/vscode/.pi
+sudo chown -R vscode:vscode /home/vscode/.pi /tmp/pupkeep-dev
 # A bind mount can arrive owned by a host UID that does not match vscode, which
 # would make `npm ci` fail on node_modules. Only pay for the recursive chown
 # when the checkout is not already writable.

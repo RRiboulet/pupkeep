@@ -65,10 +65,12 @@ RUN git config --system credential.https://github.com.helper '' \
 # postCreate runs. /tmp/pupkeep-dev is the disposable development database: it
 # must not live on the 9p workspace mount (PLAN §5.2).
 RUN mkdir -p /home/vscode/.pi/agent /home/vscode/.pi/gh /tmp/pupkeep-dev \
-    && chown -R vscode:vscode /home/vscode/.pi /tmp/pupkeep-dev \
     && chmod 700 /tmp/pupkeep-dev
 
-USER vscode
+# Do NOT switch to `vscode` here: the base image does not create that user, and
+# the common-utils feature creates it after this image is built. The devcontainer
+# and Compose set `remoteUser`/`user: vscode`; postCreate repairs ownership of
+# the pi volume and the dev database once the user exists.
 WORKDIR /workspace
 
 # PLAN §16 P1-02 asks for the base tag to be verified at build time, not trusted
