@@ -4,7 +4,8 @@
 notification and the ntfy publish/receive mechanism are measured on the host
 phone; no partner phone was used, so P0-08 is **not** checked in PLAN §16. The
 partner device is an **iPhone**, and the iOS-specific rows below are taken from
-upstream documentation, not measured here.
+upstream documentation, not measured here. The partner-device rows are carried
+by **P0-10** (`docs/partner-ios-checklist.md`).
 
 **Verdict:** `termux-notification` delivers a host-local notification, including
 a custom high-importance channel, sound and pinning, and
@@ -51,7 +52,7 @@ partner phone itself was not exercised; that row keeps P0-08 open.
 | 16 | Tap target without exposing the app | `Click:` and `Actions: view, Open Today, <url>, clear=true` arrive intact in the subscriber payload, pointing at `http://100.x.x.61:…` | **pass** |
 | 17 | Priority and tag mapping | `default` → `3`, `high` → `4`, `max` → `5`; `Tags: bell` arrives as `["bell"]` | **pass** |
 | 18 | Payload hygiene | the four messages below; no dog name, vet name, appointment title, weight or health text | **pass** |
-| 19 | **Partner phone receives** the messages | not attempted: no partner phone this session | **open — keeps P0-08 open** |
+| 19 | **Partner phone receives** the messages | not attempted: no partner phone this session. The partner's device is an iPhone, so this row is **P0-10**, run from `docs/partner-ios-checklist.md` | **open — P0-10** |
 | 20 | ntfy delivery while the phone dozes / app killed | ntfy docs describe a foreground-service connection on the F-Droid build and FCM on the Play build; not measured here | **documented, not measured** |
 
 ## Payload policy (the four categories, as published)
@@ -170,7 +171,8 @@ and one claim that would have been true on Android is false here:
 | SSE while backgrounded | iOS suspends background tabs; live updates are foreground-only and the stream reconnects on return | Apple |
 
 Consequences for the daily path, which are what P0-03's and P0-08's remaining
-rows have to be re-expressed as:
+rows have to be re-expressed as — the runnable procedure is
+`docs/partner-ios-checklist.md` (P0-10):
 
 - The partner's daily UI is a **Safari tab or bookmark**, not an installed PWA.
   A2HS on iOS over HTTP buys a separate login and nothing else.

@@ -1568,10 +1568,16 @@ Pi Pocket style, simplified for two caregivers:
       own HTTPS endpoint) and without exposing the app. Partial evidence:
       `docs/spikes/P0-08-no-domain-notifications.md` (host notification, channel,
       category-only payloads, second-device receipt and a private Tailscale tap
-      target pass on the host phone; the partner phone's own ntfy receipt is
-      still pending, and the in-app mirror is P4-06, not Phase 0).
+      target pass on the host phone; the partner's own receipt is **P0-10**, and
+      the in-app mirror is P4-06, not Phase 0).
 - [ ] **P0-09** Decide Go/No-Go for the phone host, access and notification
-      split; write the decision into this plan.
+      split; write the decision into this plan. It may record a single-device
+      scope with a documented fallback while the partner path is still P0-10.
+- [ ] **P0-10** Partner iPhone acceptance: the partner's device is an **iPhone**,
+      so P0-03's partner reach/PWA/Web Push rows and P0-08's partner ntfy row are
+      re-expressed for iOS and run on that phone. Device-gated: it can run any
+      time, and Phase 0 does not wait for it. Procedure, per-check pass criteria,
+      failure routing and evidence list: `docs/partner-ios-checklist.md`.
 
 **Phase 0 exit criteria (measurable):**
 
