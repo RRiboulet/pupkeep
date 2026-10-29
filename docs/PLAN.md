@@ -1960,8 +1960,8 @@ that the partner is reached out-of-app is gated on P0-10.
       no shower interval; the household setting is the one source.
       **Verified:** 10 new bootstrap tests (fresh boot, second boot, removal,
       repair, rename, missing conversation, member cap, schema refusal, system
-      model clearing, checkpoint policy) plus the updated app/config tests;
-      211 tests total, typecheck clean. **Not verified:** the shared thread's
+      model clearing, checkpoint policy) plus the updated app/config tests and a
+      bootstrap-startup-failure test; 212 tests total, typecheck clean. **Not verified:** the shared thread's
       model/tools and the UI that renders these documents are P1-09/P1-11; the
       first-run wizard that fills the puppy profile is P1-14.
 - [ ] **P1-09** Shared conversation: custom `app.chat` entries, submit with

@@ -204,6 +204,36 @@ test("harness.closed failure exits non-zero so the supervisor restarts it", asyn
   }
 });
 
+test("a bootstrap failure exits non-zero and releases the lock when close completes", async () => {
+  const dir = await tempDir();
+  const harness: FakeHarness = {
+    closed: new Promise<SessionEnd>(() => undefined),
+    resume: () => undefined,
+    close: async () => undefined,
+    inspect: async () => ({ scheduling: "running", tasks: [], submissions: [] }),
+    retryTask: async () => undefined,
+  };
+  try {
+    const result = await startApp(
+      { dataDir: dir, host: "127.0.0.1", port: 0 },
+      quietDeps({
+        openHarness: async () => fakeOpened(harness),
+        bootstrap: async () => {
+          throw new Error("config has no active member");
+        },
+      }),
+    );
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 5);
+      assert.match(result.message, /session bootstrap failed: config has no active member/);
+    }
+    assert.equal(await isMissing(lockPath(dir, SERVER_LOCK_FILE)), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("a close that a stuck task never finishes is capped and exits non-zero", async () => {
   const dir = await tempDir();
   const harness: FakeHarness = {
