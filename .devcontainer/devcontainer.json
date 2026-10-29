@@ -1,0 +1,43 @@
+{
+  "name": "Pupkeep",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "postCreateCommand": "bash .devcontainer/postCreate.sh",
+  "forwardPorts": [
+    8787
+  ],
+  "portsAttributes": {
+    "8787": {
+      "label": "Pupkeep (HTTP)",
+      "onAutoForward": "notify"
+    }
+  },
+  "containerEnv": {
+    "PUPKEEP_DATA_DIR": "/tmp/pupkeep-dev",
+    "PUPKEEP_PORT": "8787",
+    "PUPKEEP_ACCESS": "local"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": true,
+      "username": "vscode"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "2.103.2"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "editor.formatOnSave": false
+      }
+    }
+  },
+  "remoteUser": "vscode"
+}

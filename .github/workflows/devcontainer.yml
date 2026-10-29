@@ -1,0 +1,83 @@
+# Build the P1-02 devcontainer on a hosted runner, which is the one thing this
+# environment cannot do: there is no Docker daemon in the coding container.
+#
+# This is deliberately a narrow devcontainer build/verification job, not the
+# application CI. P1-12 owns the general test/lint workflow; this one exists so
+# a change to `.devcontainer/`, the image pins, or the package lock cannot merge
+# without a real build and a real `postCreate` run.
+name: devcontainer
+
+on:
+  pull_request:
+    paths:
+      - ".devcontainer/**"
+      - ".dockerignore"
+      - ".github/workflows/devcontainer.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "test/devcontainer.test.ts"
+  push:
+    branches: [main]
+    paths:
+      - ".devcontainer/**"
+      - ".dockerignore"
+      - ".github/workflows/devcontainer.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "test/devcontainer.test.ts"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devcontainer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # The Dev Containers CLI generates feature build files; caching that
+      # folder keeps the apt/npm/feature layers from being rebuilt every run.
+      - name: Cache devcontainer build data
+        uses: actions/cache@v4
+        with:
+          path: .devcontainer/.cache
+          key: devcontainer-${{ runner.os }}-${{ hashFiles('.devcontainer/**', 'package-lock.json') }}
+          restore-keys: |
+            devcontainer-${{ runner.os }}-
+
+      - name: Build, create and verify
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: pupkeep-devcontainer
+          userDataFolder: .devcontainer/.cache
+          push: never
+          # The action's `devcontainer up` did not run postCreateCommand on the
+          # first hosted attempt (`.env` was absent), so run the same script
+          # explicitly when the container does not already have its fingerprint.
+          # Normal Dev Containers still run it via devcontainer.json; this makes
+          # the CI proof independent of that lifecycle detail.
+          runCmd: |
+            set -eux
+            if [ ! -f .env ]; then
+              bash .devcontainer/postCreate.sh
+            fi
+            test -f .env
+            test -d node_modules
+            test -d /tmp/pupkeep-dev
+            test "$(node --version | cut -d. -f1)" = "v24"
+            test "$(pi --version)" = "1.4.0"
+            gh --version | grep '2.103.2' >/dev/null
+            cloudflared --version | grep '2026.10.5' >/dev/null
+            for tool in age expect jq openssl rclone rg sqlite3 tar tmux; do
+              command -v "$tool" >/dev/null
+            done
+            pi list 2>/dev/null | grep 'my-agent-setup' >/dev/null
+            npm test

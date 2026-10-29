@@ -1,0 +1,17 @@
+services:
+  devcontainer:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspace:cached
+      # Explicit name: without it Compose derives the volume from the project
+      # directory, so renaming or moving the repo would silently point pi at an
+      # empty volume and look like every session and login had been lost.
+      - pupkeep-pi-config:/home/vscode/.pi
+    command: sleep infinity
+    user: vscode
+
+volumes:
+  pupkeep-pi-config:
+    name: pupkeep-pi-config

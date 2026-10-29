@@ -1,0 +1,18 @@
+# The Dockerfile only needs the build context for its own instructions; the repo
+# is mounted by Compose, not copied. Keep secrets, dependencies and local data
+# out of the build context so a rebuild does not upload a phone-sized tree.
+.git
+node_modules
+data
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+backups
+*.log
+.pupkeep
+.pi/todos
+.devcontainer/.cache
