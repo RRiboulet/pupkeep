@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   isTailscaleAddress,
+  lanAddress,
   resolveAccess,
   tailscaleAddress,
   type InterfaceAddress,
@@ -74,4 +75,21 @@ test("an impossible port is refused before any bind decision", () => {
   const result = resolveAccess("local", interfaces, 0);
   assert.ok(!result.ok);
   assert.match(result.reason, /port must be an integer/);
+});
+
+test("lan resolves a real address for the printed URL, not a placeholder", () => {
+  const result = resolveAccess("lan", interfaces, 8787);
+  assert.ok(result.ok);
+  assert.equal(result.plan.displayUrl, "http://192.168.178.20:8787");
+
+  // No usable IPv4: no URL is better than a placeholder pretending to be one.
+  const empty = resolveAccess("lan", interfaces.filter((i) => i.family !== "IPv4"), 8787);
+  assert.ok(empty.ok);
+  assert.equal(empty.plan.displayUrl, undefined);
+});
+
+test("lanAddress skips loopback and link-local addresses", () => {
+  assert.equal(lanAddress(interfaces), "192.168.178.20");
+  assert.equal(lanAddress([{ name: "lo", address: "127.0.0.1", family: "IPv4", internal: true }]), undefined);
+  assert.equal(lanAddress([{ name: "wlan0", address: "169.254.3.4", family: "IPv4", internal: false }]), undefined);
 });

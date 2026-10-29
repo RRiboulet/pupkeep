@@ -19,8 +19,8 @@ class FakeChild extends EventEmitter implements ChildLike {
 
 const HOME = "/home/owner";
 
-function options(argv: string[] = ["--access", "local"]) {
-  const parsed = parseOptions(argv, {}, HOME);
+function options(argv: string[] = ["--access", "local"], isTTY = false) {
+  const parsed = parseOptions(argv, {}, HOME, isTTY);
   assert.ok(parsed.ok);
   return parsed.options;
 }
@@ -130,7 +130,7 @@ test("interactive mode prints the owner link; boot mode writes it and logs only 
       mintOwnerLink: async () => ({ link, minted: true }),
     });
     const launcher = createLauncher(
-      options(["--access", "local", "--data", dir, ...(boot ? ["--boot"] : [])]),
+      options(["--access", "local", "--data", dir, ...(boot ? ["--boot"] : [])], true),
       d,
     );
 
@@ -154,27 +154,6 @@ test("interactive mode prints the owner link; boot mode writes it and logs only 
   }
 });
 
-test("a cloudflare launch announces the tunnel URL and flags a changed origin", async () => {
-  const urls: string[] = [];
-  let child: FakeChild | undefined;
-  const launcher = createLauncher(
-    options(["--access", "cloudflare"]),
-    deps({
-      serverEntry: { command: "node", args: ["server.ts"] },
-      spawnChild: () => (child = new FakeChild()),
-      onTunnelUrl: (url: string) => urls.push(url),
-      cloudflaredBinary: "/x/cloudflared",
-    }),
-  );
-
-  const result = await launcher.start();
-  assert.equal(result.ok, true);
-  // The server child is first; the tunnel supervisor is second on the same spawn.
-  child!.emit("exit", 0, null); // the fake is the server child; nothing to assert here
-  assert.equal(result.plan?.bindHost, "127.0.0.1");
-  await launcher.stop();
-});
-
 test("nothing is announced when the auth module cannot mint a link yet", async () => {
   const d = deps({ serverEntry: { command: "node", args: ["server.ts"] } });
   const launcher = createLauncher(options(), d);
@@ -182,5 +161,98 @@ test("nothing is announced when the auth module cannot mint a link yet", async (
   assert.equal(result.ok, true);
   assert.equal(result.ownerLink, undefined);
   assert.match(d.logs.join("\n"), /P1-06/);
+  await launcher.stop();
+});
+
+test("stop() releases the lock only after the child exited", async () => {
+  const order: string[] = [];
+  class SlowChild extends EventEmitter implements ChildLike {
+    readonly pid = 7001;
+    kill(): boolean {
+      // A graceful server shutting down: the exit arrives after the signal.
+      setTimeout(() => this.emit("exit", 0, "SIGTERM"), 20);
+      return true;
+    }
+    stdout = new EventEmitter();
+    stderr = new EventEmitter();
+  }
+
+  const launcher = createLauncher(
+    options(),
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: () => new SlowChild(),
+      acquireLock: async () => ({
+        ok: true as const,
+        lock: { path: "/tmp/lock", pid: 1, release: async () => void order.push("lock-released") },
+      }),
+    }),
+  );
+
+  await launcher.start();
+  await launcher.stop();
+  assert.deepEqual(order, ["lock-released"]);
+  // The child must have exited before the lock went; assert it via state().
+  assert.equal(launcher.state().server.running, false);
+});
+
+test("the tunnel URL is announced and becomes the display URL", async () => {
+  const urls: string[] = [];
+  class StreamChild extends EventEmitter implements ChildLike {
+    readonly pid = 7002;
+    kill(): boolean {
+      setTimeout(() => this.emit("exit", 0, "SIGTERM"), 0);
+      return true;
+    }
+    stdout = new EventEmitter();
+    stderr = new EventEmitter();
+  }
+
+  const children: StreamChild[] = [];
+  const launcher = createLauncher(
+    options(["--access", "cloudflare"]),
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: () => {
+        const child = new StreamChild();
+        children.push(child);
+        return child;
+      },
+      onTunnelUrl: (url: string) => urls.push(url),
+      cloudflaredBinary: "/x/cloudflared",
+    }),
+  );
+
+  const result = await launcher.start();
+  assert.equal(result.ok, true);
+  assert.equal(result.plan?.bindHost, "127.0.0.1");
+
+  // children[0] is the server, children[1] the tunnel.
+  const tunnel = children[1]!;
+  tunnel.stdout.emit("data", "2026-10-29T10:00:00Z INF |  https://a-b-c.trycloudflare.com  |\n");
+
+  assert.deepEqual(urls, ["https://a-b-c.trycloudflare.com"]);
+  assert.deepEqual(launcher.urls(), {
+    display: "https://a-b-c.trycloudflare.com",
+    tunnel: "https://a-b-c.trycloudflare.com",
+  });
+  await launcher.stop();
+});
+
+test("the owner link is minted for the origin the owner will actually open", async () => {
+  const origins: Array<string | undefined> = [];
+  const launcher = createLauncher(
+    options(["--access", "tailscale"]),
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      mintOwnerLink: async (_dir, origin) => {
+        origins.push(origin);
+        return { link: "http://100.90.202.61:8787/login?token=t", minted: true };
+      },
+    }),
+  );
+
+  await launcher.start();
+  assert.deepEqual(origins, ["http://100.90.202.61:8787"]);
   await launcher.stop();
 });

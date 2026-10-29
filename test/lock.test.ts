@@ -68,3 +68,36 @@ test("a data directory that does not exist is an error, not a silent success", a
   assert.ok(!result.ok);
   assert.equal(result.reason, "error");
 });
+
+test("an unreadable lock is an error, not something to unlink on a guess", async () => {
+  const dir = await tempDataDir();
+  // A truncated write (power loss) or a garbled file: there is no evidence of a
+  // dead owner here, so removing it could take a live process's lock away.
+  await writeFile(lockPath(dir), "not-a-pid\n", "utf8");
+  const result = await acquireLock(dir, process.pid);
+  assert.ok(!result.ok);
+  assert.equal(result.reason, "error");
+  assert.match((result as { message: string }).message, /unreadable/);
+});
+
+test("a recycled pid with a different start time is stale, not a live holder", async () => {
+  const dir = await tempDataDir();
+  // Same pid as this process, but a start time that cannot be ours: this is what
+  // a reused pid looks like after a reboot.
+  await writeFile(lockPath(dir), `${process.pid} 1 2026-10-29T00:00:00.000Z\n`, "utf8");
+  const result = await acquireLock(dir, process.pid);
+  assert.ok(result.ok, "a recycled pid must not block the host");
+  await result.lock.release();
+});
+
+test("a lock naming this same live process is still refused by a second instance", async () => {
+  const dir = await tempDataDir();
+  const first = await acquireLock(dir, process.pid);
+  assert.ok(first.ok);
+
+  const second = await acquireLock(dir, process.pid + 1);
+  assert.ok(!second.ok);
+  assert.equal(second.reason, "held");
+
+  await first.lock.release();
+});

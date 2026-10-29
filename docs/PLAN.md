@@ -496,7 +496,9 @@ restarting the launcher; the app’s pid lock prevents a second server.
 #!/data/data/com.termux/files/usr/bin/bash
 termux-wake-lock
 cd ~/pupkeep
-exec "$PREFIX/bin/npm" start -- --access tailscale --data ~/.pupkeep >> ~/.pupkeep/server.log 2>&1
+# `--boot` is belt and braces: the launcher treats a non-TTY stdout as
+# non-interactive anyway, so a redirected boot never prints the owner token.
+exec "$PREFIX/bin/npm" start -- --access tailscale --boot --data ~/.pupkeep >> ~/.pupkeep/server.log 2>&1
 ```
 
 - Install **Termux:Boot**.
@@ -1739,7 +1741,13 @@ that the partner is reached out-of-app is gated on P0-10.
       token is auth's) and a QR needs an encoder the phone runtime should not
       carry for a terminal convenience — it belongs in Settings. The **boot
       script and on-demand `sshd`** are still to come with P1-13's runbook; the
-      launcher itself is what the script will exec.
+      launcher itself is what the script will exec. Reviewed and repaired before
+      merge: a failed spawn now restarts instead of hanging silently, `stop()`
+      waits for children (TERM → grace → KILL on the process group) before the
+      data-directory lock is released, Termux is detected rather than opted into,
+      the owner-link file is `chmod`ed even when it already existed, redaction
+      assumes no particular link shape, and the lock compares process start ticks
+      so a recycled pid cannot block a reboot.
 - [ ] **P1-05** Data dir/config: `~/.pupkeep`, `config.json`, `secrets.json`,
       `push.json`, mode `0700/0600`, serialized per-file writes, log scrub,
       logging, one-process pid lock (P0-01 deferred; P1-04 calls it). **The lock

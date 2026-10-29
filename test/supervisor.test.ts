@@ -175,3 +175,140 @@ test("a spawn that throws is treated as a failed attempt, not a crash", () => {
   assert.doesNotThrow(() => supervisor.start());
   assert.equal(attempts, 1);
 });
+
+// --- the two failures a green suite missed -----------------------------------
+
+test("a spawn error with no exit is treated as a failed attempt, not silence", async () => {
+  // Node emits `error` for ENOENT/EACCES and does NOT always follow it with
+  // `exit` (verified on Node 24). The first version of this supervisor ignored
+  // `error`, so a missing binary looked like a healthy service forever.
+  const clock = fakeClock();
+  const timers: Array<() => void> = [];
+  const errors: string[] = [];
+  const children: FakeChild[] = [];
+  let attempts = 0;
+
+  const supervisor = new Supervisor({
+    name: "tunnel",
+    spawn: () => {
+      attempts += 1;
+      const child = new FakeChild();
+      children.push(child);
+      return child;
+    },
+    now: clock.now,
+    setTimeoutFn: (fn) => {
+      timers.push(fn);
+      return timers.length - 1;
+    },
+    clearTimeoutFn: () => {},
+    onError: (error) => errors.push(error.message),
+    backoff: { initialMs: 10, factor: 2, maxMs: 10, maxRestarts: 3, stableAfterMs: 60_000 },
+  });
+
+  supervisor.start();
+  // Only `error`, never `exit` — exactly what ENOENT does.
+  children[0]!.emit("error", Object.assign(new Error("spawn cloudflared ENOENT"), { code: "ENOENT" }));
+
+  assert.equal(attempts, 1, "a failed spawn must be scheduled for a retry");
+  assert.deepEqual(errors, ["spawn cloudflared ENOENT"], "and the reason must be reported");
+  assert.equal(timers.length, 1);
+
+  timers[0]!();
+  assert.equal(attempts, 2, "the retry actually happens");
+});
+
+test("an error followed by exit restarts once, not twice", () => {
+  const clock = fakeClock();
+  const timers: Array<() => void> = [];
+  const child = new FakeChild();
+  const supervisor = new Supervisor({
+    name: "server",
+    spawn: () => child,
+    now: clock.now,
+    setTimeoutFn: (fn) => {
+      timers.push(fn);
+      return timers.length - 1;
+    },
+    clearTimeoutFn: () => {},
+    backoff: { initialMs: 10, factor: 2, maxMs: 10, maxRestarts: 5, stableAfterMs: 60_000 },
+  });
+
+  supervisor.start();
+  child.emit("error", new Error("spawn ENOENT"));
+  child.exit(1);
+
+  assert.equal(timers.length, 1, "two events, one restart");
+});
+
+test("stop() waits for the child, then escalates to SIGKILL", async () => {
+  const clock = fakeClock();
+  const signals: NodeJS.Signals[] = [];
+  const timers: Array<() => void> = [];
+
+  class StubbornChild extends FakeChild {
+    override kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+      signals.push(signal);
+      // Ignores SIGTERM entirely; only SIGKILL takes it down.
+      if (signal === "SIGKILL") queueMicrotask(() => this.emit("exit", null, "SIGKILL"));
+      return true;
+    }
+  }
+
+  const child = new StubbornChild();
+  const supervisor = new Supervisor({
+    name: "server",
+    spawn: () => child,
+    now: clock.now,
+    setTimeoutFn: (fn, ms) => {
+      timers.push(fn);
+      if (ms <= 100) setTimeout(() => fn(), 0); // let the short waits fire
+      return timers.length - 1;
+    },
+    clearTimeoutFn: () => {},
+    backoff: { initialMs: 10, factor: 2, maxMs: 10, maxRestarts: 5, stableAfterMs: 60_000, killTimeoutMs: 5 },
+  });
+
+  supervisor.start();
+  const stopping = supervisor.stop();
+  // Let the grace period expire without waiting three real seconds.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await stopping;
+
+  assert.ok(signals.includes("SIGTERM"), "TERM is tried first");
+  assert.ok(signals.includes("SIGKILL"), "then the escalation, because TERM was ignored");
+});
+
+test("stop() resolves once the child exits, so the caller can release a lock after it", async () => {
+  const child = new FakeChild();
+  const supervisor = new Supervisor({ name: "server", spawn: () => child, now: () => 0 });
+  supervisor.start();
+
+  const stopping = supervisor.stop();
+  let done = false;
+  void stopping.then(() => (done = true));
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(done, false, "stop() must not resolve while the child is alive");
+
+  child.exit(0, "SIGTERM");
+  await stopping;
+  assert.equal(done, true);
+});
+
+test("a line without a newline cannot grow the buffer forever", () => {
+  const child = new FakeChild();
+  const lines: string[] = [];
+  const supervisor = new Supervisor({
+    name: "server",
+    spawn: () => child,
+    onOutput: (line) => lines.push(line),
+    now: () => 0,
+  });
+  supervisor.start();
+
+  child.stderr.emit("data", "x".repeat(70 * 1024));
+  child.stderr.emit("data", "after\n");
+  // The oversized partial line is dropped; the next complete line still arrives.
+  assert.deepEqual(lines, ["after"]);
+});

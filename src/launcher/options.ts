@@ -17,6 +17,12 @@ export interface LauncherOptions {
   reissueOwner: boolean;
   /** `--help` was asked for; the caller prints usage and exits 0. */
   help: boolean;
+  /**
+   * May the launcher print secrets? False on a TTY-less run (the boot script
+   * redirects everything into server.log) and with `--boot`. Opting *in* to
+   * leaking the owner token is not something an owner should have to remember.
+   */
+  interactive: boolean;
 }
 
 export type ParseResult =
@@ -60,6 +66,7 @@ export function parseOptions(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
+  isTTY: boolean = Boolean(process.stdout.isTTY),
 ): ParseResult {
   const access = env.PUPKEEP_ACCESS;
   let mode: AccessMode = "local";
@@ -87,12 +94,16 @@ export function parseOptions(
     const arg = argv[index]!;
     const [, flag, inline] = /^(--[a-z-]+)(?:=(.*))?$/.exec(arg) ?? [];
     const takeValue = (): string | undefined => {
-      if (inline !== undefined) return inline;
+      // `--data=` is an empty value, not a fallback to the default: accepting it
+      // would resolve the data directory to $HOME and chmod the home directory.
+      if (inline !== undefined) return inline === "" ? undefined : inline;
       const next = argv[index + 1];
       if (next === undefined || next.startsWith("-")) return undefined;
       index += 1;
       return next;
     };
+    const rejectValue = (flagName: string): { ok: false; error: string } | undefined =>
+      inline === undefined ? undefined : { ok: false, error: `${flagName} does not take a value` };
 
     switch (flag) {
       case "--access": {
@@ -120,12 +131,18 @@ export function parseOptions(
         dataDir = value;
         break;
       }
-      case "--boot":
+      case "--boot": {
+        const bad = rejectValue("--boot");
+        if (bad) return bad;
         boot = true;
         break;
-      case "--reissue-owner":
+      }
+      case "--reissue-owner": {
+        const bad = rejectValue("--reissue-owner");
+        if (bad) return bad;
         reissueOwner = true;
         break;
+      }
       case "--help":
       case "-h":
         help = true;
@@ -148,6 +165,7 @@ export function parseOptions(
       boot,
       reissueOwner,
       help,
+      interactive: !boot && isTTY,
       dataDir: isAbsolute(expanded) ? resolve(expanded) : resolve(home, expanded),
     },
   };

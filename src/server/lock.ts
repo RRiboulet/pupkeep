@@ -16,6 +16,12 @@ export interface LockHandle {
   release(): Promise<void>;
 }
 
+interface LockOwner {
+  pid: number;
+  /** Kernel start ticks of the holder, when it can be read. */
+  startTicks?: string;
+}
+
 export type LockResult =
   | { ok: true; lock: LockHandle }
   | { ok: false; reason: "held"; path: string; pid: number; alive: true }
@@ -25,6 +31,30 @@ export const LOCK_FILE = "launcher.pid";
 
 export function lockPath(dataDir: string): string {
   return join(dataDir, LOCK_FILE);
+}
+
+/**
+ * The kernel's start time for a pid, as ticks since boot. This is what tells a
+ * recycled pid apart from the process that wrote the lock: pids are reused, and a
+ * lock naming a live-but-unrelated process would block the host for as long as
+ * that process happens to live.
+ *
+ * Linux and Android expose it as field 22 of `/proc/<pid>/stat`. Where `/proc` is
+ * absent, `undefined` means "cannot tell" and the caller stays conservative.
+ */
+async function processStartTicks(pid: number): Promise<string | undefined> {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    // The command name can contain spaces and parentheses; start counting after
+    // the last ')', where the fields are whitespace-separated.
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return undefined;
+    const fields = stat.slice(close + 2).split(" ");
+    // After the command, `state` is field 3, so field 22 is index 19 here.
+    return fields[19];
+  } catch {
+    return undefined;
+  }
 }
 
 function isAlive(pid: number): boolean {
@@ -39,14 +69,24 @@ function isAlive(pid: number): boolean {
   }
 }
 
-async function readPid(path: string): Promise<number | undefined> {
+type ReadOwner = { ok: true; owner?: LockOwner } | { ok: false; reason: string };
+
+async function readOwner(path: string): Promise<ReadOwner> {
+  let text: string;
   try {
-    const text = await readFile(path, "utf8");
-    const pid = Number(text.trim().split(/\s+/)[0]);
-    return Number.isInteger(pid) ? pid : undefined;
-  } catch {
-    return undefined;
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true };
+    return { ok: false, reason: (error as Error).message };
   }
+  const [pidText, ticks] = text.trim().split(/\s+/);
+  const pid = Number(pidText);
+  // An empty or garbled lock is *not* evidence of a dead owner. Unlinking it on
+  // a guess lets two simultaneous starters remove each other's lock.
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { ok: false, reason: `lock file is unreadable: ${path}` };
+  }
+  return { ok: true, owner: { pid, ...(ticks ? { startTicks: ticks } : {}) } };
 }
 
 /**
@@ -67,7 +107,11 @@ export async function acquireLock(
     try {
       const handle = await open(path, "wx", 0o600);
       try {
-        await handle.writeFile(`${pid} ${startedAt.toISOString()}\n`, "utf8");
+        const ticks = await processStartTicks(pid);
+        // `pid startTicks startedAt` — ticks make a recycled pid detectable, the
+        // timestamp is for a human reading the file.
+        await handle.writeFile(`${pid} ${ticks ?? "-"} ${startedAt.toISOString()}\n`, "utf8");
+        await handle.sync();
       } finally {
         await handle.close();
       }
@@ -78,12 +122,25 @@ export async function acquireLock(
         return { ok: false, reason: "error", message: (error as Error).message };
       }
 
-      const holder = await readPid(path);
-      if (holder !== undefined && holder !== pid && isAlive(holder)) {
-        return { ok: false, reason: "held", path, pid: holder, alive: true };
+      const read = await readOwner(path);
+      if (!read.ok) {
+        return { ok: false, reason: "error", message: `${read.reason} (refusing to guess)` };
       }
 
-      // Stale (or our own pid from a previous incarnation): clear and retry once.
+      const holder = read.owner;
+      if (holder && holder.pid !== pid && isAlive(holder.pid)) {
+        // Alive — but is it *our* predecessor, or a recycled pid? Compare start
+        // ticks when both sides have them.
+        const currentTicks = await processStartTicks(holder.pid);
+        const sameProcess =
+          holder.startTicks === undefined || currentTicks === undefined || holder.startTicks === currentTicks;
+        if (sameProcess) {
+          return { ok: false, reason: "held", path, pid: holder.pid, alive: true };
+        }
+      }
+
+      // Stale, our own pid from a previous incarnation, or a recycled pid: clear
+      // and retry once.
       try {
         await unlink(path);
       } catch {
@@ -98,8 +155,8 @@ export async function acquireLock(
 async function releaseLock(path: string, pid: number): Promise<void> {
   // Only remove the file if it is still ours: a restarted launcher may already
   // own it, and deleting that would let a second instance in.
-  const holder = await readPid(path);
-  if (holder !== pid) return;
+  const read = await readOwner(path);
+  if (!read.ok || read.owner?.pid !== pid) return;
   try {
     await unlink(path);
   } catch {

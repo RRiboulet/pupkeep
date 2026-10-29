@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseTunnelUrl, tunnelChanged, tunnelCommand, TERMUX_CERT_FILE } from "../src/launcher/tunnel.ts";
+import { detectTermux, parseTunnelUrl, tunnelChanged, tunnelCommand, TERMUX_CERT_FILE } from "../src/launcher/tunnel.ts";
 
 // P0-03's finding, encoded: on the phone the raw binary does not work, and the
 // launcher must never spawn it directly (PLAN §6.7).
@@ -54,4 +54,17 @@ test("a restart with a new URL is reported as a new origin, not a recovery", () 
   assert.equal(tunnelChanged(first, first), false);
   assert.equal(tunnelChanged(first, second), true);
   assert.equal(tunnelChanged(first, undefined), false);
+});
+
+test("Termux is detected without an operator-set variable", () => {
+  // The documented boot script sets nothing; relying on PUPKEEP_TERMUX meant the
+  // phone spawned the raw binary, which P0-03 proved cannot work.
+  assert.equal(detectTermux({ TERMUX_VERSION: "0.118.3" }), true);
+  assert.equal(detectTermux({ PREFIX: "/data/data/com.termux/files/usr" }), true);
+  assert.equal(detectTermux({}, (path) => path.includes("termux-chroot")), true);
+  assert.equal(detectTermux({ PREFIX: "/usr" }, () => false), false);
+
+  // The override still wins, for tests and unusual installs.
+  assert.equal(detectTermux({ PUPKEEP_TERMUX: "1", PREFIX: "/usr" }, () => false), true);
+  assert.equal(detectTermux({ PUPKEEP_TERMUX: "0", PREFIX: "/data/data/com.termux/files/usr" }), false);
 });

@@ -10,7 +10,6 @@ export const DATA_DIR_MODE = 0o700;
 
 export interface DataDir {
   path: string;
-  created: boolean;
   /** True when the mode had to be corrected; worth telling the owner once. */
   fixedMode: boolean;
 }
@@ -18,7 +17,6 @@ export interface DataDir {
 /** Create the data directory if needed and make sure it is private. */
 export async function ensureDataDir(path: string): Promise<DataDir> {
   const absolute = resolve(path);
-  let created = false;
   try {
     await mkdir(absolute, { recursive: true, mode: DATA_DIR_MODE });
   } catch (error) {
@@ -26,7 +24,6 @@ export async function ensureDataDir(path: string): Promise<DataDir> {
   }
 
   const info = await stat(absolute);
-  created = info.birthtimeMs === info.mtimeMs; // best effort; not used for decisions
   let fixedMode = false;
   if ((info.mode & 0o777) !== DATA_DIR_MODE) {
     // An existing directory may have been created by a loose umask; a data
@@ -34,7 +31,7 @@ export async function ensureDataDir(path: string): Promise<DataDir> {
     await chmod(absolute, DATA_DIR_MODE);
     fixedMode = true;
   }
-  return { path: absolute, created, fixedMode };
+  return { path: absolute, fixedMode };
 }
 
 export function ownerLinkPath(dataDir: string): string {

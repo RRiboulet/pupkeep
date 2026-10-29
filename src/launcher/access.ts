@@ -53,6 +53,16 @@ export function tailscaleAddress(interfaces: readonly InterfaceAddress[]): strin
   return undefined;
 }
 
+/** The first non-internal IPv4 address — what a same-Wi-Fi peer would open. */
+export function lanAddress(interfaces: readonly InterfaceAddress[]): string | undefined {
+  for (const iface of interfaces) {
+    if (iface.internal || iface.family !== "IPv4") continue;
+    if (iface.address.startsWith("169.254.")) continue; // link-local, not useful
+    return iface.address;
+  }
+  return undefined;
+}
+
 export function resolveAccess(
   mode: AccessMode,
   interfaces: readonly InterfaceAddress[],
@@ -75,7 +85,7 @@ export function resolveAccess(
         plan: {
           mode,
           bindHost: "0.0.0.0",
-          displayUrl: `http://<this-device-LAN-address>:${port}`,
+          ...(lanAddress(interfaces) ? { displayUrl: `http://${lanAddress(interfaces)}:${port}` } : {}),
           warning:
             "LAN mode binds every interface over plain HTTP. Anyone on the network can reach " +
             "the sign-in screen, and there is no HTTPS, so no service worker or Web Push.",

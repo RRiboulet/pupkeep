@@ -6,7 +6,7 @@
 // when a token is minted or reissued, and a boot never logs it — a boot logs the
 // path. This module is the only place that knows that rule.
 
-import { writeFile } from "node:fs/promises";
+import { chmod, writeFile } from "node:fs/promises";
 import { OWNER_LINK_MODE } from "../server/config.ts";
 
 export interface AnnounceOptions {
@@ -28,9 +28,23 @@ export interface AnnounceResult {
   printed: boolean;
 }
 
-/** `https://…/login?token=abc` → `https://…/login?token=…` */
+/**
+ * Redact a sign-in link for a log line. P1-06 has not fixed the link shape yet,
+ * so this assumes nothing: any query value, any fragment, and any long opaque
+ * path segment is removed. A wrong guess here prints the trust root into the
+ * boot log, which is the one place it must never appear.
+ */
 export function redactLink(link: string): string {
-  return link.replace(/([?&](?:token|key|code|invite)=)[^\s&#]+/gi, "$1[redacted]");
+  let value = link;
+  // Fragment first: a token can live after `#`.
+  const hash = value.indexOf("#");
+  if (hash >= 0) value = `${value.slice(0, hash)}#[redacted]`;
+  // Every query value, whatever it is called.
+  const query = value.indexOf("?");
+  if (query >= 0) value = `${value.slice(0, query)}?[redacted]`;
+  // A token as a path segment: /login/<opaque>.
+  value = value.replace(/\/([A-Za-z0-9_-]{16,})(?=\/|$)/g, "/[redacted]");
+  return value;
 }
 
 export async function announceOwnerLink(options: AnnounceOptions): Promise<AnnounceResult> {
@@ -42,6 +56,9 @@ export async function announceOwnerLink(options: AnnounceOptions): Promise<Annou
     // Newline-terminated on purpose: `cat` and copy-paste both behave, and the
     // 0600 mode means only this account can read it back.
     await writeFile(options.path, `${options.link}\n`, { mode: OWNER_LINK_MODE, encoding: "utf8" });
+    // `mode` only applies when the file is created. A reissue over an older
+    // 0644 file would otherwise keep the loose mode while the log claims 0600.
+    await chmod(options.path, OWNER_LINK_MODE);
     written = true;
   }
 

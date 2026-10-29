@@ -14,6 +14,8 @@ test("defaults: local access, port 8787, ~/.pupkeep", () => {
     boot: false,
     reissueOwner: false,
     help: false,
+    // No TTY in a test runner: never print a token by default.
+    interactive: false,
   });
 });
 
@@ -96,4 +98,33 @@ test("--help does not require a mode", () => {
   const short = parseOptions(["-h"], {}, HOME);
   assert.ok(short.ok);
   assert.equal(short.options.help, true);
+});
+
+test("interactive is a TTY fact, not an operator's memory", () => {
+  // A boot script redirects stdout into server.log and is not a TTY, so the
+  // token must not be printed even without --boot.
+  const redirected = parseOptions([], {}, HOME, false);
+  assert.ok(redirected.ok);
+  assert.equal(redirected.options.interactive, false);
+  const tty = parseOptions([], {}, HOME, true);
+  assert.ok(tty.ok);
+  assert.equal(tty.options.interactive, true);
+
+  const forcedBoot = parseOptions(["--boot"], {}, HOME, true);
+  assert.ok(forcedBoot.ok);
+  assert.equal(forcedBoot.options.interactive, false);
+});
+
+test("an empty or attached value on the wrong kind of flag is refused", () => {
+  // `--data=` used to resolve the data directory to $HOME and chmod it.
+  for (const [argv, expected] of [
+    [["--data="], /--data needs a directory/],
+    [["--access="], /--access needs a mode/],
+    [["--boot=yes"], /--boot does not take a value/],
+    [["--reissue-owner=1"], /--reissue-owner does not take a value/],
+  ] as Array<[string[], RegExp]>) {
+    const parsed = parseOptions(argv, {}, HOME);
+    assert.ok(!parsed.ok, JSON.stringify(argv));
+    assert.match(parsed.error, expected);
+  }
 });

@@ -9,6 +9,8 @@
 //
 // so the launcher supervises that wrapper, never a bare spawn (PLAN §6.7).
 
+import { existsSync } from "node:fs";
+
 export interface TunnelCommand {
   command: string;
   args: string[];
@@ -26,6 +28,35 @@ export interface TunnelOptions {
 }
 
 export const TERMUX_CERT_FILE = "/etc/tls/cert.pem";
+
+/**
+ * Are we on Termux? The launcher must not depend on an operator remembering an
+ * environment variable: the documented boot script does not set one, and the
+ * wrapper is the only reason `cloudflare` mode works on the phone at all.
+ *
+ * Termux exports `PREFIX=/data/data/com.termux/files/usr` and `TERMUX_VERSION`.
+ * `PUPKEEP_TERMUX` stays as an explicit override for tests and odd setups.
+ */
+export function detectTermux(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = defaultExists,
+): boolean {
+  const override = env.PUPKEEP_TERMUX;
+  if (override === "1" || override === "true") return true;
+  if (override === "0" || override === "false") return false;
+  if (env.TERMUX_VERSION !== undefined && env.TERMUX_VERSION !== "") return true;
+  if (env.PREFIX?.startsWith("/data/data/com.termux/")) return true;
+  // Last resort: the Termux filesystem layout, without reading the env at all.
+  return exists("/data/data/com.termux/files/usr/bin/termux-chroot");
+}
+
+function defaultExists(path: string): boolean {
+  try {
+    return existsSync(path);
+  } catch {
+    return false;
+  }
+}
 
 export function tunnelCommand(options: TunnelOptions): TunnelCommand {
   const tunnelArgs = ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${options.port}`];
