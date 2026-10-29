@@ -1,0 +1,5 @@
+{
+  "packages": [
+    "git:github.com/RRiboulet/my-agent-setup@v1.9.0"
+  ]
+}
