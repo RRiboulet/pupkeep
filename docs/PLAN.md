@@ -1429,7 +1429,10 @@ displayed but not pushed in v1.
 - Desktop: sidebar + wider layout.
 - PWA manifest + home-screen icons on the host/localhost and the HTTPS test
   origin; the partner’s daily Tailscale origin is a browser app.
-- No build step; Preact + htm ES modules; import map; vendor files.
+- No build step; Preact + htm ES modules via relative imports to the vendored
+  files; no inline import map (an inline import map is subject to CSP `script-src`,
+  so keeping `default-src 'self'` without `unsafe-inline` means shell modules
+  import `web/vendor/` directly).
 - SSE with long-poll fallback.
 - Accessible labels, focus, reduced motion.
 - No offline writes; show reconnect banner.
@@ -1989,8 +1992,49 @@ that the partner is reached out-of-app is gated on P0-10.
       "continue"`, `watchEvents` → SSE, full snapshot on attach/reconnect.
       Labels for entries and tool writes resolve through `app.household`; never
       use `session.displayName` (it is the auth seed and may drift).
-- [ ] **P1-10** PWA shell: manifest, service worker registration, nav, Today
+- [x] **P1-10** PWA shell: manifest, service worker registration, nav, Today
       placeholder, connection status, CSP/security headers, static-only cache.
+      **Landed:** `web/index.html` (no inline script/style/handler, so the CSP
+      is plain `default-src 'self'`), `web/app.js` (bottom navigation
+      Today/Calendar/Pup/Agent/Settings with hash routing over Preact+htm from
+      `web/vendor/`, a `role="status"` online/offline banner, focus-visible and
+      reduced-motion styles in `web/style.css`), `web/manifest.webmanifest`
+      (relative `start_url`/`scope`, real 192/512 PNG icons, `any` +
+      `maskable`), `web/sw.js` (versioned `pupkeep-static-*` shell-only cache:
+      precaches the shell, skips non-GET, skips `self.location.origin` cross
+      origin, skips `/api/*` and `/sse`, stores only same-origin 200s, deletes
+      previous caches on activate, does no offline writes and no push yet),
+      and placeholder views under `web/views/`. Registration happens only
+      when `window.isSecureContext` — the host's `http://127.0.0.1` origin —
+      so the partner's Tailscale HTTP origin runs as an ordinary browser app
+      with no install/service-worker/push claim.
+      `src/server/static.ts` is the P1-10 half of the HTTP seam, self-contained
+      and composed around a Node `http` server: `serveStaticRequest` answers
+      GET/HEAD from `web/` only (query strings stripped, percent-decoding
+      validated per segment, `..`/backslash/NUL escaping and dotfiles refused,
+      the resolved file pinned by realpath inside the root's own realpath),
+      explicit MIME types because nosniff makes shorthand types load-bearing,
+      `no-cache` for the document/worker/manifest and `max-age=3600` only for
+      `web/vendor/` and icons; it returns "not mine" for everything else
+      (any non-GET method, `/api/*`, `/sse`, unknown paths), so the live layer
+      routes them. `applySecurityHeaders(res)` (CSP/nosniff/Referrer-Policy,
+      idempotent under setHeader) and `API_CACHE_CONTROL` ("no-store") are
+      exported for P1-09 to apply to every response. The final wiring into
+      P1-09's HTTP layer is the small follow-up this task carves out.
+      Decision change: §13.2's import map is dropped in favour of direct
+      relative imports (reasons above). The app icons are placeholder paw
+      graphics generated algorithmically (composer kept out of git; the PNGs
+      are checked in).
+      **Verified:** 16 new tests in `test/pwa.test.ts` against a real
+      `node:http` server (shell serving/headers, correct types + cache rules,
+      HEAD, query strings, raw-socket traversal/escape targets — are never
+      served and never served from cache, API/SSE/POST not claimed, PNG icon
+      dims match the manifest, precache list is static-only and its files
+      exist, secure-context guard precedes registration, no push code in the
+      shell); 233 tests total, typecheck clean. **Not verified:** real browser
+      install on localhost and the partner's Tailscale load are device checks
+      for P0-03's carrier/P0-10; the actual P1-09 composition can only be
+      proven once the HTTP layer lands.
 - [ ] **P1-11** Puppy profile: domain service, HTTP routes, agent tools
       (`get_context`, `update_puppy_profile`), UI.
 - [ ] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake

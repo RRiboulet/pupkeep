@@ -1,0 +1,48 @@
+// The client state store: a tiny observable for the shell, deliberately no
+// framework and no build step. P1-09 replaces the slice of state that comes
+// from the server (shared thread, SSE) but keeps this shape, and the plan's
+// "online-only, no offline writes" rule lives here too: there is no
+// persistence layer to replay anything from, and the connection flag is the
+// only piece of local state the UI trusts.
+
+export const ROUTES = [
+  { id: "today", label: "Today", view: "Today" },
+  { id: "calendar", label: "Calendar", view: "Calendar" },
+  { id: "pup", label: "Pup", view: "Pup profile" },
+  { id: "agent", label: "Agent", view: "Shared thread" },
+  { id: "settings", label: "Settings", view: "Settings" },
+];
+
+const ROUTE_IDS = new Set(ROUTES.map((route) => route.id));
+
+export function hashRoute(hash) {
+  const raw = String(hash ?? location.hash).replace(/^#\/?/, "");
+  return ROUTE_IDS.has(raw) ? raw : "today";
+}
+
+const state = {
+  route: hashRoute(),
+  online: navigator.onLine,
+};
+
+const listeners = new Set();
+
+export function getState() {
+  return state;
+}
+
+export function setState(patch) {
+  let changed = false;
+  for (const [key, value] of Object.entries(patch)) {
+    if (!(key in state) || state[key] === value) continue;
+    state[key] = value;
+    changed = true;
+  }
+  if (changed) for (const listener of listeners) listener(state);
+  return state;
+}
+
+export function subscribe(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
