@@ -1775,7 +1775,17 @@ that the partner is reached out-of-app is gated on P0-10.
       and an origin allow-list helper. **Removal now also purges push
       subscriptions, prefs and the ntfy topic** — the P1-05 carry-over. The
       launcher mints on first run and rotates on `--reissue-owner`, writing the
-      link 0600 in boot mode and printing it only on a TTY.
+      link 0600 in boot mode and printing it only on a TTY. **Repaired after
+      review:** removal now purges `push.json` *before* the auth row, so a crash
+      between the two leaves an authenticated member without notifications
+      (recoverable) rather than a removed one still being notified; `/login`
+      exchanges any credential for a **session row**, so owner rotation and
+      sign-out are real rather than vacuous; the origin is a per-call argument
+      (minting before the tunnel exists refuses to print rather than writing a
+      loopback link); a mint whose link cannot be stored is fatal; invite names
+      are checked for collisions at invite time; every refusal carries an HTTP
+      status; the matrix gained a `self`/`household` scope plus `models`/`budget`;
+      `pruneInvites` runs on boot; and the rate limiter bounds its key space.
       **Carried from P1-05:** removing a member must also purge their push
       subscriptions and ntfy topic from `push.json` — reconciliation touches only
       profiles, so a removed caregiver would otherwise keep receiving

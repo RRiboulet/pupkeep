@@ -41,30 +41,77 @@ export type Action =
   | "remove-member"
   | "rotate-owner"
   | "providers"
+  | "models"
+  | "budget"
   | "backup";
 
-/** PLAN §14.1's matrix, as data rather than scattered `if (role === …)`. */
-const MATRIX: Record<Action, readonly MemberRole[]> = {
-  care: ["owner", "member"],
-  agent: ["owner", "member"],
-  approvals: ["owner", "member"],
-  "notification-prefs": ["owner", "member"],
-  invite: ["owner"],
-  "remove-member": ["owner"],
-  "rotate-owner": ["owner"],
-  providers: ["owner"],
-  backup: ["owner"],
+/**
+ * Which roles may perform an action, and whether it reaches the whole household or
+ * only the caller's own row. Without the scope axis, a `PATCH /prefs/:memberId`
+ * route that only checked `can()` would let a member edit the owner's prefs.
+ */
+interface Rule {
+  roles: readonly MemberRole[];
+  scope: "household" | "self";
+}
+
+const MATRIX: Record<Action, Rule> = {
+  care: { roles: ["owner", "member"], scope: "household" },
+  agent: { roles: ["owner", "member"], scope: "household" },
+  approvals: { roles: ["owner", "member"], scope: "household" },
+  "notification-prefs": { roles: ["owner", "member"], scope: "self" },
+  invite: { roles: ["owner"], scope: "household" },
+  "remove-member": { roles: ["owner"], scope: "household" },
+  "rotate-owner": { roles: ["owner"], scope: "household" },
+  providers: { roles: ["owner"], scope: "household" },
+  models: { roles: ["owner"], scope: "household" },
+  budget: { roles: ["owner"], scope: "household" },
+  backup: { roles: ["owner"], scope: "household" },
 };
 
 export function can(role: MemberRole | undefined, action: Action): boolean {
-  return role !== undefined && MATRIX[action].includes(role);
+  return role !== undefined && MATRIX[action].roles.includes(role);
 }
 
-export class ForbiddenError extends Error {
-  readonly status = 403;
+/**
+ * The one check a route calls. Returns the session, or throws `ForbiddenError`.
+ * A `self`-scoped action also refuses a target that is not the caller, so the
+ * scope rule cannot be skipped by passing the matrix.
+ */
+export function requireAction(session: Session | undefined, action: Action, targetMemberId?: string): Session {
+  if (!session || !can(session.role, action)) throw new ForbiddenError(session?.role, action);
+  const rule = MATRIX[action];
+  if (rule.scope === "self" && targetMemberId !== undefined && targetMemberId !== session.memberId) {
+    throw new ForbiddenError(session.role, action);
+  }
+  return session;
+}
+
+/** Every refusal in this module carries a status, so P1-09 needs one mapper. */
+export class Refusal extends Error {
+  readonly status: number;
+  constructor(message: string, status: number, name: string) {
+    super(message);
+    this.name = name;
+    this.status = status;
+  }
+}
+
+export class ForbiddenError extends Refusal {
   constructor(role: MemberRole | undefined, action: Action) {
-    super(`role ${role ?? "anonymous"} may not ${action}`);
-    this.name = "ForbiddenError";
+    super(`role ${role ?? "anonymous"} may not ${action}`, 403, "ForbiddenError");
+  }
+}
+
+export class ConflictError extends Refusal {
+  constructor(message: string) {
+    super(message, 409, "ConflictError");
+  }
+}
+
+export class NotFoundError extends Refusal {
+  constructor(message: string) {
+    super(message, 404, "NotFoundError");
   }
 }
 
@@ -97,8 +144,6 @@ export interface AuthOptions {
   /** Optional: removed members lose their notifications too. */
   push?: JsonFileStore<PushConfig>;
   now?: () => Date;
-  /** Origin used to build the sign-in link; the cookie is origin-scoped by the browser. */
-  origin?: string;
 }
 
 export interface Session {
@@ -107,11 +152,9 @@ export interface Session {
   displayName: string;
 }
 
-export class AuthError extends Error {
-  readonly status = 401;
+export class AuthError extends Refusal {
   constructor(message: string) {
-    super(message);
-    this.name = "AuthError";
+    super(message, 401, "AuthError");
   }
 }
 
@@ -128,8 +171,13 @@ export class Auth {
     return this.#options.config;
   }
 
-  /** Build a sign-in link for a token. The token never appears in a log. */
-  link(token: string, origin = this.#options.origin ?? "http://127.0.0.1:8787"): string {
+  /**
+   * Build a sign-in link for a token. The origin is a *parameter*, not constructor
+   * state: it is derived from the live access mode (and changes when the quick
+   * tunnel restarts), so a snapshot taken at construction would be wrong.
+   */
+  link(token: string, origin: string): string {
+    if (!/^https?:\/\/[^/]+/.test(origin)) throw new Error(`not an origin: ${origin}`);
     return `${origin.replace(/\/$/, "")}/login?token=${token}`;
   }
 
@@ -137,7 +185,7 @@ export class Auth {
    * Mint the owner token if there is none, or rotate it. Rotating signs out every
    * owner session and invalidates unused invites; member sessions survive.
    */
-  async mintOwner(): Promise<{ token: string; link: string; rotated: boolean }> {
+  async mintOwner(origin: string): Promise<{ token: string; link: string; rotated: boolean }> {
     const token = newToken();
     let rotated = false;
     await this.#config.update((current) => {
@@ -165,7 +213,40 @@ export class Auth {
         invites: rotated ? [] : current.invites,
       };
     });
-    return { token, link: this.link(token), rotated };
+    return { token, link: this.link(token, origin), rotated };
+  }
+
+  /**
+   * Exchange a credential for a **session row** and return its token.
+   *
+   * The owner link is not itself a cookie: `/login?token=` calls this, and the
+   * cookie carries the session token. Without this step, "rotation signs out owner
+   * devices" and `revokeSession` would both be vacuous for the owner — the token
+   * would still work after being revoked.
+   */
+  async login(token: string, ttlMs = SESSION_TTL_MS): Promise<{ token: string; session: Session }> {
+    const session = await this.authenticate(token);
+    const sessionToken = newToken();
+    const sessionTokenHash = hashToken(sessionToken);
+    const now = this.#now();
+    const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+
+    await this.#config.update((current) => ({
+      ...current,
+      members: current.members.map((member) =>
+        member.id === session.memberId
+          ? {
+              ...member,
+              sessions: [
+                ...member.sessions,
+                { tokenHash: sessionTokenHash, createdAt: now.toISOString(), expiresAt },
+              ],
+            }
+          : member,
+      ),
+    }));
+
+    return { token: sessionToken, session };
   }
 
   /** Verify an owner token (the sign-in link) or a session token. */
@@ -181,6 +262,7 @@ export class Auth {
     for (const member of config.members) {
       if (member.removedAt !== undefined) continue;
       for (const session of member.sessions) {
+        if (session.expiresAt !== undefined && Date.parse(session.expiresAt) <= this.#now().getTime()) continue;
         if (hashEquals(hash, session.tokenHash)) {
           return { memberId: member.id, role: member.role, displayName: member.displayName };
         }
@@ -194,14 +276,23 @@ export class Auth {
     if (!can(actor.role, "invite")) throw new ForbiddenError(actor.role, "invite");
     const code = newInviteCode();
     const now = this.#now();
+    const wanted = displayName.trim();
+    if (wanted === "") throw new ConflictError("a member needs a display name");
+
     await this.#config.update((current) => {
       if (activeMembers(current).length >= MAX_MEMBERS) {
-        throw new Error(`household is full (max ${MAX_MEMBERS})`);
+        throw new ConflictError(`household is full (max ${MAX_MEMBERS})`);
       }
+      // Catch the collision here, where the owner can act on it, rather than at
+      // redemption on the partner's device as an untyped 500.
+      const taken = activeMembers(current).some(
+        (member) => member.displayName.trim().toLowerCase() === wanted.toLowerCase(),
+      );
+      if (taken) throw new ConflictError(`someone in the household is already called ${wanted}`);
       const invite: InviteRecord = {
         codeHash: hashToken(code),
         role: "member",
-        displayName: displayName.trim(),
+        displayName: wanted,
         createdAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
       };
@@ -225,14 +316,20 @@ export class Auth {
       const index = current.invites.findIndex((invite) => hashEquals(hash, invite.codeHash));
       const invite = current.invites[index];
       if (!invite || Date.parse(invite.expiresAt) <= now.getTime()) throw new AuthError("invite is not valid");
-      if (activeMembers(current).length >= MAX_MEMBERS) throw new AuthError("household is full");
+      if (activeMembers(current).length >= MAX_MEMBERS) throw new ConflictError("household is full");
 
       const member: MemberRecord = {
         id: `m-${randomBytes(8).toString("hex")}`,
         role: invite.role,
         displayName: invite.displayName,
         createdAt: now.toISOString(),
-        sessions: [{ tokenHash: sessionTokenHash, createdAt: now.toISOString() }],
+        sessions: [
+          {
+            tokenHash: sessionTokenHash,
+            createdAt: now.toISOString(),
+            expiresAt: new Date(now.getTime() + sessionTtlMs).toISOString(),
+          },
+        ],
       };
       return {
         ...current,
@@ -242,7 +339,6 @@ export class Auth {
     });
 
     const member = config.members.at(-1)!;
-    void sessionTtlMs; // expiry is enforced by the cookie; the hash has no clock
     return {
       token,
       session: { memberId: member.id, role: member.role, displayName: member.displayName },
@@ -252,22 +348,12 @@ export class Auth {
   /** Owner-only: remove a member and everything that belonged to them. */
   async removeMember(actor: Session, memberId: string): Promise<void> {
     if (!can(actor.role, "remove-member")) throw new ForbiddenError(actor.role, "remove-member");
-    if (memberId === actor.memberId) throw new Error("an owner cannot remove themselves");
+    if (memberId === actor.memberId) throw new ConflictError("an owner cannot remove themselves");
 
-    const now = this.#now().toISOString();
-    await this.#config.update((current) => {
-      const target = current.members.find((member) => member.id === memberId);
-      if (!target || target.role === "owner") throw new Error("no such member");
-      return {
-        ...current,
-        members: current.members.map((member) =>
-          member.id === memberId ? { ...member, removedAt: now, sessions: [], inviteHash: undefined } : member,
-        ),
-      };
-    });
-
-    // The carry-over from P1-05: auth removal alone would leave a removed
-    // caregiver receiving `fed` and `feed_overdue` notifications.
+    // Order matters. Push is purged FIRST: a crash between the two then leaves an
+    // authenticated member with no notifications — recoverable — instead of a
+    // removed member still receiving `fed` and `feed_overdue`, which is the exact
+    // carry-over this task exists to close and cannot be repaired afterwards.
     const push = this.#options.push;
     if (push) {
       await push.update((current) => {
@@ -283,6 +369,20 @@ export class Auth {
         };
       });
     }
+
+    const now = this.#now().toISOString();
+    await this.#config.update((current) => {
+      const target = current.members.find((member) => member.id === memberId);
+      if (!target) throw new NotFoundError("no such member");
+      if (target.role === "owner") throw new ForbiddenError(actor.role, "remove-member");
+      return {
+        ...current,
+        members: current.members.map((member) =>
+          member.id === memberId ? { ...member, removedAt: now, sessions: [], inviteHash: undefined } : member,
+        ),
+      };
+    });
+    await this.pruneInvites();
   }
 
   /** Sign out one session (the current device). */
@@ -357,21 +457,35 @@ export class RateLimiter {
   readonly #limit: number;
   readonly #windowMs: number;
   readonly #now: () => number;
+  readonly #maxKeys: number;
   readonly #hits = new Map<string, number[]>();
 
-  constructor(limit = 10, windowMs = 60_000, now: () => number = Date.now) {
+  constructor(limit = 10, windowMs = 60_000, now: () => number = Date.now, maxKeys = 10_000) {
     this.#limit = limit;
     this.#windowMs = windowMs;
     this.#now = now;
+    this.#maxKeys = maxKeys;
   }
 
   /** Record an attempt; false means the caller should answer 429. */
   hit(key: string): boolean {
     const now = this.#now();
+    // Behind an internet-facing tunnel the key comes from the client, so the key
+    // space is attacker-chosen: evict stale entries rather than grow forever.
+    if (this.#hits.size >= this.#maxKeys) this.#sweep(now);
     const recent = (this.#hits.get(key) ?? []).filter((at) => now - at < this.#windowMs);
     recent.push(now);
     this.#hits.set(key, recent);
     return recent.length <= this.#limit;
+  }
+
+  #sweep(now: number): void {
+    for (const [key, times] of this.#hits) {
+      if (times.every((at) => now - at >= this.#windowMs)) this.#hits.delete(key);
+    }
+    // Still full: drop everything. Losing counters is better than unbounded memory;
+    // an attacker gains at most one window of extra attempts.
+    if (this.#hits.size >= this.#maxKeys) this.#hits.clear();
   }
 
   /** Clear on success, so one bad guess does not count against a good login. */

@@ -55,7 +55,7 @@ test("the matrix is data: members can care, only owners can invite or rotate", (
 
 test("an owner token is 256 bits and only its hash is stored", async () => {
   const { auth, stores } = await setup();
-  const { token, rotated } = await auth.mintOwner();
+  const { token, rotated } = await auth.mintOwner("http://127.0.0.1:8787");
 
   assert.equal(rotated, false);
   assert.match(token, /^[A-Za-z0-9_-]{43}$/, "32 bytes base64url");
@@ -66,14 +66,14 @@ test("an owner token is 256 bits and only its hash is stored", async () => {
 
 test("the owner signs in with the token and gets seed-free identity", async () => {
   const { auth } = await setup();
-  const { token } = await auth.mintOwner();
+  const { token } = await auth.mintOwner("http://127.0.0.1:8787");
   const session = await auth.authenticate(token);
   assert.equal(session.role, "owner");
 });
 
 test("a wrong or truncated token is rejected, not guessed", async () => {
   const { auth } = await setup();
-  const { token } = await auth.mintOwner();
+  const { token } = await auth.mintOwner("http://127.0.0.1:8787");
   await assert.rejects(auth.authenticate(`${token}x`), AuthError);
   await assert.rejects(auth.authenticate(""), AuthError);
   assert.equal(hashEquals("abc", "abc"), true);
@@ -83,7 +83,7 @@ test("a wrong or truncated token is rejected, not guessed", async () => {
 
 test("an invite is one-time, expiring, and creates the member", async () => {
   const { auth, tick } = await setup();
-  const { token } = await auth.mintOwner();
+  const { token } = await auth.mintOwner("http://127.0.0.1:8787");
   const owner = await auth.authenticate(token);
 
   const code = await auth.createInvite(owner, "Partner");
@@ -105,7 +105,7 @@ test("an invite is one-time, expiring, and creates the member", async () => {
 
 test("the household is capped at two people", async () => {
   const { auth } = await setup();
-  const owner = await auth.authenticate((await auth.mintOwner()).token);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
   const code = await auth.createInvite(owner, "Partner");
   await auth.acceptInvite(code);
 
@@ -115,13 +115,13 @@ test("the household is capped at two people", async () => {
 
 test("reissuing the owner token signs out owner sessions and kills unused invites, but not members", async () => {
   const { auth } = await setup();
-  const first = await auth.mintOwner();
+  const first = await auth.mintOwner("http://127.0.0.1:8787");
   const owner = await auth.authenticate(first.token);
   // Mint the spare invite while the household still has a slot; the household is
   // full once the partner accepts.
   const unused = await auth.createInvite(owner, "Spare");
   const memberToken = (await auth.acceptInvite(await auth.createInvite(owner, "Partner"))).token;
-  const { token: rotatedToken, rotated } = await auth.mintOwner();
+  const { token: rotatedToken, rotated } = await auth.mintOwner("http://127.0.0.1:8787");
 
   assert.equal(rotated, true);
   await assert.rejects(auth.acceptInvite(unused), AuthError, "an owner rotation invalidates their invites");
@@ -133,7 +133,7 @@ test("reissuing the owner token signs out owner sessions and kills unused invite
 
 test("removing a member kills their sessions, their notifications, and cannot be undone by a profile", async () => {
   const { auth, stores, tick } = await setup(true);
-  const owner = await auth.authenticate((await auth.mintOwner()).token);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
   const accepted = await auth.acceptInvite(await auth.createInvite(owner, "Partner"));
   const memberId = accepted.session.memberId;
 
@@ -170,7 +170,7 @@ test("removing a member kills their sessions, their notifications, and cannot be
 
 test("a member cannot remove anyone, and an owner cannot remove themselves", async () => {
   const { auth } = await setup();
-  const owner = await auth.authenticate((await auth.mintOwner()).token);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
   const member = (await auth.acceptInvite(await auth.createInvite(owner, "Partner"))).session;
 
   await assert.rejects(auth.removeMember(member, owner.memberId), ForbiddenError);
@@ -179,7 +179,7 @@ test("a member cannot remove anyone, and an owner cannot remove themselves", asy
 
 test("signing out one device leaves the other sessions alone", async () => {
   const { auth } = await setup();
-  const owner = await auth.authenticate((await auth.mintOwner()).token);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
   const first = await auth.acceptInvite(await auth.createInvite(owner, "Partner"));
 
   await auth.revokeSession(first.token);
@@ -188,7 +188,7 @@ test("signing out one device leaves the other sessions alone", async () => {
 
 test("expired invites are pruned and the count is reported", async () => {
   const { auth, tick } = await setup();
-  const owner = await auth.authenticate((await auth.mintOwner()).token);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
   await auth.createInvite(owner, "A");
   await auth.createInvite(owner, "B");
   assert.equal(await auth.pruneInvites(), 0);
@@ -236,7 +236,7 @@ test("login attempts are rate limited, and a success clears the count", () => {
 
 test("the push store is optional: removal still works without it", async () => {
   const { auth } = await setup();
-  const owner = await auth.authenticate((await auth.mintOwner()).token);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
   const member = await auth.acceptInvite(await auth.createInvite(owner, "Partner"));
   assert.deepEqual(emptyPush().ntfy, {});
   await auth.removeMember(owner, member.session.memberId);
@@ -244,8 +244,75 @@ test("the push store is optional: removal still works without it", async () => {
 
 test("an invite that expires before it is used cannot be accepted", async () => {
   const { auth, tick } = await setup();
-  const owner = await auth.authenticate((await auth.mintOwner()).token);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
   const code = await auth.createInvite(owner, "Late", 60_000);
   tick.advance(60_001);
   await assert.rejects(auth.acceptInvite(code), AuthError);
+});
+
+test("the owner's cookie is a session row, so rotation and sign-out really work", async () => {
+  // Before login() existed, the owner token *was* the credential: revoking it did
+  // nothing and "rotation signs out owner devices" had no code path.
+  const { auth } = await setup();
+  const ownerToken = (await auth.mintOwner("http://127.0.0.1:8787")).token;
+  const signedIn = await auth.login(ownerToken);
+
+  assert.equal((await auth.authenticate(signedIn.token)).role, "owner");
+  await auth.revokeSession(signedIn.token);
+  await assert.rejects(auth.authenticate(signedIn.token), AuthError, "sign-out works for the owner");
+  // The token itself still works — it is the trust root, not a cookie.
+  assert.equal((await auth.authenticate(ownerToken)).role, "owner");
+});
+
+test("rotation kills an owner session but not the partner's", async () => {
+  const { auth } = await setup();
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
+  const ownerCookie = await auth.login((await auth.mintOwner("http://127.0.0.1:8787")).token);
+  const memberToken = (await auth.acceptInvite(await auth.createInvite(owner, "Partner"))).token;
+
+  await auth.mintOwner("http://127.0.0.1:8787");
+
+  await assert.rejects(auth.authenticate(ownerCookie.token), AuthError, "owner-linked device signed out");
+  assert.equal((await auth.authenticate(memberToken)).role, "member", "the partner keeps working");
+});
+
+test("two accepts of one invite cannot both succeed", async () => {
+  const { auth } = await setup();
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
+  const code = await auth.createInvite(owner, "Partner");
+
+  const results = await Promise.allSettled([auth.acceptInvite(code), auth.acceptInvite(code)]);
+  const ok = results.filter((result) => result.status === "fulfilled");
+  const failed = results.filter((result) => result.status === "rejected");
+  assert.equal(ok.length, 1, "exactly one accept wins");
+  assert.equal(failed.length, 1);
+});
+
+test("a name collision is refused at invite time, typed, not on the partner's device", async () => {
+  const { auth } = await setup();
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
+  // The owner row is literally named "Owner" (P1-05's parser forbids duplicates).
+  await assert.rejects(auth.createInvite(owner, "Owner"), /already called Owner/);
+  await assert.rejects(auth.createInvite(owner, "   "), /needs a display name/);
+});
+
+test("removal purges push first: a failed push write leaves the member usable", async () => {
+  const { auth, stores, tick } = await setup(true);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
+  const member = await auth.acceptInvite(await auth.createInvite(owner, "Partner"));
+  const memberId = member.session.memberId;
+
+  // A push store that fails its write, as a full disk would.
+  const brokenPush = {
+    ...stores.push!,
+    update: async () => {
+      throw new Error("ENOSPC");
+    },
+    read: stores.push!.read.bind(stores.push!),
+  } as unknown as typeof stores.push;
+
+  const failing = new Auth({ config: stores.config, push: brokenPush!, now: tick.now });
+  await assert.rejects(failing.removeMember(owner, memberId), /ENOSPC/);
+  // Because push went first, the member is still intact and can be retried.
+  assert.equal((await auth.authenticate(member.token)).role, "member");
 });

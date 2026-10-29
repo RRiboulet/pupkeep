@@ -97,6 +97,8 @@ export interface SessionRecord {
   /** Hash of the session token; the token itself is only ever in a cookie. */
   tokenHash: string;
   createdAt: string;
+  /** Absent only for a session written before expiries existed. */
+  expiresAt?: string;
   lastSeenAt?: string;
 }
 
@@ -156,14 +158,16 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function parseSession(value: unknown): SessionRecord | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
-  const { tokenHash, createdAt, lastSeenAt } = record;
+  const { tokenHash, createdAt, lastSeenAt, expiresAt } = record;
   // A raw token in the hash field would defeat "config.json holds hashes only".
   if (typeof tokenHash !== "string" || !HASH.test(tokenHash)) return undefined;
   if (!isDate(createdAt)) return undefined;
   if (lastSeenAt !== undefined && !isDate(lastSeenAt)) return undefined;
+  if (expiresAt !== undefined && !isDate(expiresAt)) return undefined;
   return {
     tokenHash,
     createdAt,
+    ...(expiresAt !== undefined ? { expiresAt: expiresAt as string } : {}),
     ...(lastSeenAt !== undefined ? { lastSeenAt: lastSeenAt as string } : {}),
   };
 }

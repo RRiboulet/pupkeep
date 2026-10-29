@@ -35,7 +35,7 @@ export interface LauncherDeps {
     dataDir: string,
     origin: string | undefined,
     reissue: boolean,
-  ) => Promise<{ link: string; minted: boolean } | undefined>;
+  ) => Promise<{ link: string; minted: boolean } | "no-origin" | undefined>;
   /** The server program. Missing until P1-07 lands, which is reported, not guessed. */
   serverEntry?: { command: string; args: string[] };
   /** True on the phone: the tunnel needs the termux-chroot wrapper. Auto-detected. */
@@ -179,8 +179,17 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
     let ownerLink: AnnounceResult | undefined;
     const mint = deps.mintOwnerLink ?? defaultMintOwnerLink;
     try {
-      const minted = await mint(dataDir.path, tunnelUrl ?? plan.displayUrl, options.reissueOwner);
-      if (minted) {
+      // The origin the owner will actually open. Minting before the tunnel exists
+      // would otherwise print a loopback URL nobody can reach, and the cookie is
+      // origin-scoped, so it cannot be corrected later.
+      const origin = tunnelUrl ?? plan.displayUrl;
+      const minted = await mint(dataDir.path, origin, options.reissueOwner);
+      if (minted === "no-origin") {
+        log(
+          "the tunnel URL is not known yet, so no owner link can be printed for this origin. " +
+            "Run --reissue-owner once the tunnel is up.",
+        );
+      } else if (minted) {
         ownerLink = await announceOwnerLink({
           link: minted.link,
           path: ownerLinkPath(dataDir.path),
@@ -196,7 +205,11 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
         );
       }
     } catch (error) {
-      log(`owner link could not be announced: ${(error as Error).message}`);
+      // A mint that succeeded followed by a failed write would store the hash and
+      // lose the only copy of the link. Fail closed rather than boot "ownerless".
+      log(`fatal: the owner link could not be stored: ${(error as Error).message}`);
+      await stop();
+      return { ok: false, code: EXIT_DATA_DIR, message: (error as Error).message, plan, dataDir: dataDir.path };
     }
 
     const entry = deps.serverEntry;
@@ -281,18 +294,22 @@ async function defaultMintOwnerLink(
   dataDir: string,
   origin: string | undefined,
   reissue: boolean,
-): Promise<{ link: string; minted: boolean } | undefined> {
+): Promise<{ link: string; minted: boolean } | "no-origin" | undefined> {
   const stores = dataStores(dataDir);
   await stores.config.ensure();
   const config = await stores.config.read();
-  if (config.ownerTokenHash !== null && !reissue) return undefined;
 
-  const auth = new Auth({
-    config: stores.config,
-    push: stores.push,
-    ...(origin ? { origin } : {}),
-  });
-  const { link } = await auth.mintOwner();
+  // Housekeeping belongs on boot: expired invites otherwise live in config.json
+  // for ever, and the docstring that says "call on boot" should be true.
+  const auth = new Auth({ config: stores.config, push: stores.push });
+  await auth.pruneInvites();
+
+  if (config.ownerTokenHash !== null && !reissue) return undefined;
+  // No origin means no printable link: a loopback URL in `owner-link.txt` is a
+  // credential nobody can use.
+  if (!origin) return "no-origin";
+
+  const { link } = await auth.mintOwner(origin);
   return { link, minted: true };
 }
 
