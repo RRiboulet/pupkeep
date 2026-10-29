@@ -17,8 +17,9 @@ ARG CLOUDFLARED_SHA256=149d1ec4ac8e58bdbf08a41cc42347da9184d9fb4ef0df6528d75c90a
 # The release .deb is amd64. Fail with a clear message on another architecture
 # instead of letting dpkg produce a confusing one (PLAN §5.1).
 ARG TARGETARCH
-RUN if [ -n "${TARGETARCH:-}" ] && [ "${TARGETARCH}" != "amd64" ]; then \
-        echo "Pupkeep's devcontainer is amd64 (PLAN §5.1); TARGETARCH=${TARGETARCH}" >&2; \
+RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    if [ "$arch" != "amd64" ]; then \
+        echo "Pupkeep's devcontainer is amd64 (PLAN §5.1); found ${arch}" >&2; \
         exit 1; \
     fi
 

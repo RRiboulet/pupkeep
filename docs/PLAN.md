@@ -325,8 +325,7 @@ pupkeep/
 │   ├── devcontainer.json
 │   ├── Dockerfile
 │   ├── docker-compose.yml
-│   ├── postCreate.sh
-│   └── pi/
+│   └── postCreate.sh
 ├── .pi/
 │   └── todos/                 # local task files (gitignored); no package pin here —
 │                              #   see README "Development tooling" for why
@@ -390,7 +389,7 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
   (Node 24, npm).
 - Features: common-utils (zsh), git, GitHub CLI.
 - apt: `tmux`, `jq`, `sqlite3`, `curl`, `ripgrep`, `rclone`, `openssl`,
-  `ca-certificates`, `unzip`.
+  `ca-certificates`, `unzip`, `git`, `age`, `expect`, `tar`, `sudo`.
 - `cloudflared` installed in the image: amd64 `2026.10.5`, pinned by version
   **and** SHA-256. The phone uses the arm64 release through the Termux wrapper
   (§6.7); this is the devcontainer's copy.
@@ -411,7 +410,9 @@ No Android SDK, JDK, Gradle or NDK.
 
 ### 5.2 postCreate
 
-- Copy `.env.example` → `.env` only if absent.
+- Copy `.env.example` → `.env` only if absent (mode `0600`; it may hold provider
+  keys). `npm start` loads it with `--env-file-if-exists=.env`, and a real
+  environment variable wins over the file.
 - `npm ci`.
 - `tsc --noEmit`.
 - `node --test` (empty or smoke at first).
@@ -1775,10 +1776,12 @@ that the partner is reached out-of-app is gated on P0-10.
       seeds `.env` only when absent, runs `npm ci`, `npm run typecheck` and
       `npm test`, checks the pinned versions/tools, installs the shared
       `my-agent-setup` at `v1.9.0` into the **personal** pi settings (never this
-      repo's `.pi/settings.json`, and skipped when the project declares it), and
+      repo's `.pi/settings.json`, and skipped when the project declares it),
+      pins gh to `2.103.2`, sets the owner's public noreply git identity, and
       prints the start command. Port 8787 is forwarded; the dev database is
-      `/tmp/pupkeep-dev`, never the workspace mount. Seven static guards live in
-      `test/devcontainer.test.ts` (202 tests total). **Not verified:** no Docker
+      `/tmp/pupkeep-dev`, never the workspace mount. Six static guards live in
+      `test/devcontainer.test.ts` (201 tests total); `npm start` loads `.env`
+      with `--env-file-if-exists`, so the seed is not inert. **Not verified:** no Docker
       daemon in this environment, so the image was not built here; the base tag,
       pi package, cloudflared release and shared-package tag were checked
       against their registries, and the files are statically tested. A real

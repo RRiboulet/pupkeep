@@ -24,11 +24,30 @@ fi
 mkdir -p "$GH_CONFIG_DIR" /tmp/pupkeep-dev
 chmod 700 /tmp/pupkeep-dev
 
+# --- git identity and gh credential helper --------------------------------
+# A fresh container has no git identity, and this repo's workflow is commit ->
+# push -> PR. This is the owner's public GitHub noreply address, not a secret;
+# `git config --global` overrides it for a different author.
+git config --global user.name "RRiboulet"
+git config --global user.email "122018936+RRiboulet@users.noreply.github.com"
+
+# The Dockerfile registered /usr/bin/gh, but the github-cli feature installs gh
+# later and may choose another path. Fix the system helper to the binary that is
+# actually present *before* the long npm ci step: an offline create must not
+# leave a token in the volume that git cannot use.
+GH_BIN="$(command -v gh)"
+sudo git config --system credential.https://github.com.helper ''
+sudo git config --system credential.https://github.com.helper "!${GH_BIN} auth git-credential"
+sudo git config --system credential.https://gist.github.com.helper ''
+sudo git config --system credential.https://gist.github.com.helper "!${GH_BIN} auth git-credential"
+
 # --- .env ------------------------------------------------------------------
 # Copy only when absent: a developer's local keys and overrides must survive a
 # rebuild. `.env` is gitignored; `.env.example` is the committed template.
 if [ ! -f .env ]; then
   cp .env.example .env
+  # .env can hold provider keys; keep it private from the moment it exists.
+  chmod 600 .env
   echo "created .env from .env.example (edit it if you need provider keys)"
 fi
 
@@ -41,6 +60,13 @@ npm test
 
 # --- tool versions ---------------------------------------------------------
 # PLAN §16 P1-02: verify the base tag and the pinned tools at build/create time.
+for tool in age cloudflared expect gh jq node npm openssl pi rclone rg sqlite3 tar tmux; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "missing required tool: ${tool}" >&2
+    exit 1
+  fi
+done
+
 node_major="$(node --version | cut -d. -f1)"
 if [ "$node_major" != "v24" ]; then
   echo "Node 24 is required; found $(node --version)" >&2
@@ -53,6 +79,15 @@ if [ "$pi_version" != "1.4.0" ]; then
   exit 1
 fi
 
+gh_version="$(gh --version | sed -n '1p')"
+case "$gh_version" in
+  *2.103.2*) ;;
+  *)
+    echo "gh 2.103.2 is required; found ${gh_version}" >&2
+    exit 1
+    ;;
+esac
+
 cloudflared_version="$(cloudflared --version)"
 case "$cloudflared_version" in
   *2026.10.5*) ;;
@@ -62,14 +97,8 @@ case "$cloudflared_version" in
     ;;
 esac
 
-for tool in age expect gh jq openssl rclone rg sqlite3 tar tmux; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "missing required tool: ${tool}" >&2
-    exit 1
-  fi
-done
 
-echo "node $(node --version) · pi ${pi_version} · ${cloudflared_version}"
+echo "node $(node --version) · pi ${pi_version} · ${gh_version} · ${cloudflared_version}"
 echo "sqlite3 $(sqlite3 --version | cut -d' ' -f1) · $(rclone version | sed -n '1p')"
 
 # --- the shared pi package -------------------------------------------------
@@ -83,7 +112,7 @@ echo "sqlite3 $(sqlite3 --version | cut -d' ' -f1) · $(rclone version | sed -n 
 SHARED_PACKAGE_REF="${PUPKEEP_SHARED_PACKAGE_REF:-v1.9.0}"
 if pi list 2>/dev/null | grep 'my-agent-setup' >/dev/null; then
   echo "shared pi package already installed; leaving it alone"
-elif [ -f .pi/settings.json ] && grep -q '"my-agent-setup"' .pi/settings.json; then
+elif [ -f .pi/settings.json ] && grep -q 'my-agent-setup' .pi/settings.json; then
   echo "this project already declares the shared pi package; not installing a second copy"
 else
   if pi install "git:github.com/RRiboulet/my-agent-setup@${SHARED_PACKAGE_REF}"; then
@@ -96,15 +125,6 @@ else
 fi
 
 # --- gh and pi authentication ---------------------------------------------
-# The Dockerfile registered /usr/bin/gh as git's system credential helper. The
-# github-cli feature can install it elsewhere, so pin the helper to the binary
-# that is actually present before telling the user to log in.
-GH_BIN="$(command -v gh)"
-sudo git config --system credential.https://github.com.helper ''
-sudo git config --system credential.https://github.com.helper "!${GH_BIN} auth git-credential"
-sudo git config --system credential.https://gist.github.com.helper ''
-sudo git config --system credential.https://gist.github.com.helper "!${GH_BIN} auth git-credential"
-
 if ! gh auth status >/dev/null 2>&1; then
   cat <<'MSG'
 

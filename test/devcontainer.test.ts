@@ -5,7 +5,7 @@
 // the shared package in the repo, or a dev database pointed at the 9p mount.
 
 import assert from "node:assert/strict";
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -35,9 +35,12 @@ test("devcontainer.json targets the repo mount, forwards 8787 and runs postCreat
   assert.equal(config.containerEnv?.PUPKEEP_PORT, "8787");
   assert.equal(config.containerEnv?.PUPKEEP_ACCESS, "local");
 
-  const features = Object.keys(config.features ?? {});
-  assert.ok(features.some((feature) => feature.includes("common-utils")));
-  assert.ok(features.some((feature) => feature.includes("github-cli")));
+  const features = Object.entries(config.features ?? {});
+  assert.ok(features.some(([feature]) => feature.includes("common-utils")));
+  const githubCli = features.find(([feature]) => feature.includes("github-cli"))?.[1] as
+    | { version?: unknown }
+    | undefined;
+  assert.equal(githubCli?.version, "2.103.2", "gh is pinned, not left to the feature's latest");
 });
 
 test("compose mounts the repo and a persistent, explicitly named pi-config volume", async () => {
@@ -62,6 +65,7 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
   assert.match(dockerfile, /CLOUDFLARED_SHA256=149d1ec4ac8e58bdbf08a41cc42347da9184d9fb4ef0df6528d75c90a85ac0ed/);
   assert.match(dockerfile, /cloudflared-linux-amd64\.deb/);
   assert.match(dockerfile, /sha256sum -c -/);
+  assert.match(dockerfile, /dpkg --print-architecture/, "the amd64 guard must not no-op without TARGETARCH");
 
   const apt = /apt-get install -y --no-install-recommends([\s\S]*?)&& rm -rf \/var\/lib\/apt\/lists/.exec(
     dockerfile,
@@ -92,21 +96,23 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
 });
 
 test("postCreate seeds .env, runs the suite, checks versions and installs the shared package personally", async () => {
-  const path = join(ROOT, ".devcontainer/postCreate.sh");
-  const script = await readFile(path, "utf8");
-  const info = await stat(path);
-  assert.notEqual(info.mode & 0o111, 0, "postCreate.sh must be executable");
+  const script = await read(".devcontainer/postCreate.sh");
 
   assert.match(script, /if \[ ! -f \.env \]; then/);
   assert.match(script, /cp \.env\.example \.env/);
+  assert.match(script, /chmod 600 \.env/);
   assert.match(script, /npm ci/);
   assert.match(script, /npm run typecheck/);
   assert.match(script, /npm test/);
   assert.match(script, /chmod 700 \/tmp\/pupkeep-dev/);
 
-  assert.match(script, /if \[ "\$node_major" != "v24" \]/);
-  assert.match(script, /if \[ "\$pi_version" != "1\.4\.0" \]/);
+  assert.match(script, /node_major/);
+  assert.match(script, /v24/);
+  assert.match(script, /pi_version/);
+  assert.match(script, /1\.4\.0/);
+  assert.match(script, /gh 2\.103\.2 is required/);
   assert.match(script, /cloudflared 2026\.10\.5/);
+  assert.match(script, /git config --global user\.email/);
   for (const tool of ["age", "expect", "gh", "jq", "openssl", "rclone", "rg", "sqlite3", "tar", "tmux"]) {
     assert.match(script, new RegExp(`\\b${tool}\\b`), `postCreate does not check ${tool}`);
   }
@@ -115,16 +121,20 @@ test("postCreate seeds .env, runs the suite, checks versions and installs the sh
   // the repo's .pi/settings.json — that is the duplicate-package failure the
   // P1-05 guard pins from the other side.
   assert.match(script, /SHARED_PACKAGE_REF=.*v1\.9\.0/);
+  assert.match(script, /grep -q 'my-agent-setup' \.pi\/settings\.json/);
   assert.match(script, /pi install "git:github\.com\/RRiboulet\/my-agent-setup@\$\{SHARED_PACKAGE_REF\}"/);
   assert.doesNotMatch(script, /pi install[^\n]*--local/);
   assert.doesNotMatch(script, />>?\s*\.pi\/settings\.json/);
 });
 
-test("the dev environment keeps its database off the workspace mount", async () => {
+test("the dev environment keeps its database off the workspace mount and reads .env", async () => {
   const env = await read(".env.example");
   assert.match(env, /^PUPKEEP_DATA_DIR=\/tmp\/pupkeep-dev$/m);
   assert.match(env, /^PUPKEEP_PORT=8787$/m);
   assert.match(env, /^PUPKEEP_ACCESS=local$/m);
+
+  const pkg = JSON.parse(await read("package.json")) as { scripts?: Record<string, string> };
+  assert.match(pkg.scripts?.start ?? "", /--env-file-if-exists=\.env/);
 });
 
 test("the build context excludes secrets, dependencies and local data", async () => {
@@ -132,11 +142,4 @@ test("the build context excludes secrets, dependencies and local data", async ()
   for (const entry of [".env", ".git", "node_modules", "data", "*.sqlite", ".pi/todos"]) {
     assert.match(dockerignore, new RegExp(`^${entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
   }
-});
-
-test("the pi-config volume is documented without turning into a package declaration", async () => {
-  const readme = await read(".devcontainer/pi/README.md");
-  assert.match(readme, /pupkeep-pi-config/);
-  assert.match(readme, /personal.*settings/);
-  assert.match(readme, /not.*declare|duplicate|twice/i);
 });

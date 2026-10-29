@@ -4,7 +4,9 @@
   "service": "devcontainer",
   "workspaceFolder": "/workspace",
   "postCreateCommand": "bash .devcontainer/postCreate.sh",
-  "forwardPorts": [8787],
+  "forwardPorts": [
+    8787
+  ],
   "portsAttributes": {
     "8787": {
       "label": "Pupkeep (HTTP)",
@@ -22,11 +24,15 @@
       "configureZshAsDefaultShell": true,
       "username": "vscode"
     },
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "2.103.2"
+    }
   },
   "customizations": {
     "vscode": {
-      "extensions": ["eamodio.gitlens"],
+      "extensions": [
+        "eamodio.gitlens"
+      ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "zsh",
         "editor.formatOnSave": false

@@ -9,7 +9,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "start": "node bin/pupkeep.js",
+    "start": "node --env-file-if-exists=.env bin/pupkeep.js",
     "test": "node --test",
     "typecheck": "tsc --noEmit",
     "backup": "node scripts/backup.ts",
