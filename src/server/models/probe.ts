@@ -20,18 +20,21 @@
 // errors thrown before any message exists.
 
 import type { Api, AssistantMessage, Context, Model, Tool } from "@earendil-works/pi-ai";
+import { statusFromError, statusFromMessage } from "../../shared/provider-errors.ts";
+import { redactDetail } from "../../shared/redact.ts";
 import { Type } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai";
 
+import type { ProviderFailureStatus } from "../../shared/provider-errors.ts";
+
+// The classification lives in `src/shared/provider-errors.ts` so P4-08's "retry
+// with fallback model" cannot re-derive a different mapping. Re-exported here
+// because a model probe is where readers expect to find it.
+export { statusFromError, statusFromMessage } from "../../shared/provider-errors.ts";
+export { redactDetail } from "../../shared/redact.ts";
+
 /** Statuses recorded per model. Only the dropping ones may remove a model. */
-export type ProbeStatus =
-  | "ok"
-  | "deprecated"
-  | "not_found"
-  | "unauthorized"
-  | "rate_limited"
-  | "network"
-  | "timeout";
+export type ProbeStatus = ProviderFailureStatus;
 
 export interface ProbeUsage {
   input: number;
@@ -106,77 +109,6 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_MAX_TOKENS = 64;
 
-/**
- * Map a provider failure to a status. Only `deprecated`, `not_found` and
- * `unauthorized` remove a model; everything unrecognised is `network`, which is
- * "unknown" and keeps the last-known-good entry.
- */
-export function statusFromError(error: unknown): ProbeStatus {
-  if (isAbort(error)) return "timeout";
-
-  const status = httpStatus(error);
-  if (status !== undefined) return fromCode(status);
-
-  // Provider adapters that report the code only in text. Kept narrow on purpose:
-  // a bare "\b410\b" matches model ids (`mimo-v4.1-410`) and URL paths
-  // (`/v1/401`), which would silently drop the wrong model.
-  const text = messageOf(error);
-  if (!text) return "network";
-
-  // Pi AI formats a provider failure in three shapes (see `formatProviderError`):
-  //   "410: {body}"                    — openai-completions
-  //   "Some API error (410): {body}"   — openai-responses, azure-openai-responses
-  //   a bare message.
-  // The parenthesised form matters: without it, a 410 from those adapters is
-  // `network` (kept forever) unless the body happens to say "deprecated".
-  const leading = /^\s*(?:error[: ]\s*)?(?:http\s+|status\s*)?(\d{3})\b/i.exec(text);
-  if (leading) return fromCode(Number(leading[1]));
-  const parenthesised = /^\s*[^0-9\s][^()]{0,60}\(\s*(\d{3})\s*\)\s*[:!]/i.exec(text);
-  if (parenthesised) return fromCode(Number(parenthesised[1]));
-
-  if (/\b(?:model\s*deprecated|model_deprecated|410\s+gone)\b/i.test(text)) return "deprecated";
-  if (/\b(?:too\s*many\s*requests|rate[\s-]?limit(?:ed)?)\b/i.test(text)) return "rate_limited";
-
-  const coded = /\b(?:http|status(?:\s*code)?|error\s*code)\s*[:=]?\s*(4\d\d|5\d\d)\b/i.exec(text);
-  if (coded) return fromCode(Number(coded[1]));
-  return "network";
-}
-
-function fromCode(status: number): ProbeStatus {
-  if (status === 410) return "deprecated";
-  if (status === 404) return "not_found";
-  if (status === 401 || status === 403) return "unauthorized";
-  if (status === 429) return "rate_limited";
-  return "network";
-}
-
-function messageOf(error: unknown): string | undefined {
-  const message = (error as { message?: unknown } | null)?.message;
-  return typeof message === "string" ? message : undefined;
-}
-
-function isAbort(error: unknown): boolean {
-  const name = (error as { name?: unknown } | null)?.name;
-  return name === "AbortError" || name === "TimeoutError";
-}
-
-function httpStatus(error: unknown): number | undefined {
-  const direct = (error as { status?: unknown } | null)?.status;
-  if (typeof direct === "number") return direct;
-  const nested = (error as { response?: { status?: unknown } } | null)?.response?.status;
-  if (typeof nested === "number") return nested;
-  return undefined;
-}
-
-/** Strip anything that could be a credential or a signed URL before recording it. */
-export function redactDetail(text: string): string {
-  return text
-    .replace(/\b(sk|pk|rk)[-_][A-Za-z0-9-_]{8,}/g, "[key]")
-    .replace(/\b[A-Za-z0-9-_]{32,}\b/g, "[redacted]")
-    .replace(/[?&](?:key|token|api_key|apikey|sig|signature)=[^\s&"']+/gi, "[query]")
-    .slice(0, 200);
-}
-
 function usageOf(message: AssistantMessage | undefined): ProbeUsage | undefined {
   const usage = message?.usage;
   if (!usage) return undefined;
@@ -197,25 +129,6 @@ export function probesToolCall(message: AssistantMessage | undefined): boolean {
     if (args?.status === "ok") return true;
   }
   return false;
-}
-
-/**
- * The status of a *resolved* message — which is how pi-ai reports failure.
- * `aborted` is our own timeout; `error` carries the provider's code in
- * `errorMessage`; anything else completed and is `ok` as far as reachability
- * goes (whether it could call the tool is a separate field, gated by the
- * allowlist).
- */
-export function statusFromMessage(message: AssistantMessage): ProbeStatus {
-  if (message.stopReason === "aborted") return "timeout";
-  if (message.stopReason === "error") {
-    const detail = message.errorMessage ?? "";
-    return detail ? statusFromError(new Error(detail)) : "network";
-  }
-  // Not finished is not "reachable": a deferred or pending resolution says
-  // nothing about this model yet, so it is unknown rather than ok.
-  if (message.stopReason === "deferred" || message.stopReason === "pending") return "network";
-  return "ok";
 }
 
 function reasonOf(signal: AbortSignal | undefined): Error {

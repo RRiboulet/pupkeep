@@ -1748,33 +1748,47 @@ that the partner is reached out-of-app is gated on P0-10.
       the owner-link file is `chmod`ed even when it already existed, redaction
       assumes no particular link shape, and the lock compares process start ticks
       so a recycled pid cannot block a reboot.
-- [ ] **P1-05** Data dir/config: `~/.pupkeep`, `config.json`, `secrets.json`,
+- [x] **P1-05** Data dir/config: `~/.pupkeep`, `config.json`, `secrets.json`,
       `push.json`, mode `0700/0600`, serialized per-file writes, log scrub,
-      logging, one-process pid lock (P0-01 deferred; P1-04 calls it). **The lock
-      and the data-directory resolution landed with P1-04** (`src/server/lock.ts`,
-      `ensureDataDir` in `config.ts`) because the launcher cannot promise "one
-      process" without them; what remains here is `config.json`, `secrets.json`,
-      `push.json` and their serialized writes. **Owns the log scrub**, which should absorb P1-03's `redactDetail` so every path gets
-      one implementation, and move `statusFromMessage`/`fromCode` to
-      `src/shared/` so P4-08's "retry with fallback model" reuses them instead of
-      re-deriving 410/429/5xx. Also owns the serialized write of the model-probe
-      cache (`models.json`) in the shape `parseModelProbeCache` accepts
-      (`{version, checkedAt, results}`, P1-03); P4-08 is the reader.
+      logging, one-process pid lock (P0-01 deferred; P1-04 calls it). **Landed:**
+      the three files with typed schemas and a `schemaVersion` each;
+      `JsonFileStore` with **one write queue per absolute path** (a second store
+      for the same file shares it), temp + `fsync` + `rename` + `fsync(dir)`, and
+      0600 modes; `secrets.json` for provider keys only; `push.json` carrying
+      VAPID, subscriptions, prefs and per-member ntfy topics; the model-probe
+      cache written through the same store; the **single redaction
+      implementation** (`src/shared/redact.ts`) with a logger that scrubs every
+      line and field, and a test that reads a real `server.log` and finds none of
+      the seven secret shapes in it; provider-failure classification moved to
+      `src/shared/` so P4-08 reuses it; and `reconcileMembers`, which mirrors
+      config into household profiles and **never resurrects a removed member**.
+      The lock and `ensureDataDir` landed with P1-04.
 - [ ] **P1-06** Auth: owner token hash, **owner reissue/rotate**, one-time
       hashed invite, hashed sessions, cookie, owner/member roles, authz matrix,
       remove member + purge sessions, rate limit, per-origin cookies.
+      **Carried from P1-05:** removing a member must also purge their push
+      subscriptions and ntfy topic from `push.json` — reconciliation touches only
+      profiles, so a removed caregiver would otherwise keep receiving
+      notifications; and every config read-modify-write goes through
+      `JsonFileStore.update`, never a second write path.
 - [ ] **P1-07** Harness: exact open sequence
       (`openNodeSqliteDatabase` → `PRAGMA synchronous=FULL` →
       `SqliteStorage.open({prefix:"pi_"})` → `Harness.open`), `pi_` docs,
       `harness.resume()` on start, `harness.closed` failed-exit, close timeout,
       parked-task reporting, post-backup verification and restore of an
-      interrupted generation. **Also owns the backup job** (`scripts/backup.ts`,
+      interrupted generation. **Carried from P1-05:** the server must take or
+      verify the pid lock itself at open — the JSON write queue is in-process
+      only, so a launcher that was SIGKILLed while its detached child survives
+      would otherwise leave two writers on one data directory. A backup or restore
+      job must not write these files while the server runs. **Also owns the backup job** (`scripts/backup.ts`,
       `scripts/restore.ts`): the `rclone` remote, 14-day retention enforcement,
       and passphrase recovery/rotation, with the passphrase kept off the backup
       host (§7.5). P5-02 only drills it.
 - [ ] **P1-08** Session docs: `app.household`, `app.puppy`, `app.activity`,
       `app.commands`, with initial values, `schemaVersion` migration policy,
-      `checkpointWhen`.
+      `checkpointWhen`. Consumes P1-05's reconciliation plan (which now carries a
+      removal reason) and settles its field names against §8.3's
+      `MemberProfile = { id, name }` before the document shape is frozen.
 - [ ] **P1-09** Shared conversation: custom `app.chat` entries, submit with
       `requestId`, **busy reject** (no queue/steer), `afterFailedRun:
       "continue"`, `watchEvents` → SSE, full snapshot on attach/reconnect.

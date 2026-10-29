@@ -20,6 +20,8 @@ import { detectTermux, parseTunnelUrl, tunnelCommand, tunnelChanged, type Tunnel
 import { announceOwnerLink, type AnnounceResult } from "./owner.ts";
 import { ensureDataDir, ownerLinkPath, type DataDir } from "../server/config.ts";
 import { acquireLock, type LockHandle } from "../server/lock.ts";
+import { createLogger } from "../server/log.ts";
+import { scrub } from "../shared/redact.ts";
 
 export interface LauncherDeps {
   /** Network view; defaults to the real interfaces. */
@@ -71,7 +73,11 @@ export interface LauncherHandle {
 }
 
 export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}): LauncherHandle {
-  const log = deps.log ?? ((line: string) => console.error(line));
+  // The launcher's stdout/stderr is redirected into `~/.pupkeep/server.log` by the
+  // boot script, so its own log lines go through the scrubbing logger too — the
+  // owner link is only one of the things that could otherwise land there.
+  const defaultLogger = createLogger({ scope: "launcher" });
+  const log = deps.log ?? ((line: string) => defaultLogger.info(line));
   const out = deps.out ?? ((text: string) => process.stdout.write(text));
   const spawnChild =
     deps.spawnChild ??
@@ -179,7 +185,9 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
     server = new Supervisor({
       name: "server",
       spawn: () => spawnChild(entry.command, entry.args, serverEnv(plan.bindHost, options.port)),
-      onOutput: (line, stream) => (stream === "stderr" ? log(line) : out(`${line}\n`)),
+      // Server stdout is what the boot script redirects into server.log, so it is
+      // scrubbed like the launcher's own lines rather than passed through.
+      onOutput: (line, stream) => (stream === "stderr" ? log(line) : out(`${scrub(line)}\n`)),
       onError: (error) => log(`server could not start: ${error.message}`),
       onRestart: ({ attempt, delayMs, lastExit }) =>
         log(
