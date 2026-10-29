@@ -213,6 +213,7 @@ test("a bootstrap failure exits non-zero and releases the lock when close comple
     inspect: async () => ({ scheduling: "running", tasks: [], submissions: [] }),
     retryTask: async () => undefined,
   };
+  let listened = false;
   try {
     const result = await startApp(
       { dataDir: dir, host: "127.0.0.1", port: 0 },
@@ -220,6 +221,10 @@ test("a bootstrap failure exits non-zero and releases the lock when close comple
         openHarness: async () => fakeOpened(harness),
         bootstrap: async () => {
           throw new Error("config has no active member");
+        },
+        listen: async () => {
+          listened = true;
+          return { url: "http://127.0.0.1:1", close: async () => {} };
         },
       }),
     );
@@ -229,6 +234,7 @@ test("a bootstrap failure exits non-zero and releases the lock when close comple
       assert.match(result.message, /session bootstrap failed: config has no active member/);
     }
     assert.equal(await isMissing(lockPath(dir, SERVER_LOCK_FILE)), true);
+    assert.equal(listened, false, "a bootstrap failure must not bind the listener");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

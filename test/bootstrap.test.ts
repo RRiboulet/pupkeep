@@ -21,7 +21,9 @@ import {
   HouseholdDoc,
   PuppyDoc,
   emptyHousehold,
+  parseCommands,
   parseHousehold,
+  parsePuppy,
 } from "../src/server/domain/docs.ts";
 import {
   DEFAULT_HOUSEHOLD_NAME,
@@ -228,6 +230,115 @@ test("an unknown household schemaVersion is refused instead of reset", async () 
     const stored = await opened.harness.snapshot(HouseholdDoc, context);
     assert.equal((stored as unknown as { schemaVersion: number }).schemaVersion, 2);
   });
+});
+
+test("a repair that would create duplicate display names is refused before it is committed", async () => {
+  await withHarness(async (opened) => {
+    await bootstrapSession(opened.harness, { config: config(owner), context, now });
+    await opened.harness.commit(async (tx) => {
+      const draft = await tx.doc(HouseholdDoc);
+      draft.members = [{ id: "owner", name: "Alex" }];
+    }, context);
+
+    const colliding = config(owner, member({ id: "partner", role: "member", displayName: "Alex" }));
+    await assert.rejects(
+      bootstrapSession(opened.harness, { config: colliding, context, now }),
+      /share the display name "Alex"/,
+    );
+    // The invalid array never reached storage.
+    assert.deepEqual((await opened.harness.snapshot(HouseholdDoc, context))?.members, [
+      { id: "owner", name: "Alex" },
+    ]);
+  });
+});
+
+test("a config-only member reorder is written so storage and the server agree", async () => {
+  await withHarness(async (opened) => {
+    await bootstrapSession(opened.harness, { config: config(owner, partner), context, now });
+    const reordered = await bootstrapSession(opened.harness, { config: config(partner, owner), context, now });
+
+    assert.deepEqual(reordered.household.members, [
+      { id: "partner", name: "Sam" },
+      { id: "owner", name: "Owner" },
+    ]);
+    assert.deepEqual((await opened.harness.snapshot(HouseholdDoc, context))?.members, [
+      { id: "partner", name: "Sam" },
+      { id: "owner", name: "Owner" },
+    ]);
+  });
+});
+
+test("a fresh boot is one storage commit and a no-op boot writes nothing", async () => {
+  await withHarness(async (opened) => {
+    const nextSeq = async (): Promise<number> => {
+      const row = (await opened.database.get(
+        "SELECT next_seq FROM pi_durable_metadata WHERE singleton = 1",
+      )) as { next_seq?: unknown } | undefined;
+      return Number(row?.next_seq);
+    };
+
+    const before = await nextSeq();
+    await bootstrapSession(opened.harness, { config: config(owner, partner), context, now });
+    const afterFirst = await nextSeq();
+    await bootstrapSession(opened.harness, { config: config(owner, partner), context, now });
+    const afterSecond = await nextSeq();
+
+    assert.equal(afterFirst, before + 1, "first boot is one commit");
+    assert.equal(afterSecond, afterFirst, "a no-op boot writes nothing");
+  });
+});
+
+test("a household-less database with another session document is not reset", async () => {
+  await withHarness(async (opened) => {
+    await opened.harness.commit(async (tx) => {
+      const draft = await tx.doc(PuppyDoc);
+      draft.createdAt = NOW.toISOString();
+    }, context);
+
+    await assert.rejects(
+      bootstrapSession(opened.harness, { config: config(owner), context, now }),
+      /app\.household is missing but app\.puppy exists/,
+    );
+    assert.equal(await opened.harness.snapshot(HouseholdDoc, context), undefined);
+    assert.ok(await opened.harness.snapshot(PuppyDoc, context));
+  });
+});
+
+test("the parsers reject duplicate command keys and timezone-less instants, and allow 0/empty offsets", () => {
+  const createdAt = NOW.toISOString();
+  assert.equal(
+    parseCommands({
+      schemaVersion: 1,
+      createdAt,
+      entries: [
+        { key: "k", requestHash: "h1", result: 1, expiresAt: createdAt },
+        { key: "k", requestHash: "h2", result: 2, expiresAt: createdAt },
+      ],
+    }),
+    undefined,
+  );
+  assert.equal(
+    parsePuppy({
+      schemaVersion: 1,
+      name: "",
+      birthday: null,
+      breed: null,
+      sex: null,
+      targetWeightKg: null,
+      createdAt: "2026-10-29T12:00:00",
+    }),
+    undefined,
+  );
+
+  const base = {
+    ...emptyHousehold(),
+    members: [{ id: "owner", name: "Owner" }],
+    conversationId: 1,
+    systemConversationId: 2,
+    createdAt,
+  };
+  assert.ok(parseHousehold({ ...base, settings: { ...base.settings, appointmentReminderOffsetsMin: [] } }));
+  assert.ok(parseHousehold({ ...base, settings: { ...base.settings, appointmentReminderOffsetsMin: [0] } }));
 });
 
 test("a model attached to the system conversation is cleared on boot", async () => {

@@ -702,6 +702,9 @@ Stop rules:
   removed. Once a profile exists, its `name` is the display authority: a rename
   in the app is not overwritten by the config seed. `config.json`'s
   `displayName` is what seeds a missing profile and what auth/invite flows use.
+  Care-record and `app.chat` labels resolve the member through `app.household`
+  inside the commit (`tx` read); `session.displayName` is the auth identity and
+  may drift after a rename — never write it as `byLabel`/`authorName`.
 - The data directory is mode `0700`; set `umask` before opening the DB.
 
 ### 7.2 The write rule
@@ -907,7 +910,7 @@ type Household = {
   createdAt: string;
   settings: {
     feedReminderDelayMin: number;   // default 15
-    appointmentReminderOffsetsMin: number[]; // default [1440, 60]
+    appointmentReminderOffsetsMin: number[]; // default [1440, 60]; [] = off, 0 = at start
     showerIntervalDays: number;     // default 21
     agentBudgetUsd: number;         // default 10
   };
@@ -1958,15 +1961,34 @@ that the partner is reached out-of-app is gated on P0-10.
       the shared thread's state before P1-09 is no model. Conversation IDs are
       stored as the numeric Pi Durable IDs. `app.puppy` starts empty and carries
       no shower interval; the household setting is the one source.
-      **Verified:** 10 new bootstrap tests (fresh boot, second boot, removal,
+      **Verified:** 15 new bootstrap tests (fresh boot, second boot, removal,
       repair, rename, missing conversation, member cap, schema refusal, system
-      model clearing, checkpoint policy) plus the updated app/config tests and a
-      bootstrap-startup-failure test; 212 tests total, typecheck clean. **Not verified:** the shared thread's
-      model/tools and the UI that renders these documents are P1-09/P1-11; the
-      first-run wizard that fills the puppy profile is P1-14.
+      model clearing, checkpoint policy, duplicate-name refusal, member reorder,
+      one-commit/no-op watermark, sibling-document refusal and parser hardening)
+      plus the updated app/config tests and a bootstrap-startup-failure test;
+      217 tests total, typecheck clean.
+      **Reviewed and repaired:** the adversarial review found that the repair
+      path could commit two profiles with the same display name (an owner
+      renamed "Alex" plus a partner invited as "Alex"), after which every boot
+      refused the document it had written. The reconciled array is now validated
+      before the repair commit and a collision fails with a clear error without
+      touching storage; invitations still check config names, so the boot guard
+      is the load-bearing one. Also fixed: order-only member drift is written so
+      storage and the server agree; `app.commands` rejects duplicate idempotency
+      keys; instants require a trailing `Z`; empty/zero reminder offsets are
+      accepted; a household-less database with sibling documents is refused
+      rather than reset; and tests pin the one-commit first boot, the no-op
+      second boot and that a bootstrap failure never binds the listener. The
+      plan now says care labels resolve through the household profile, not
+      `session.displayName`, and P1-14 owns confirming the captured timezone.
+      **Not verified:** the shared thread's model/tools and the UI that renders
+      these documents are P1-09/P1-11; the first-run wizard that fills the puppy
+      profile and confirms the timezone is P1-14.
 - [ ] **P1-09** Shared conversation: custom `app.chat` entries, submit with
       `requestId`, **busy reject** (no queue/steer), `afterFailedRun:
       "continue"`, `watchEvents` → SSE, full snapshot on attach/reconnect.
+      Labels for entries and tool writes resolve through `app.household`; never
+      use `session.displayName` (it is the auth seed and may drift).
 - [ ] **P1-10** PWA shell: manifest, service worker registration, nav, Today
       placeholder, connection status, CSP/security headers, static-only cache.
 - [ ] **P1-11** Puppy profile: domain service, HTTP routes, agent tools
@@ -1978,7 +2000,8 @@ that the partner is reached out-of-app is gated on P0-10.
       Tailscale address and started on demand**, and the `termux-chroot` +
       `SSL_CERT_FILE` cloudflared wrapper from §6.7.
 - [ ] **P1-14** First-run setup: puppy profile and meal-slot wizard before both
-      caregivers land on Today.
+      caregivers land on Today. Confirm or change the household timezone captured
+      at bootstrap; a wrong zone corrupts every future `localDate`.
 
 **Gate G1:** two caregivers sign in, edit the puppy profile, see each other live;
 the shared thread answers via a fake provider; a restart loses nothing.

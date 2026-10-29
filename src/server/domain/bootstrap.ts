@@ -23,9 +23,11 @@ import {
   emptyCommands,
   emptyHousehold,
   emptyPuppy,
+  isIanaZone,
   parseActivity,
   parseCommands,
   parseHousehold,
+  parseMemberProfiles,
   parsePuppy,
 } from "./docs.ts";
 
@@ -58,15 +60,17 @@ export interface BootstrapResult {
 
 function defaultTimezone(): string {
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  if (zone) {
-    try {
-      new Intl.DateTimeFormat("en-GB", { timeZone: zone });
-      return zone;
-    } catch {
-      // Fall through to UTC.
-    }
+  return isIanaZone(zone) ? zone : "UTC";
+}
+
+function duplicateMemberName(members: readonly MemberProfile[]): string | undefined {
+  const seen = new Set<string>();
+  for (const member of members) {
+    const key = member.name.trim().toLowerCase();
+    if (seen.has(key)) return member.name;
+    seen.add(key);
   }
-  return "UTC";
+  return undefined;
 }
 
 function initialMembers(config: AppConfig): MemberProfile[] {
@@ -77,7 +81,12 @@ function initialMembers(config: AppConfig): MemberProfile[] {
   if (active.length > 2) {
     throw new BootstrapError("config.json has more than two active members; the household cap is two");
   }
-  return active.map((member) => ({ id: member.id, name: member.displayName }));
+  const members = active.map((member) => ({ id: member.id, name: member.displayName }));
+  const duplicate = duplicateMemberName(members);
+  if (duplicate) {
+    throw new BootstrapError(`two members share the display name "${duplicate}"; rename one before starting`);
+  }
+  return members;
 }
 
 function initialHousehold(
@@ -132,15 +141,23 @@ export async function bootstrapSession(
   const existing = await harness.snapshot(HouseholdDoc, context);
 
   if (existing === undefined) {
+    // A household-less database with other session documents is a partial
+    // restore/corruption, not a fresh install. Refuse rather than overwrite them.
+    if ((await harness.snapshot(PuppyDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.puppy exists; refusing to reset it");
+    }
+    if ((await harness.snapshot(ActivityDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.activity exists; refusing to reset it");
+    }
+    if ((await harness.snapshot(CommandsDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.commands exists; refusing to reset it");
+    }
+
     const createdAt = now().toISOString();
     const timezone = options.timezone ?? defaultTimezone();
     // Validate the zone before it is persisted; a bad value would break every
     // local-date computation later.
-    try {
-      new Intl.DateTimeFormat("en-GB", { timeZone: timezone });
-    } catch {
-      throw new BootstrapError(`not an IANA timezone: ${timezone}`);
-    }
+    if (!isIanaZone(timezone)) throw new BootstrapError(`not an IANA timezone: ${timezone}`);
 
     const ids = await harness.commit(async (tx) => {
       const shared = await tx.createConversation({ ownership: { kind: "ownerless" } });
@@ -189,13 +206,25 @@ export async function bootstrapSession(
 
   const plan = reconcileMembers(options.config, household.members);
   const existingById = new Map(household.members.map((profile) => [profile.id, profile]));
-  const nextMembers = activeMembers(options.config).map(
-    (member) => existingById.get(member.id) ?? { id: member.id, name: member.displayName },
+  const creates = new Map(plan.createProfiles.map((profile) => [profile.id, profile]));
+  const seededMembers = activeMembers(options.config).map(
+    (member) => existingById.get(member.id) ?? creates.get(member.id)!,
   );
+  const nextMembers = parseMemberProfiles(seededMembers);
+  if (!nextMembers) {
+    const duplicate = duplicateMemberName(seededMembers);
+    throw new BootstrapError(
+      duplicate
+        ? `two members would share the display name "${duplicate}"; rename one before starting`
+        : "the reconciled household profiles are invalid",
+    );
+  }
   const membersChanged =
-    plan.createProfiles.length > 0 ||
-    plan.removeProfiles.length > 0 ||
-    nextMembers.length !== household.members.length;
+    nextMembers.length !== household.members.length ||
+    nextMembers.some(
+      (member, index) =>
+        member.id !== household.members[index]?.id || member.name !== household.members[index]?.name,
+    );
 
   const puppySnapshot = await harness.snapshot(PuppyDoc, context);
   const puppy = puppySnapshot === undefined ? undefined : parsePuppy(puppySnapshot);

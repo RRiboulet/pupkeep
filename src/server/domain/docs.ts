@@ -115,8 +115,10 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
 function isIsoDate(value: unknown): value is string {
-  return typeof value === "string" && !Number.isNaN(Date.parse(value)) && /^\d{4}-\d{2}-\d{2}T/.test(value);
+  return typeof value === "string" && ISO_DATE.test(value) && !Number.isNaN(Date.parse(value));
 }
 
 function isLocalDate(value: unknown): value is string {
@@ -125,7 +127,7 @@ function isLocalDate(value: unknown): value is string {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-function isIanaZone(value: unknown): value is string {
+export function isIanaZone(value: unknown): value is string {
   if (!isNonEmptyString(value)) return false;
   try {
     new Intl.DateTimeFormat("en-GB", { timeZone: value });
@@ -143,26 +145,37 @@ function isNonNegativeNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 function parseSettings(value: unknown): HouseholdSettings | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
   const { feedReminderDelayMin, appointmentReminderOffsetsMin, showerIntervalDays, agentBudgetUsd } = record;
   if (!isNonNegativeNumber(feedReminderDelayMin)) return undefined;
-  if (!Array.isArray(appointmentReminderOffsetsMin) || appointmentReminderOffsetsMin.length === 0) return undefined;
-  if (!appointmentReminderOffsetsMin.every((offset) => isPositiveInteger(offset))) return undefined;
+  // An empty offset list means "no appointment reminders"; offset 0 means "at
+  // the appointment". Rejecting either now would force a schemaVersion bump when
+  // P4 exposes the setting.
+  if (!Array.isArray(appointmentReminderOffsetsMin)) return undefined;
+  const offsets: number[] = [];
+  for (const offset of appointmentReminderOffsetsMin) {
+    if (!isNonNegativeInteger(offset)) return undefined;
+    offsets.push(offset);
+  }
   if (typeof showerIntervalDays !== "number" || !Number.isFinite(showerIntervalDays) || showerIntervalDays <= 0) {
     return undefined;
   }
   if (!isNonNegativeNumber(agentBudgetUsd)) return undefined;
   return {
     feedReminderDelayMin,
-    appointmentReminderOffsetsMin: [...appointmentReminderOffsetsMin],
+    appointmentReminderOffsetsMin: offsets,
     showerIntervalDays,
     agentBudgetUsd,
   };
 }
 
-function parseMembers(value: unknown): MemberProfile[] | undefined {
+export function parseMemberProfiles(value: unknown): MemberProfile[] | undefined {
   if (!Array.isArray(value) || value.length < 1 || value.length > 2) return undefined;
   const members: MemberProfile[] = [];
   const ids = new Set<string>();
@@ -185,7 +198,7 @@ export function parseHousehold(value: unknown): Household | undefined {
   if (!record || record.schemaVersion !== HOUSEHOLD_SCHEMA_VERSION) return undefined;
   if (!isNonEmptyString(record.name)) return undefined;
   if (!isIanaZone(record.timezone)) return undefined;
-  const members = parseMembers(record.members);
+  const members = parseMemberProfiles(record.members);
   if (!members) return undefined;
   if (!isPositiveInteger(record.conversationId) || !isPositiveInteger(record.systemConversationId)) return undefined;
   if (record.conversationId === record.systemConversationId) return undefined;
@@ -270,9 +283,14 @@ export function parseCommands(value: unknown): Commands | undefined {
   if (!isIsoDate(record.createdAt)) return undefined;
   if (!Array.isArray(record.entries)) return undefined;
   const entries: CommandRecord[] = [];
+  const keys = new Set<string>();
   for (const item of record.entries) {
     const entry = parseCommandRecord(item);
     if (!entry) return undefined;
+    // A duplicate key would make idempotent replay ambiguous; the document's
+    // whole purpose is one result per key.
+    if (keys.has(entry.key)) return undefined;
+    keys.add(entry.key);
     entries.push(entry);
   }
   return { schemaVersion: COMMANDS_SCHEMA_VERSION, createdAt: record.createdAt, entries };
