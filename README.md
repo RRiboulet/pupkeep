@@ -6,8 +6,8 @@ A shared, agent-operated puppy care app for two caregivers, built on
 > **Status: Phase 1 — the skeleton is being built.** Phase 0's spikes are
 > complete and their go/no-go is recorded in
 > [`docs/PLAN.md`](docs/PLAN.md) §2.3. The launcher, auth, data files, harness,
-> storage and encrypted backup job are in place; the HTTP/UI layer and the first
-> domain documents are still P1-08/P1-09/P1-10. The
+> storage, encrypted backup job and reproducible devcontainer are in place; the
+> HTTP/UI layer and the first domain documents are still P1-08/P1-09/P1-10. The
 > source of truth is [`docs/PLAN.md`](docs/PLAN.md);
 > [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says how to pick the next task.
 >
@@ -100,6 +100,25 @@ Node: `engines.node` is `>=24`. The devcontainer and CI use Node 24; the phone
 measured Node 26.12.1 in Phase 0. That difference is deliberate and recorded (the
 runtime floor is 24, and P5-01 re-measures on the phone) rather than pinned to a
 single major that would make one of the two environments non-conforming.
+
+## Devcontainer
+
+`.devcontainer/` builds from
+`mcr.microsoft.com/devcontainers/javascript-node:24-bookworm` and installs Node
+24, pi coding agent `1.4.0`, sqlite3, cloudflared, rclone, tmux, gh, jq, age,
+expect and the rest of the host tooling. Open the repo with the Dev Containers
+extension; `postCreate.sh` runs `npm ci`, `npm run typecheck` and `npm test`, and
+seeds `.env` only when it is absent.
+
+- pi settings, sessions and the gh token persist in the `pupkeep-pi-config`
+  volume at `/home/vscode/.pi`; run `gh auth login` once per volume.
+- The development database is `/tmp/pupkeep-dev`, never the workspace mount.
+- The shared `my-agent-setup` package is installed at `v1.9.0` into the
+  container's personal pi settings; it is deliberately not declared in
+  `.pi/settings.json`, which would duplicate the enclosing workspace's
+  extensions.
+- Port 8787 is forwarded. The server is still a scaffold: `/healthz` answers and
+  every other route is 503 until P1-09/P1-10.
 
 ## Commands
 

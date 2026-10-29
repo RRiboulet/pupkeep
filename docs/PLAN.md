@@ -391,14 +391,18 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
 - Features: common-utils (zsh), git, GitHub CLI.
 - apt: `tmux`, `jq`, `sqlite3`, `curl`, `ripgrep`, `rclone`, `openssl`,
   `ca-certificates`, `unzip`.
-- `cloudflared` installed in the image or `postCreate` (amd64 build for the
-  devcontainer; the phone uses Termux’s package).
-- **pi coding agent `1.4.0`**, pin exact.
+- `cloudflared` installed in the image: amd64 `2026.10.5`, pinned by version
+  **and** SHA-256. The phone uses the arm64 release through the Termux wrapper
+  (§6.7); this is the devcontainer's copy.
+- **pi coding agent `1.4.0`**, pin exact. The Dockerfile installs it globally
+  and asserts `pi --version` at build time.
 - The shared package (`my-agent-setup`) is **not** declared in this repo's
   `.pi/settings.json`: when pupkeep sits inside a workspace that already loads
   those extensions, a second declaration loads every extension twice and
-  subagents fail at startup on a duplicate flag. A standalone clone may add it to
-  its own local settings; bump pi and that package together when it does.
+  subagents fail at startup on a duplicate flag. The P1-02 devcontainer installs
+  it at **`v1.9.0`** into the *personal* pi settings in the `pupkeep-pi-config`
+  volume (`pi install` without `--local`), and skips it when the project already
+  declares it. Bump pi and that package together when either moves.
 - Persistent `pi-config` volume at `/home/vscode/.pi`.
 - Optional Docker-in-Docker only for testing the VPS fallback. Not required for
   the phone host.
@@ -411,8 +415,9 @@ No Android SDK, JDK, Gradle or NDK.
 - `npm ci`.
 - `tsc --noEmit`.
 - `node --test` (empty or smoke at first).
-- Check `sqlite3`, `cloudflared`, Node version.
-- Print: `npm start -- --access local`.
+- Check Node major 24, pi `1.4.0`, cloudflared `2026.10.5`, and
+  `sqlite3`/`rclone`/`tmux`/`gh`/`jq`/`openssl`/`age`/`expect`/`tar`.
+- Print: `npm start -- --access local --data /tmp/pupkeep-dev`.
 - Do not clobber pi settings, `.env`, `~/.pupkeep`.
 - Keep the dev database in `/tmp` or a named volume, never on the 9p workspace
   mount.
@@ -1755,11 +1760,29 @@ that the partner is reached out-of-app is gated on P0-10.
 
 - [ ] **P1-01** Repo scaffold: directories, `README`, `AGENTS`, `LICENSE`,
       `NOTICE`, `.gitignore`, `.env.example`.
-- [ ] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.4.0`, shared package pin (installed **locally** in the image or `postCreate` — never declared in this repo's `.pi/settings.json`, which duplicates the enclosing workspace's extensions and breaks subagent startup), persistent
+- [x] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.4.0`, shared package pin (installed **locally** in the image or `postCreate` — never declared in this repo's `.pi/settings.json`, which duplicates the enclosing workspace's extensions and breaks subagent startup), persistent
       pi volume, `cloudflared`, `sqlite3`, `tmux`, `gh`, `jq`, `rclone`, port
       8787, `postCreate`, `tsc --noEmit`. Verify the
       `javascript-node:24-bookworm` tag and the shared package/pi compatibility
-      at build time.
+      at build time. **Landed:** `.devcontainer/` builds from
+      `mcr.microsoft.com/devcontainers/javascript-node:24-bookworm` (the
+      Dockerfile asserts Node 24), with common-utils/zsh and github-cli
+      features and apt `age expect ca-certificates curl git jq openssl ripgrep
+      rclone sqlite3 tar tmux unzip`; cloudflared amd64 `2026.10.5` is installed
+      from Cloudflare's `.deb` with a pinned SHA-256; pi `1.4.0` is installed
+      globally and asserted. Compose mounts the repo at `/workspace` and the
+      named `pupkeep-pi-config` volume at `/home/vscode/.pi`; `postCreate.sh`
+      seeds `.env` only when absent, runs `npm ci`, `npm run typecheck` and
+      `npm test`, checks the pinned versions/tools, installs the shared
+      `my-agent-setup` at `v1.9.0` into the **personal** pi settings (never this
+      repo's `.pi/settings.json`, and skipped when the project declares it), and
+      prints the start command. Port 8787 is forwarded; the dev database is
+      `/tmp/pupkeep-dev`, never the workspace mount. Seven static guards live in
+      `test/devcontainer.test.ts` (202 tests total). **Not verified:** no Docker
+      daemon in this environment, so the image was not built here; the base tag,
+      pi package, cloudflared release and shared-package tag were checked
+      against their registries, and the files are statically tested. A real
+      `devcontainer build`/rebuild remains a manual or CI step.
 - [x] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
       vendored browser files** with pinned versions/checksums in `NOTICE.md`,
       not server runtime deps; no native modules; `npm ci` and `node --test`

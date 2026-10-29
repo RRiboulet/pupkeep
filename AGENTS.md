@@ -8,6 +8,10 @@ how to pick a task, branch, verify and report. Do not build app code beyond the
 current approved phase.
 
 **Current phase: Phase 1** (repo, devcontainer, host skeleton, vertical slice).
+The devcontainer is `.devcontainer/` (Node 24, pi `1.4.0`, sqlite3/cloudflared/
+rclone/tmux/gh, plus the host tools); `postCreate.sh` runs `npm ci`, typecheck
+and the tests. The shared pi package belongs in that container's personal
+settings, never in this repo's `.pi/settings.json`.
 Phase 0 is closed by the go/no-go in PLAN §2.3, except three device-gated checks
 on the partner's iPhone — P0-03's access ones, P0-08's notification ones — which
 are carried by **P0-10** and do not block Phase 1. App code goes under `src/`,
