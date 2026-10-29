@@ -8,15 +8,15 @@ upstream documentation, not measured here. The partner-device rows are carried
 by **P0-10** (`docs/partner-ios-checklist.md`).
 
 **Verdict:** `termux-notification` delivers a host-local notification, including
-a custom high-importance channel, sound and pinning, and
+a custom channel plus sound and priority at the notification level, and
 `termux-notification-list` proves delivery without anyone watching the screen —
-which also exposed the one real trap: an invalid channel id is **silently
-dropped and still exits 0**. A per-user ntfy topic with 192 bits of entropy
-receives category-only messages published from the phone over ntfy's own HTTPS
-endpoint (~0.4 s per publish, ~0.4 s to a second subscriber), and ntfy's
-`Click`/`Actions` fields point the partner at the **private Tailscale URL**. So
-the partner path carries neither a public app URL nor any care specific. The
-partner phone itself was not exercised; that row keeps P0-08 open.
+which also exposed the one real trap: an invalid channel id is **silently dropped
+and still exits 0**. A per-user ntfy topic with 192 bits of entropy receives
+category-only messages published from the phone over ntfy's own HTTPS endpoint
+(~0.4 s per publish), a second subscriber in this devcontainer received all four
+in 377 ms, and ntfy's `Click`/`Actions` fields point the partner at the **private
+Tailscale URL**. So the partner path carries neither a public app URL nor any care
+specific. The partner's own device was not exercised; that row keeps P0-08 open.
 
 ## Environment
 
@@ -35,12 +35,12 @@ partner phone itself was not exercised; that row keeps P0-08 open.
 | # | Check | Evidence | Result |
 |---|---|---|---|
 | 1 | Host-local notification, default channel | `termux-notification --title --content` exit `0`; visible on the phone (user-confirmed) | **pass** |
-| 2 | Custom notification channel | `termux-notification-channel pupkeep-alerts "Pupkeep alerts"` (positional args) then `--channel pupkeep-alerts`; notification visible (user-confirmed) | **pass** |
+| 2 | Custom notification channel | `termux-notification-channel pupkeep-alerts "Pupkeep alerts"` (positional args) then `--channel pupkeep-alerts`; notification visible (user-confirmed). The channel's **importance is not settable**: the command sends only `--es id` and `--es name` | **pass (custom channel, default importance)** |
 | 3 | Invalid channel id | `--channel pupkeep-ghost` exit `0`, but the notification is absent from `termux-notification-list` — dropped, not posted | **pass (failure mode found)** |
-| 4 | Sound and priority | `--sound --priority high` on the channel notification; visible (user-confirmed) | **pass** |
+| 4 | Sound and priority | `--sound --priority high` posted on that channel; the notification was visible (user-confirmed). Audibility and heads-up presentation were not independently verified | **partial — posted, presentation unverified** |
 | 5 | Pinning and max priority | `--ongoing --priority max --group pupkeep` exit `0`; in the active list. Pinning is not readable from outside | **partial — posted, pinning not observed** |
 | 6 | Tap action | `--action "termux-open-url http://100.x.x.61:8787/today"` exit `0`, present in the active list; the tap itself was not exercised | **partial — posted, tap not exercised** |
-| 7 | Programmatic delivery proof | `termux-notification-list` returns JSON per active API notification: `id`, `tag` (the `--id` value), `title`, `content`, `packageName: com.termux.api`, `when`. No `priority`/`ongoing`/channel fields | **pass (this is the verification hook)** |
+| 7 | Programmatic delivery proof | `termux-notification-list` returns JSON for **every active notification**, not just this app's: the sample below also contained `android` and `com.termux` entries. Fields per entry: `id`, `tag` (the `--id` value), `title`, `content`, `packageName`, `group`, `when`. No `priority`/`ongoing`/channel fields. **Any P4-06 check must filter `packageName === "com.termux.api"` (and its `tag`), or it will read other apps' notification text** | **pass (this is the verification hook, with a filter)** |
 | 8 | Removal | `termux-notification-remove <id>`, **positional**; `--id` fails with `illegal option --` and exit `1` | **pass (API shape recorded)** |
 | 9 | ntfy publish from the phone | four category-only messages, `HTTP/2 200` each from the phone with no app server running | **pass** |
 | 10 | Second-device receipt | 4/4 messages over the ntfy SSE stream, all titles and priorities as sent | **pass** |
@@ -85,14 +85,19 @@ Rules this fixes for P4-05/P4-06:
 
 ## Commands and evidence
 
-Channel creation is positional — the `--id/--name` form prints usage and
-**exits 0 without creating anything**, which is why the first channel test
-produced a dropped notification:
+Channel creation is positional, and its failure mode is exit 0. `$PREFIX/bin/termux-notification-channel`
+accepts only `-d <id>` or `<id> <name>`, sends **only** `--es id`/`--es name`, and
+its `show_usage` function ends in `exit 0` — so a wrong invocation looks like
+success and creates nothing:
 
 ```text
 $ termux-notification-channel pupkeep-alerts "Pupkeep alerts"     # correct
 $ termux-notification-channel --id pupkeep-alerts --name "…"      # prints usage, exit 0, no channel
 ```
+
+Because no importance is sent, `pupkeep-alerts` is a **default-importance**
+channel; `--priority high` is a notification-level flag and does not raise it.
+That is the one thing this note originally got wrong.
 
 Posting, and the drop that a zero exit code hides:
 
@@ -104,23 +109,75 @@ termux-notification --title "P0-08 bad channel" --content "…" \
   --channel pupkeep-ghost --id p0-08-ghost                              # exit 0, NOT in the list
 ```
 
-`termux-notification-list` is the only trustworthy delivery check:
+`termux-notification-list` is the only trustworthy delivery check, and it lists
+every active notification on the device — five were active at the peak, two of
+them belonging to `android` and `com.termux`, and `p0-08-ghost` was absent from
+all of them:
 
 ```json
 {"id":0,"tag":"p0-08-overdue","key":"0|com.termux.api|0|p0-08-overdue|10178",
- "packageName":"com.termux.api","title":"Pupkeep","content":"A meal is overdue"}
+ "group":"","packageName":"com.termux.api","title":"Pupkeep",
+ "content":"A meal is overdue","when":"2026-10-29 09:27:26"}
 ```
 
-Publishing from the phone (no app server running, no account):
+Removal is positional too — `--id` is rejected:
+
+```text
+$ termux-notification-remove p0-08-overdue      # removes it; positional
+tag=p0-08-overdue, p0-08, p0-08-listprobe, p0-08-action, p0-08-ongoing → removed
+active afterwards: 2 (both unrelated: android, com.termux)
+$ termux-notification-remove --id x             # termux-notification-remove: illegal option --  ; exit 1
+```
+
+Publishing from the phone, with no app server running and no account:
 
 ```sh
-pub() { curl -sS -o /dev/null -w "%{http_code}\n" \
+pub() { curl -sS -o /dev/null -w "%{http_code} %{time_total}s\n" \
   -H 'Title: Pupkeep' -H "Priority: $1" -H 'Tags: bell' \
   -d "$2" "https://ntfy.sh/$(cat ~/.pupkeep/ntfy-topic)"; }
-pub high 'A meal is overdue'            # 200
 ```
 
-What a subscriber receives, including the private tap target:
+```text
+fed             "Someone logged a feed"                  200
+feed_overdue    "A meal is overdue"                       200
+appointment     "An appointment reminder"                 200
+approval        "The agent needs your confirmation"       200
+phone publish time_total (3 samples): 0.386s  0.400s  0.371s
+```
+
+A second subscriber — this devcontainer — received all four over SSE, with the
+sent titles and priorities:
+
+```text
+message | Pupkeep | 3 | "Someone logged a feed"
+message | Pupkeep | 4 | "A meal is overdue"
+message | Pupkeep | 3 | "An appointment reminder"
+message | Pupkeep | 4 | "The agent needs your confirmation"
+```
+
+Delivery latency was measured **devcontainer → ntfy.sh → devcontainer: 377 ms**.
+The phone's 0.37–0.40 s is publish time only; no phone-to-phone latency was
+measured.
+
+Priority and tag mapping, and that the message outlives the publisher (a *new*
+subscriber polled the backlog):
+
+```text
+Priority: default → priority 3     Priority: high → 4     Priority: max → 5
+Tags: bell → tags ["bell"]
+?poll=1&since=all  → 5 cached messages, then 11 after later publishes
+```
+
+Topic secrecy is the whole access control:
+
+```text
+topic: crypto.randomBytes(24) → 32-char base64url = 192 bits
+~/.pupkeep 0700, ntfy-topic 0600, 32 bytes
+fresh 192-bit topic, never used → 0 messages; publish to it → 200
+the real topic afterwards → unaffected (6 messages)
+```
+
+The private tap target, as the subscriber sees it:
 
 ```json
 {"event":"message","topic":"<192-bit topic>","title":"Pupkeep",
@@ -156,19 +213,22 @@ What a subscriber receives, including the private tap target:
 ## The partner device is iOS
 
 Upstream-documented, **not measured** — there was no iPhone in this session.
-Everything the Android client does natively is either absent or degraded on iOS,
-and one claim that would have been true on Android is false here:
+The parts this plan depends on are absent or degraded on iOS; the client itself
+is not (the parity table marks subscribe, unsubscribe, delete, tags and dark mode
+as supported). Both upstream documents are old — `FEATURE_PARITY.md` says “last
+updated 2023-05-23”, and `TECHNICAL_LIMITATIONS.md` predates it — so treat every
+row as **as of 2022–2023, confirm in P0-10**, not as current fact:
 
 | Question | Answer | Source |
 |---|---|---|
 | Instant delivery | **not supported on iOS**; foreground services don't exist there, so delivery depends on Apple push plus background tasks | ntfy-ios `FEATURE_PARITY.md` (last updated 2023-05-23), `TECHNICAL_LIMITATIONS.md` |
 | How the App Store app gets pushed | topics on the **default server** are relayed through ntfy.sh's Firebase credentials; that is what makes an ntfy.sh topic arrive without the app running | ntfy-ios `TECHNICAL_LIMITATIONS.md` |
-| **Self-hosted** ntfy on iOS | reliable delivery only with [`upstream_base_url`](https://docs.ntfy.sh/config/#ios-instant-notifications), i.e. the self-hosted server relays to ntfy.sh. Without the relay the app relies on background polling, which the author measured as running *once in a day* — and a poll slower than the 12 h cache loses messages outright | ntfy-ios `TECHNICAL_LIMITATIONS.md` |
-| ntfy `Actions` buttons (`view, Open Today, …`) | **not available** — iOS lists `Click` as “only direct notification click” | `FEATURE_PARITY.md` |
+| **Self-hosted** ntfy on iOS | reliable delivery only with [`upstream_base_url`](https://docs.ntfy.sh/config/#ios-instant-notifications), i.e. the self-hosted server relays to ntfy.sh. Without the relay the app relies on background polling, which the author measured as running *once in a day*; if a poll is slower than the 12 h cache, the upstream doc says notifications “would never make it” | ntfy-ios `TECHNICAL_LIMITATIONS.md` |
+| ntfy `Actions` buttons (`view, Open Today, …`) | **not listed in the parity table**, which records only `Click action` as “only direct notification click”. Read as: no action buttons to rely on — the checklist's N3 confirms it on the device | `FEATURE_PARITY.md` |
 | ntfy priority filtering | not on iOS (“no priority filtering”); the priority is carried, its iOS presentation is unverified | `FEATURE_PARITY.md` |
 | Web Push | needs HTTPS **and** Add to Home Screen **and** iOS 16.4+. Over Tailscale HTTP there is no push on iOS at all | [WebKit: web push for web apps](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/) |
-| Add to Home Screen over HTTP | a web clip with its **own storage and cookie jar** and **no service worker** (insecure context): the partner would log in a second time and gain no offline or push | Apple/WebKit |
-| SSE while backgrounded | iOS suspends background tabs; live updates are foreground-only and the stream reconnects on return | Apple |
+| Add to Home Screen over HTTP | a web clip with **no service worker** (insecure context), so no offline and no push. It is also reported to have its **own storage and cookie jar** — a second sign-in — but the linked WebKit post covers Web Push and A2HS, *not* storage isolation; that half is hearsay until P0-10 observes it | [WebKit: web push](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/) for the SW/HTTPS half; storage isolation **unsourced** |
+| SSE while backgrounded | iOS suspends background tabs, so live updates are foreground-only. Whether an `EventSource` **reconnects by itself** on return is **not** established: the client may have to rebuild it on `visibilitychange`. P0-10's A4 measures exactly this, and the harness reports `opens=` vs `scriptResumes=` | Apple's background execution rules; behaviour **unverified** |
 
 Consequences for the daily path, which are what P0-03's and P0-08's remaining
 rows have to be re-expressed as — the runnable procedure is
@@ -222,9 +282,10 @@ rows have to be re-expressed as — the runnable procedure is
 
 - The partner phone: ntfy app install, permission, notification rendering and
   actual arrival. The receipt row was this devcontainer.
-- **Every iOS row** in the iOS section above is upstream documentation, not a
-  measurement. Nothing here was tested on an iPhone: push timeliness, the
-  `Click` tap, priority presentation, background behaviour.
+- **Every iOS row** in the iOS section above is upstream documentation (2022–
+  2023 vintage), not a measurement. Nothing here was tested on an iPhone: push
+  timeliness, the `Click` tap, priority presentation, background behaviour, and
+  whether a home-screen clip really gets its own cookie jar.
 - Delivery while the host phone is dozing, and the Play-vs-F-Droid ntfy build
   difference in practice.
 - Tapping a notification (`--action` / ntfy `Click`) — posted, not exercised.
@@ -232,3 +293,10 @@ rows have to be re-expressed as — the runnable procedure is
 - A notification posted while the Termux app is killed, then restored.
 - The in-app mirror itself — that is P4-06, not Phase 0.
 - Real Web Push delivery over the quick tunnel — P0-03's remaining row, P4-05.
+
+Since this note was written, P0-10 gained a scratch harness
+(`~/p0-10/server.mjs`, 2026-10-29) and was smoke-tested from the devcontainer:
+`401` unauthenticated, `403` on a wrong invite key, `302` + `HttpOnly` cookie on
+the right one, `/sse` ticking on a 2 s free-running grid, `/status` reporting the
+count. That makes the checklist's A2/A3/A4/N3 runnable in Phase 0 instead of
+deferred to P1 — but none of it has been seen on an iPhone.

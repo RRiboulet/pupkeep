@@ -1203,9 +1203,10 @@ displayed but not pushed in v1.
   nothing over a bookmark.
 - On the Cloudflare quick tunnel (testing), PWA/Web Push works, but the origin
   changes on restart and subscriptions must be renewed.
-- Web Push on iOS needs HTTPS **and** Add to Home Screen **and** iOS 16.4+, so
-  for an iOS partner it is reachable only on the quick tunnel and is a test
-  path, never the daily one; Android Chrome works.
+- Web Push needs HTTPS on every platform. iOS additionally needs Add to Home
+  Screen **and** iOS 16.4+, so for an iOS partner it is reachable only on the
+  quick tunnel and is a test path, never the daily one; Android Chrome works on
+  the HTTPS test path too, not on Tailscale HTTP.
 - Notification click opens the relevant screen.
 - The in-app centre is the source of truth; unread badge.
 - A future native push bridge for the partner (without ntfy) is an upgrade, not
@@ -1566,10 +1567,12 @@ Pi Pocket style, simplified for two caregivers:
       **recommended** per-user ntfy topic for the partner; **category-only**
       payload; confirm it works while the app is served over HTTP (ntfy uses its
       own HTTPS endpoint) and without exposing the app. Partial evidence:
-      `docs/spikes/P0-08-no-domain-notifications.md` (host notification, channel,
-      category-only payloads, second-device receipt and a private Tailscale tap
-      target pass on the host phone; the partner's own receipt is **P0-10**, and
-      the in-app mirror is P4-06, not Phase 0).
+      `docs/spikes/P0-08-no-domain-notifications.md` — on the host phone the
+      notification, custom channel and category-only payloads pass; the publish
+      path was measured from the phone and the receipt on a **second device in
+      this devcontainer** (not a phone), with the tap target observed in the
+      payload but not tapped. The partner's own receipt is **P0-10**, and the
+      in-app mirror is P4-06, not Phase 0.
 - [ ] **P0-09** Decide Go/No-Go for the phone host, access and notification
       split; write the decision into this plan. It may record a single-device
       scope with a documented fallback while the partner path is still P0-10.
