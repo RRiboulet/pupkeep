@@ -9,10 +9,9 @@
 // the archive.
 
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
-import { readdir } from "node:fs/promises";
 import {
   backupDataDir,
   checkBackupTools,
@@ -21,15 +20,15 @@ import {
   writeBackupStatus,
   DEFAULT_OLD_PASSPHRASE_ENV,
   DEFAULT_PASSPHRASE_ENV,
-  isBackupArchive,
+  newestArchive,
   normalizeRemote,
-  parseArchiveTime,
   readPassphrase,
   RETENTION_DAYS,
   rotatePassphrases,
   runCommand,
   stageArchive,
 } from "../src/server/backup.ts";
+import { absolutePath, booleanValue, stringValue } from "../src/server/cli.ts";
 import { createLogger } from "../src/server/log.ts";
 
 const USAGE = `pupkeep backup — one encrypted bundle, local and off-device
@@ -54,36 +53,12 @@ non-zero; a backup with no rclone remote still writes the local archive and
 warns.
 `;
 
-function expandHome(path: string, home: string): string {
-  if (path === "~") return home;
-  if (path.startsWith("~/")) return join(home, path.slice(2));
-  return path;
-}
-
-function absolute(path: string, home: string): string {
-  const expanded = expandHome(path, home);
-  return resolve(home, expanded);
-}
-
-function stringValue(value: unknown, flag: string): string | undefined {
-  if (value === undefined) return undefined;
-  if (Array.isArray(value)) throw new Error(`${flag} may be given only once`);
-  if (typeof value !== "string") throw new Error(`${flag} needs a value`);
-  return value;
-}
-
 function numberValue(value: unknown, flag: string, fallback: number): number {
   const text = stringValue(value, flag);
   if (text === undefined) return fallback;
   const number = Number(text);
   if (!Number.isFinite(number) || number < 0) throw new Error(`${flag} must be a non-negative number`);
   return number;
-}
-
-function booleanValue(value: unknown, flag: string): boolean {
-  if (value === undefined) return false;
-  if (value === true) return true;
-  throw new Error(`${flag} does not take a value`);
 }
 
 export interface BackupCliOptions {
@@ -122,8 +97,11 @@ export function parseBackupArgs(argv: readonly string[], home: string = homedir(
     },
   });
 
-  const dataDir = absolute(stringValue(values.data, "--data") ?? "~/.pupkeep", home);
-  const backupDir = absolute(stringValue(values["backup-dir"], "--backup-dir") ?? join(dataDir, "backups"), home);
+  const dataDir = absolutePath(stringValue(values.data, "--data") ?? "~/.pupkeep", home);
+  const backupDir = absolutePath(
+    stringValue(values["backup-dir"], "--backup-dir") ?? join(dataDir, "backups"),
+    home,
+  );
   const remote = stringValue(values.remote, "--remote");
   const passphraseFile = stringValue(values["passphrase-file"], "--passphrase-file");
   const oldPassphraseFile = stringValue(values["old-passphrase-file"], "--old-passphrase-file");
@@ -136,25 +114,16 @@ export function parseBackupArgs(argv: readonly string[], home: string = homedir(
     backupDir,
     ...(remote !== undefined ? { remote } : {}),
     passphraseEnv: stringValue(values["passphrase-env"], "--passphrase-env") ?? DEFAULT_PASSPHRASE_ENV,
-    ...(passphraseFile !== undefined ? { passphraseFile } : {}),
+    ...(passphraseFile !== undefined ? { passphraseFile: absolutePath(passphraseFile, home) } : {}),
     retentionDays: numberValue(values["retention-days"], "--retention-days", RETENTION_DAYS),
     requireRemote: booleanValue(values["require-remote"], "--require-remote"),
     verify,
     rotate,
     oldPassphraseEnv:
       stringValue(values["old-passphrase-env"], "--old-passphrase-env") ?? DEFAULT_OLD_PASSPHRASE_ENV,
-    ...(oldPassphraseFile !== undefined ? { oldPassphraseFile } : {}),
+    ...(oldPassphraseFile !== undefined ? { oldPassphraseFile: absolutePath(oldPassphraseFile, home) } : {}),
     help: booleanValue(values.help, "--help"),
   };
-}
-
-async function newestArchive(backupDir: string): Promise<string | undefined> {
-  const names = (await readdir(backupDir).catch(() => [])).filter(isBackupArchive);
-  const dated = names
-    .map((name) => ({ name, time: parseArchiveTime(name) }))
-    .filter((entry): entry is { name: string; time: number } => entry.time !== undefined)
-    .sort((a, b) => a.time - b.time);
-  return dated.at(-1)?.name;
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
@@ -179,9 +148,6 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   const previousStatus = isBackupRun ? await readBackupStatus(options.backupDir) : undefined;
   try {
     const remote = options.remote !== undefined ? normalizeRemote(options.remote) : undefined;
-    if (options.requireRemote && !remote) {
-      throw new Error("--require-remote was given but --remote is not configured");
-    }
     if (options.verify) {
       const name = await newestArchive(options.backupDir);
       if (!name) throw new Error(`no backup archives in ${options.backupDir}`);
@@ -222,7 +188,13 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
         newPassphrase,
       });
       for (const warning of result.warnings) logger.warn(warning);
-      process.stdout.write(`rotated ${result.rotated.length} archive(s) to the new passphrase\n`);
+      process.stdout.write(
+        `rotated ${result.rotated.length} archive(s) to the new passphrase` +
+          (result.alreadyRotated.length > 0
+            ? `; ${result.alreadyRotated.length} were already rotated by an earlier run`
+            : "") +
+          "\n",
+      );
       process.stdout.write(
         "Store the new passphrase off the backup host and destroy the old copy; " +
           "the old passphrase no longer decrypts these archives.\n",

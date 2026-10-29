@@ -128,9 +128,16 @@ export function scaffoldRequestHandler(req: IncomingMessage, res: ServerResponse
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
-  if (req.method === "GET" && (req.url === "/healthz" || req.url === "/health")) {
+  let pathname = "";
+  try {
+    // A probe may append a query string; compare the path, not the raw URL.
+    pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  } catch {
+    // A malformed request target falls through to the 503.
+  }
+  if ((req.method === "GET" || req.method === "HEAD") && (pathname === "/healthz" || pathname === "/health")) {
     res.statusCode = 200;
-    res.end('{"ok":true}\n');
+    res.end(req.method === "HEAD" ? undefined : '{"ok":true}\n');
     return;
   }
   res.statusCode = 503;
@@ -287,7 +294,16 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         logger.error("the harness did not close cleanly", { error });
         closeResult = "timeout";
       }
-      await releaseQuietly(lock, logger);
+      // A close that timed out means task code may still be running and the
+      // database may still be open. Releasing the lock before this process
+      // exits would let a new server open the same file while the old one can
+      // still write. Keep the lock; the next start sees a dead pid and clears
+      // it, which is the same takeover a crash leaves behind.
+      if (closeResult === "closed") {
+        await releaseQuietly(lock, logger);
+      } else {
+        logger.warn("harness close did not finish; keeping the server lock until this process exits");
+      }
 
       const end: AppEnd =
         reason === "failed"
@@ -363,8 +379,8 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       logger.info("listening", { url: listener.url });
     } catch (error) {
       logger.error("could not bind the HTTP listener", { error });
-      await closeHarness(opened, closeTimeoutMs).catch(() => undefined);
-      await releaseQuietly(lock, logger);
+      const closeResult = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
+      if (closeResult === "closed") await releaseQuietly(lock, logger);
       return {
         ok: false,
         code: EXIT_OPEN_FAILED,
@@ -380,8 +396,18 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     close: () => shutdown("closed"),
     parkedTasks: () => [...parked.values()],
     retryTask: async (id: TaskId): Promise<void> => {
-      await opened.harness.retryTask(id, context);
-      parked.delete(String(id));
+      const key = String(id);
+      const previous = parked.get(key);
+      // Remove before the call, not after: `retryTask` can park the task again
+      // and emit `task_parked`, which re-inserts it. Deleting afterwards would
+      // erase exactly that fresh report.
+      parked.delete(key);
+      try {
+        await opened.harness.retryTask(id, context);
+      } catch (error) {
+        if (previous) parked.set(key, previous);
+        throw error;
+      }
       opened.harness.resume();
     },
   };

@@ -26,13 +26,15 @@ import {
   remotePath,
   restoreDataDir,
   rotatePassphrases,
+  RotationError,
   runCommand,
   stageArchive,
   validatePassphrase,
   type ArchiveCipher,
   type CommandRunner,
 } from "../src/server/backup.ts";
-import { main as backupMain } from "../scripts/backup.ts";
+import { main as backupMain, parseBackupArgs } from "../scripts/backup.ts";
+import { parseRestoreArgs } from "../scripts/restore.ts";
 import { openHarness } from "../src/server/harness.ts";
 import { acquireLock, SERVER_LOCK_FILE } from "../src/server/lock.ts";
 
@@ -187,6 +189,21 @@ test("status records the last success and the scrubbed last failure", () => {
   assert.equal(failed.lastArchive, previous.lastArchive);
   assert.match(failed.lastError ?? "", /a token-shaped value \[redacted\]/, "an opaque token is scrubbed, the cause survives");
   assert.equal(parseBackupStatus({ schemaVersion: 2 }), undefined);
+});
+
+test("the CLI expands ~ for every path, including the passphrase file", () => {
+  const backup = parseBackupArgs(
+    ["--data", "~/d", "--passphrase-file", "~/secret", "--old-passphrase-file", "~/old"],
+    "/home/owner",
+  );
+  assert.equal(backup.dataDir, "/home/owner/d");
+  assert.equal(backup.backupDir, "/home/owner/d/backups");
+  assert.equal(backup.passphraseFile, "/home/owner/secret");
+  assert.equal(backup.oldPassphraseFile, "/home/owner/old");
+
+  const restore = parseRestoreArgs(["--data", "~/d", "--passphrase-file", "~/secret"], "/home/owner");
+  assert.equal(restore.dataDir, "/home/owner/d");
+  assert.equal(restore.passphraseFile, "/home/owner/secret");
 });
 
 test("the CLI writes a failed attempt to the status file", { skip: !ageAvailable }, async () => {
@@ -410,11 +427,12 @@ test("restore --force moves the old state aside, drops stale wal/shm, and keeps 
       /pass --force/,
     );
 
+    const now = new Date("2026-10-29T12:04:00Z");
     const restored = await restoreDataDir(
-      { archive: result.archive, dataDir: target, passphrase: PASSPHRASE, force: true },
+      { archive: result.archive, dataDir: target, passphrase: PASSPHRASE, force: true, now },
       { cipher: identityCipher },
     );
-    assert.ok(restored.movedAside);
+    assert.match(restored.movedAside ?? "", /restore-backup-20261029T120400Z-\d+$/);
     assert.equal(await readFile(join(restored.movedAside!, "config.json"), "utf8"), '{"old":true}\n');
     assert.equal(await readFile(join(restored.movedAside!, "pupkeep.sqlite-wal"), "utf8"), "stale\n");
     await assert.rejects(stat(join(target, "pupkeep.sqlite-wal")), /ENOENT/);
@@ -425,6 +443,55 @@ test("restore --force moves the old state aside, drops stale wal/shm, and keeps 
     await source.close();
     await rm(source.dir, { recursive: true, force: true });
     await rm(target, { recursive: true, force: true });
+  }
+});
+
+test("rotation resumes after a partial failure instead of wedging on a new-key archive", async () => {
+  const source = await seedDataDir("rotate-resume");
+  try {
+    const first = await backupDataDir(
+      { dataDir: source.dir, passphrase: PASSPHRASE, now: new Date("2026-10-29T12:08:00Z") },
+      { cipher: keyedCipher },
+    );
+    const second = await backupDataDir(
+      { dataDir: source.dir, passphrase: PASSPHRASE, now: new Date("2026-10-29T12:09:00Z") },
+      { cipher: keyedCipher },
+    );
+    const next = "another-correct-horse-battery";
+    const backupDir = join(source.dir, "backups");
+
+    let encrypts = 0;
+    const flaky: ArchiveCipher = {
+      encrypt: async (input, output, passphrase) => {
+        encrypts += 1;
+        if (encrypts === 2) throw new Error("disk full");
+        return keyedCipher.encrypt(input, output, passphrase);
+      },
+      decrypt: keyedCipher.decrypt,
+    };
+    await assert.rejects(
+      rotatePassphrases(
+        { backupDir, oldPassphrase: PASSPHRASE, newPassphrase: next },
+        { cipher: flaky },
+      ),
+      (error: unknown) => error instanceof RotationError && error.rotated.length === 1,
+    );
+
+    // The first archive is now under the new key; a rerun must skip it rather
+    // than failing to decrypt it with the old passphrase.
+    const resumed = await rotatePassphrases(
+      { backupDir, oldPassphrase: PASSPHRASE, newPassphrase: next },
+      { cipher: keyedCipher },
+    );
+    assert.equal(resumed.alreadyRotated.length, 1);
+    assert.equal(resumed.rotated.length, 1);
+    for (const path of [first.archive, second.archive]) {
+      const staged = await stageArchive(path, next, { cipher: keyedCipher });
+      await staged.cleanup();
+    }
+  } finally {
+    await source.close();
+    await rm(source.dir, { recursive: true, force: true });
   }
 });
 

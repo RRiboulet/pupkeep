@@ -9,19 +9,18 @@
 // `restore-backup-<timestamp>/` first, so a mistaken restore is recoverable.
 
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import {
   checkBackupTools,
   DEFAULT_PASSPHRASE_ENV,
-  isBackupArchive,
-  parseArchiveTime,
+  newestArchive,
   readPassphrase,
   restoreDataDir,
   runCommand,
 } from "../src/server/backup.ts";
+import { absolutePath, booleanValue, stringValue } from "../src/server/cli.ts";
 import { createLogger } from "../src/server/log.ts";
 
 const USAGE = `pupkeep restore — replace a data directory from an encrypted backup
@@ -38,29 +37,6 @@ Usage: npm run restore -- [options]
 The server must be stopped: a live launcher.pid or server.pid is refused.
 secrets.json is not in the bundle; provider keys are re-entered.
 `;
-
-function expandHome(path: string, home: string): string {
-  if (path === "~") return home;
-  if (path.startsWith("~/")) return join(home, path.slice(2));
-  return path;
-}
-
-function absolute(path: string, home: string): string {
-  return resolve(home, expandHome(path, home));
-}
-
-function stringValue(value: unknown, flag: string): string | undefined {
-  if (value === undefined) return undefined;
-  if (Array.isArray(value)) throw new Error(`${flag} may be given only once`);
-  if (typeof value !== "string") throw new Error(`${flag} needs a value`);
-  return value;
-}
-
-function booleanValue(value: unknown, flag: string): boolean {
-  if (value === undefined) return false;
-  if (value === true) return true;
-  throw new Error(`${flag} does not take a value`);
-}
 
 export interface RestoreCliOptions {
   dataDir: string;
@@ -88,22 +64,13 @@ export function parseRestoreArgs(argv: readonly string[], home: string = homedir
   const archive = stringValue(values.archive, "--archive");
   const passphraseFile = stringValue(values["passphrase-file"], "--passphrase-file");
   return {
-    dataDir: absolute(stringValue(values.data, "--data") ?? "~/.pupkeep", home),
-    ...(archive !== undefined ? { archive: absolute(archive, home) } : {}),
+    dataDir: absolutePath(stringValue(values.data, "--data") ?? "~/.pupkeep", home),
+    ...(archive !== undefined ? { archive: absolutePath(archive, home) } : {}),
     passphraseEnv: stringValue(values["passphrase-env"], "--passphrase-env") ?? DEFAULT_PASSPHRASE_ENV,
-    ...(passphraseFile !== undefined ? { passphraseFile } : {}),
+    ...(passphraseFile !== undefined ? { passphraseFile: absolutePath(passphraseFile, home) } : {}),
     force: booleanValue(values.force, "--force"),
     help: booleanValue(values.help, "--help"),
   };
-}
-
-async function newestArchive(backupDir: string): Promise<string | undefined> {
-  const names = (await readdir(backupDir).catch(() => [])).filter(isBackupArchive);
-  return names
-    .map((name) => ({ name, time: parseArchiveTime(name) }))
-    .filter((entry): entry is { name: string; time: number } => entry.time !== undefined)
-    .sort((a, b) => a.time - b.time)
-    .at(-1)?.name;
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {

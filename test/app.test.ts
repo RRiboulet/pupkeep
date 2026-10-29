@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Harness, HarnessInspection, SessionEnd, TaskId } from "@earendil-works/pi-durable";
+import type { Harness, HarnessInspection, ReportInfo, SessionEnd, TaskId } from "@earendil-works/pi-durable";
 import { startApp, type AppDeps, type ParkedTask } from "../src/server/app.ts";
 import { main, parseServerEnvironment } from "../src/server/main.ts";
 import { createLogger } from "../src/server/log.ts";
@@ -91,6 +91,12 @@ test("the server binds a real port, answers /healthz, and refuses everything els
       const health = await fetch(`${result.app.url}/healthz`);
       assert.equal(health.status, 200);
       assert.deepEqual(await health.json(), { ok: true });
+
+      const query = await fetch(`${result.app.url}/healthz?probe=1`);
+      assert.equal(query.status, 200);
+      const head = await fetch(`${result.app.url}/healthz`, { method: "HEAD" });
+      assert.equal(head.status, 200);
+      assert.equal(await head.text(), "");
 
       const other = await fetch(`${result.app.url}/api/today`);
       assert.equal(other.status, 503);
@@ -193,7 +199,54 @@ test("a close that a stuck task never finishes is capped and exits non-zero", as
     const stopped = await result.app.close();
     assert.deepEqual(stopped, { code: 1, reason: "close_timeout" });
     assert.ok(Date.now() - started < 2_000, "the close timeout must bound the wait");
-    assert.equal(await isMissing(lockPath(dir, SERVER_LOCK_FILE)), true);
+    // The harness may still be writing, so the lock must survive until the
+    // process actually exits; the next start clears the dead pid.
+    assert.equal(await isMissing(lockPath(dir, SERVER_LOCK_FILE)), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a retry that parks the task again leaves it visible", async () => {
+  const dir = await tempDir();
+  const parked = { id: 2 as TaskId, kind: "app.reminder" };
+  let report: ((error: unknown, info: ReportInfo) => void) | undefined;
+  const harness: FakeHarness = {
+    closed: new Promise<SessionEnd>(() => undefined),
+    resume: () => undefined,
+    close: async () => undefined,
+    inspect: async () =>
+      ({
+        scheduling: "running",
+        tasks: [{ record: parked, state: { kind: "blocked", reason: "restart_limit" } }],
+        submissions: [],
+      }) as unknown as HarnessInspection,
+    retryTask: async (id: TaskId) => {
+      report?.(new Error("parked again"), {
+        type: "task_parked",
+        task: { id, kind: "app.reminder", conversationId: 1 },
+      } as unknown as ReportInfo);
+    },
+  };
+  try {
+    const result = await startApp(
+      { dataDir: dir, host: "127.0.0.1", port: 0 },
+      quietDeps({
+        openHarness: async (options) => {
+          report = options.onReport;
+          return fakeOpened(harness);
+        },
+      }),
+    );
+    assert.ok(result.ok);
+    assert.deepEqual(result.app.parkedTasks().map((task: ParkedTask) => task.id), [2]);
+    await result.app.retryTask(2 as TaskId);
+    assert.deepEqual(
+      result.app.parkedTasks().map((task: ParkedTask) => task.id),
+      [2],
+      "a park reported during the retry must not be deleted with the old one",
+    );
+    await result.app.close();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

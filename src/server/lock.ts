@@ -109,6 +109,12 @@ async function readOwner(path: string): Promise<ReadOwner> {
  * A stale file — pid gone — is replaced rather than treated as an error: a phone
  * that lost power or had Termux killed leaves one behind, and refusing to boot
  * after a normal crash would be worse than the race it protects against.
+ *
+ * That takeover is read → unlink → exclusive create, not a compare-and-swap.
+ * Two *simultaneous manual* starts on the same stale lock can in principle both
+ * clear it; the supervisor spawns one child at a time, and `flock` would need a
+ * native module the phone runtime forbids (PLAN §3.2). This is the accepted
+ * Phase 1 residual, not a silent claim of atomicity.
  */
 export async function acquireLock(
   dataDir: string,
@@ -144,20 +150,21 @@ export async function acquireLock(
 
       const holder = read.owner;
       if (holder && isAlive(holder.pid)) {
-        // Alive — but is it *our* predecessor, or a recycled pid? Compare start
-        // ticks when both sides have them. The same pid is not a licence to take
-        // the lock: this process already owning it (two servers in one process,
-        // an accidental double acquire) is exactly what the lock refuses.
+        // Alive — but is it the recorded owner, or has the pid been recycled?
+        // The start ticks are the only evidence that distinguishes them. When
+        // both sides have ticks and they differ, the pid now belongs to another
+        // process: the lock is stale whether that pid is ours or a stranger's.
+        // When either side cannot tell, stay conservative and refuse.
         const currentTicks = await processStartTicks(holder.pid);
-        const sameProcess =
-          holder.startTicks === undefined || currentTicks === undefined || holder.startTicks === currentTicks;
-        if (holder.pid !== pid || sameProcess) {
+        const canTell = holder.startTicks !== undefined && currentTicks !== undefined;
+        const sameProcess = !canTell || holder.startTicks === currentTicks;
+        if (sameProcess) {
           return { ok: false, reason: "held", path, pid: holder.pid, alive: true };
         }
       }
 
-      // Stale, a recycled pid, or our own pid from a previous incarnation (same
-      // number, different start ticks): clear and retry once.
+      // Stale: the pid is gone, or it was recycled (same number, different
+      // start ticks). Clear and retry once.
       try {
         await unlink(path);
       } catch {

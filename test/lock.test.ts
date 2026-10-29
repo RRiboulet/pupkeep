@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +41,24 @@ test("a second instance is refused and told who holds it", async () => {
   if (second.reason === "held") assert.equal(second.pid, process.pid);
 
   await first.lock.release();
+});
+
+test("a foreign live pid with different start ticks is stale, not a live holder", async () => {
+  const dir = await tempDataDir();
+  const child = spawn("sleep", ["30"], { stdio: "ignore" });
+  try {
+    assert.ok(child.pid);
+    // The pid is alive, but its start ticks cannot be this value. This is what
+    // a recycled pid looks like; inspectLock and acquireLock must agree.
+    await writeFile(lockPath(dir), `${child.pid} 999999999999 2026-10-29T00:00:00.000Z\n`, "utf8");
+    assert.deepEqual(await inspectLock(dir), { state: "free" });
+    const result = await acquireLock(dir, process.pid);
+    assert.ok(result.ok, "a recycled foreign pid must not block startup");
+    await result.lock.release();
+  } finally {
+    child.kill("SIGKILL");
+    await once(child, "exit").catch(() => undefined);
+  }
 });
 
 test("a stale lock left by a dead process is replaced, not fatal", async () => {

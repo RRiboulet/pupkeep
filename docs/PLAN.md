@@ -262,7 +262,11 @@ Pi Durable explicitly has no cross-process locking. Pupkeep enforces:
   the launcher also refuses to start when it sees a live `server.pid`.
   **P1-05 owns `src/server/lock.ts`; P1-04 calls it; P1-07's server takes
   `server.pid`** — this is the single statement of that ownership, and other
-  documents point here rather than repeating it;
+  documents point here rather than repeating it. A stale-lock takeover is
+  read → unlink → exclusive create, not a compare-and-swap: two *simultaneous
+  manual* starts on one stale lock can in principle both clear it. The
+  supervisor starts one child at a time, and `flock` would need a native module
+  the phone runtime forbids; this is the accepted Phase 1 residual;
 - one SQLite file;
 - one Harness;
 - no replicas, no serverless functions, no multi-instance deployment.
@@ -719,7 +723,11 @@ outside this commit path; they are not care state.
 - A care HTTP response is sent **after** the commit resolves. Acknowledged means
   the care commit is durable. On failure, nothing is written.
 - `harness.closed` with `reason:"failed"` exits the process non-zero; close is
-  capped by a timeout so a stuck task cannot hold the port forever.
+  capped by a timeout so a stuck task cannot hold the port forever. A close
+  that times out **keeps** `server.pid` until the process exits: task code may
+  still be running, and freeing the lock before exit would let a new server
+  open the database while the old one can still write. The next start clears
+  the dead pid, exactly as after a crash.
 
 ### 7.3 Idempotency
 
@@ -814,6 +822,17 @@ Procedure:
 - A failed backup is a visible app warning, not a silent log line: the job
   exits non-zero, logs a scrubbed line, and writes `backups/status.json`; P4-05's
   notification centre reads that file.
+- Rotation is resumable: a run that replaced some archives before failing is
+  finished by re-running with the same old/new passphrases; archives already
+  under the new key are skipped, and the remote upload covers both sets. A
+  restore interrupted after moving the old state aside leaves it in
+  `restore-backup-<timestamp>-<pid>/`; the error names that directory, and
+  P5-02's drill checks the interrupted case.
+- The passphrase is passed to the `age` child through `expect`'s environment
+  for the duration of the prompt. That is readable by same-uid processes
+  (`/proc/<pid>/environ`), which is acceptable on the single-user phone; a
+  multi-tenant VPS deployment should use an isolated user or an external
+  passphrase source instead.
 - Restore drill on a clean Termux install and the Docker/VPS fallback is a
   release gate.
 
@@ -1461,7 +1480,10 @@ Pi Pocket style, simplified for two caregivers:
   Rate limits key off `CF-Connecting-IP` behind the tunnel, not the tunnel’s
   loopback address.
 - Login/invite attempts and SSE/long-poll connections are rate-limited; SSE and
-  all API routes require auth. The static shell may be public.
+  all API routes require auth. The static shell may be public. The P1-07
+  scaffold's `/healthz` is an unauthenticated liveness endpoint returning only
+  `{"ok":true}` (no version, counts or paths); P1-09/P1-10 decide whether it
+  stays public or joins the authz matrix.
 - Security headers: CSP `default-src 'self'`, `X-Content-Type-Options:
   nosniff`, `Referrer-Policy: no-referrer`; the service worker caches the static
   shell only, never API/SSE responses.
@@ -1853,13 +1875,25 @@ that the partner is reached out-of-app is gated on P0-10.
       from `PUPKEEP_BACKUP_PASSPHRASE` or a `--passphrase-file` outside the data
       and backup directories; an unattended scheduled run needs an external
       source for it, because the job deliberately has no on-host default.
-      **Verified:** 191 tests (32 new), typecheck clean; a real SIGKILLed child
-      reopens its committed document; a restored in-progress `pi.generation`
-      completes after `resume()` (closing P0-07's limitation); real `age` +
-      `expect` encrypt/decrypt. **Not verified:** the `rclone` target is not
-      configured in this environment (upload, retention and rotation are tested
-      with a fake runner), and power-loss / clean-Termux restore stay
-      P5-01/P5-02.
+      **Reviewed and repaired:** the adversarial review found that
+      `acquireLock` returned "held" for a live *recycled, unrelated* pid whose
+      start ticks differed (while `inspectLock` said free), that a partial
+      passphrase rotation could not be resumed, and that `bin/pupkeep.js` did
+      not wire `onFatal`; all three are fixed, with a foreign-recycled-pid test,
+      a resumable rotation and directory fsync, and a non-zero give-up exit.
+      Also fixed: a close timeout no longer releases `server.pid` before the
+      process exits; `/healthz` accepts `?query` and `HEAD`; a retry that
+      re-parks a task keeps it visible; the restore aside directory names the
+      full year and its path is in the error; the backup/restore CLIs share one
+      `~`/path parser (and `--passphrase-file` expands like every other path).
+      The stale-lock takeover race is documented as the accepted residual
+      (§3.2). **Verified:** 195 tests (36 new), typecheck clean; a real
+      SIGKILLed child reopens its committed document; a restored in-progress
+      `pi.generation` completes after `resume()` (closing P0-07's limitation);
+      real `age` + `expect` encrypt/decrypt. **Not verified:** the `rclone`
+      target is not configured in this environment (upload, retention and
+      rotation are tested with a fake runner), and power-loss / clean-Termux
+      restore stay P5-01/P5-02.
 - [ ] **P1-08** Session docs: `app.household`, `app.puppy`, `app.activity`,
       `app.commands`, with initial values, `schemaVersion` migration policy,
       `checkpointWhen`. Consumes P1-05's reconciliation plan (which now carries a

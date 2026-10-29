@@ -273,6 +273,13 @@ export function isBackupArchive(name: string): boolean {
   return ARCHIVE.test(name);
 }
 
+/** `20261029T163000Z` from an archive name, for operational directories. */
+function archiveStamp(now: Date): string {
+  return backupArchiveName(now)
+    .replace(/^pupkeep-/, "")
+    .replace(/\.tar\.gz\.age$/, "");
+}
+
 export function parseArchiveTime(name: string): number | undefined {
   const match = ARCHIVE.exec(name);
   if (!match) return undefined;
@@ -400,6 +407,19 @@ export function failureStatus(previous: BackupStatus | undefined, error: unknown
     // app, and an error can carry a path or an opaque token.
     lastError: scrub(error instanceof Error ? error.message : String(error)),
   };
+}
+
+/**
+ * The newest archive in a directory, by the timestamp in its name. Used by
+ * `--verify` and by a restore that is not given an explicit `--archive`.
+ */
+export async function newestArchive(backupDir: string): Promise<string | undefined> {
+  const names = (await readdir(backupDir).catch(() => [])).filter(isBackupArchive);
+  return names
+    .map((name) => ({ name, time: parseArchiveTime(name) }))
+    .filter((entry): entry is { name: string; time: number } => entry.time !== undefined)
+    .sort((a, b) => a.time - b.time)
+    .at(-1)?.name;
 }
 
 // --- rclone ----------------------------------------------------------------
@@ -945,6 +965,7 @@ export async function restoreDataDir(
   const restoreLock: LockHandle = acquired.lock;
 
   let staged: StagedArchive | undefined;
+  let movedAside: string | undefined;
   try {
     staged = await stageArchive(options.archive, options.passphrase, { run, cipher });
     const present: string[] = [];
@@ -958,9 +979,8 @@ export async function restoreDataDir(
       );
     }
 
-    let movedAside: string | undefined;
     if (hasData) {
-      movedAside = join(dataDir, `restore-backup-${backupArchiveName(now).slice(9, 24)}`);
+      movedAside = join(dataDir, `restore-backup-${archiveStamp(now)}-${process.pid}`);
       await mkdir(movedAside, { mode: 0o700 });
       for (const name of present) {
         await rename(join(dataDir, name), join(movedAside, name));
@@ -997,6 +1017,14 @@ export async function restoreDataDir(
       seq: staged.seq,
       secretsPresent: await exists(join(dataDir, "secrets.json")),
     };
+  } catch (error) {
+    // A failure after the move-aside leaves the old state recoverable but the
+    // directory half-replaced. Say where the old files are; a SIGKILL cannot be
+    // caught, so P5-02's drill still has to check the directory.
+    if (movedAside !== undefined) {
+      throw new Error(`${(error as Error).message}; the previous files are in ${movedAside}`);
+    }
+    throw error;
   } finally {
     await staged?.cleanup();
     await restoreLock.release();
@@ -1014,7 +1042,10 @@ export interface RotateOptions {
 }
 
 export interface RotateResult {
+  /** Archives re-encrypted by this run. */
   rotated: string[];
+  /** Archives a previous, interrupted run had already rotated. */
+  alreadyRotated: string[];
   warnings: string[];
 }
 
@@ -1063,9 +1094,23 @@ export async function rotatePassphrases(
   }
 
   const rotated: string[] = [];
+  const alreadyRotated: string[] = [];
   const warnings: string[] = [];
   for (const name of local) {
     const archive = join(backupDir, name);
+
+    // Rotation must be resumable: a run that failed after replacing some
+    // archives must not wedge on the ones it already changed. A successful
+    // stage under the new passphrase is proof; try it first and skip.
+    try {
+      const check = await stageArchive(archive, options.newPassphrase, { run, cipher });
+      await check.cleanup();
+      alreadyRotated.push(name);
+      continue;
+    } catch {
+      // Not under the new key (or corrupt); the old-key attempt below reports it.
+    }
+
     let staged: StagedArchive | undefined;
     let work: string | undefined;
     try {
@@ -1084,11 +1129,14 @@ export async function rotatePassphrases(
 
       await rename(tempArchive, archive);
       await fsyncFile(archive);
+      await fsyncDirectory(backupDir);
       rotated.push(name);
     } catch (error) {
       throw new RotationError(
-        `rotation stopped at ${name}: ${(error as Error).message}; archives already rotated: ${rotated.join(", ") || "none"}`,
-        rotated,
+        `rotation stopped at ${name}: ${(error as Error).message}; ` +
+          `archives already under the new passphrase: ${[...alreadyRotated, ...rotated].join(", ") || "none"}; ` +
+          "re-run --rotate with both passphrases to finish",
+        [...alreadyRotated, ...rotated],
       );
     } finally {
       await staged?.cleanup();
@@ -1098,16 +1146,19 @@ export async function rotatePassphrases(
   }
 
   if (remote) {
-    for (const name of rotated) {
+    // Upload everything under the new key, including archives a previous run
+    // rotated locally but may not have uploaded before failing.
+    for (const name of [...alreadyRotated, ...rotated]) {
       const result = await run("rclone", ["copyto", join(backupDir, name), remotePath(remote, name)]);
       if (result.code !== 0) {
         throw new RotationError(
-          `rclone could not upload the rotated ${name} (exit ${result.code}); the local archive is rotated, the remote copy is not`,
-          rotated,
+          `rclone could not upload the rotated ${name} (exit ${result.code}); the local archive is rotated, the remote copy is not; ` +
+            "re-run --rotate with both passphrases to finish",
+          [...alreadyRotated, ...rotated],
         );
       }
     }
   }
 
-  return { rotated, warnings };
+  return { rotated, alreadyRotated, warnings };
 }

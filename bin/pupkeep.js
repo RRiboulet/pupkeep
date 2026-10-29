@@ -27,6 +27,11 @@ const launcher = createLauncher(options, {
     command: process.execPath,
     args: [fileURLToPath(new URL("./server.js", import.meta.url))],
   },
+  // A supervisor that gave up must look failed to whatever supervises *it*
+  // (termux-services, a boot script, systemd): exiting 0 after the server
+  // crash-looped is indistinguishable from a clean stop. The launcher has
+  // already stopped its children and released the lock when this runs.
+  onFatal: () => process.exit(1),
   termux: process.env.PUPKEEP_TERMUX === "1",
 });
 
@@ -45,4 +50,6 @@ if (!result.ok) {
 }
 
 const urls = launcher.urls();
-if (urls.display) console.error(`pupkeep: serving on ${urls.display}`);
+// The server child is spawned, not necessarily bound yet; P1-04 has no
+// readiness handshake, so do not claim it is serving.
+if (urls.display) console.error(`pupkeep: starting on ${urls.display}`);
