@@ -150,18 +150,18 @@ test("secrets hold provider keys and nothing else", () => {
   assert.equal(parseSecrets({ schemaVersion: 1, providerKeys: { x: 5 } }), undefined);
 });
 
-// --- reconciliation: config wins, and the dead stay dead --------------------
+// --- reconciliation: config seeds, the household owns names, the dead stay dead ---
 
 test("a member in config with no profile gets one", () => {
   const config: AppConfig = { ...emptyConfig(), members: [member({ id: "m1" })] };
   const plan = reconcileMembers(config, []);
-  assert.deepEqual(plan.createProfiles, [{ memberId: "m1", displayName: "Ronan" }]);
+  assert.deepEqual(plan.createProfiles, [{ id: "m1", name: "Ronan" }]);
 });
 
 test("a profile whose member is gone from config is removed", () => {
   const config: AppConfig = { ...emptyConfig(), members: [] };
-  const plan = reconcileMembers(config, [{ memberId: "ghost", displayName: "Ghost" }]);
-  assert.deepEqual(plan.removeProfiles, [{ memberId: "ghost", displayName: "Ghost", reason: "missing" }]);
+  const plan = reconcileMembers(config, [{ id: "ghost", name: "Ghost" }]);
+  assert.deepEqual(plan.removeProfiles, [{ id: "ghost", name: "Ghost", reason: "missing" }]);
   assert.deepEqual(plan.createProfiles, []);
 });
 
@@ -170,26 +170,27 @@ test("a removed member is not resurrected from a stale profile", () => {
     ...emptyConfig(),
     members: [member({ id: "gone", removedAt: "2026-10-29T11:00:00.000Z" })],
   };
-  const plan = reconcileMembers(config, [{ memberId: "gone", displayName: "Ronan" }]);
+  const plan = reconcileMembers(config, [{ id: "gone", name: "Ronan" }]);
 
   assert.deepEqual(
     plan.removeProfiles,
-    [{ memberId: "gone", displayName: "Ronan", reason: "removed" }],
+    [{ id: "gone", name: "Ronan", reason: "removed" }],
     "the profile goes, the auth record stays removed",
   );
   assert.deepEqual(plan.createProfiles, [], "and boot must not recreate either");
 });
 
-test("config display name wins over a drifted profile", () => {
+test("a household rename is not clobbered by the config seed", () => {
   const config: AppConfig = { ...emptyConfig(), members: [member({ id: "m1", displayName: "Ronan" })] };
-  const plan = reconcileMembers(config, [{ memberId: "m1", displayName: "R." }]);
-  assert.deepEqual(plan.updateProfiles, [{ memberId: "m1", from: "R.", to: "Ronan" }]);
+  const plan = reconcileMembers(config, [{ id: "m1", name: "R." }]);
+  assert.deepEqual(plan.nameDrift, [{ id: "m1", profileName: "R.", configName: "Ronan" }]);
+  assert.deepEqual(plan.createProfiles, [], "the profile already exists; no seed write");
 });
 
 test("a member who is up to date causes no work", () => {
   const config: AppConfig = { ...emptyConfig(), members: [member({ id: "m1" })] };
-  const plan = reconcileMembers(config, [{ memberId: "m1", displayName: "Ronan" }]);
-  assert.deepEqual(plan, { createProfiles: [], updateProfiles: [], removeProfiles: [] });
+  const plan = reconcileMembers(config, [{ id: "m1", name: "Ronan" }]);
+  assert.deepEqual(plan, { createProfiles: [], nameDrift: [], removeProfiles: [] });
 });
 
 // --- files on disk ----------------------------------------------------------

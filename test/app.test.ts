@@ -11,6 +11,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Harness, HarnessInspection, ReportInfo, SessionEnd, TaskId } from "@earendil-works/pi-durable";
 import { startApp, type AppDeps, type ParkedTask } from "../src/server/app.ts";
 import { main, parseServerEnvironment } from "../src/server/main.ts";
+import { dataStores } from "../src/server/config.ts";
 import { createLogger } from "../src/server/log.ts";
 import { lockPath, SERVER_LOCK_FILE } from "../src/server/lock.ts";
 import type { OpenedHarness } from "../src/server/harness.ts";
@@ -18,6 +19,26 @@ import type { OpenedHarness } from "../src/server/harness.ts";
 async function tempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "pupkeep-app-"));
 }
+
+/** A minimal valid auth authority: the launcher would have minted this owner. */
+async function seedConfig(dir: string): Promise<void> {
+  const stores = dataStores(dir);
+  await stores.config.ensure();
+  await stores.config.update((config) => ({
+    ...config,
+    members: [
+      {
+        id: "owner",
+        role: "owner",
+        displayName: "Owner",
+        createdAt: "2026-10-29T10:00:00.000Z",
+        sessions: [],
+      },
+    ],
+  }));
+}
+
+const noBootstrap = { bootstrap: async () => undefined };
 
 function quietDeps(overrides: AppDeps = {}): AppDeps {
   return {
@@ -63,6 +84,7 @@ test("umask is set before the data directory or database is touched", async () =
   const dir = await tempDir();
   const order: string[] = [];
   try {
+    await seedConfig(dir);
     const result = await startApp(
       { dataDir: dir, host: "127.0.0.1", port: 0 },
       quietDeps({
@@ -84,6 +106,7 @@ test("umask is set before the data directory or database is touched", async () =
 test("the server binds a real port, answers /healthz, and refuses everything else", async () => {
   const dir = await tempDir();
   try {
+    await seedConfig(dir);
     const result = await startApp({ dataDir: dir, host: "127.0.0.1", port: 0 }, quietDeps());
     assert.ok(result.ok);
     try {
@@ -114,6 +137,7 @@ test("the server binds a real port, answers /healthz, and refuses everything els
 test("a second server on one data directory is refused and leaves the first alone", async () => {
   const dir = await tempDir();
   try {
+    await seedConfig(dir);
     const first = await startApp({ dataDir: dir, host: "127.0.0.1", port: 0 }, quietDeps());
     assert.ok(first.ok);
     try {
@@ -167,7 +191,7 @@ test("harness.closed failure exits non-zero so the supervisor restarts it", asyn
   try {
     const result = await startApp(
       { dataDir: dir, host: "127.0.0.1", port: 0 },
-      quietDeps({ openHarness: async () => fakeOpened(harness) }),
+      quietDeps({ openHarness: async () => fakeOpened(harness), ...noBootstrap }),
     );
     assert.ok(result.ok);
     end.resolve({ reason: "failed", error: new Error("storage went away") });
@@ -175,6 +199,42 @@ test("harness.closed failure exits non-zero so the supervisor restarts it", asyn
     assert.deepEqual(stopped, { code: 1, reason: "failed" });
     assert.equal(closedOnce, true, "the failed harness is still closed once");
     assert.equal(await isMissing(lockPath(dir, SERVER_LOCK_FILE)), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a bootstrap failure exits non-zero and releases the lock when close completes", async () => {
+  const dir = await tempDir();
+  const harness: FakeHarness = {
+    closed: new Promise<SessionEnd>(() => undefined),
+    resume: () => undefined,
+    close: async () => undefined,
+    inspect: async () => ({ scheduling: "running", tasks: [], submissions: [] }),
+    retryTask: async () => undefined,
+  };
+  let listened = false;
+  try {
+    const result = await startApp(
+      { dataDir: dir, host: "127.0.0.1", port: 0 },
+      quietDeps({
+        openHarness: async () => fakeOpened(harness),
+        bootstrap: async () => {
+          throw new Error("config has no active member");
+        },
+        listen: async () => {
+          listened = true;
+          return { url: "http://127.0.0.1:1", close: async () => {} };
+        },
+      }),
+    );
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 5);
+      assert.match(result.message, /session bootstrap failed: config has no active member/);
+    }
+    assert.equal(await isMissing(lockPath(dir, SERVER_LOCK_FILE)), true);
+    assert.equal(listened, false, "a bootstrap failure must not bind the listener");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -192,7 +252,7 @@ test("a close that a stuck task never finishes is capped and exits non-zero", as
   try {
     const result = await startApp(
       { dataDir: dir, host: "127.0.0.1", port: 0, closeTimeoutMs: 25 },
-      quietDeps({ openHarness: async () => fakeOpened(harness) }),
+      quietDeps({ openHarness: async () => fakeOpened(harness), ...noBootstrap }),
     );
     assert.ok(result.ok);
     const started = Date.now();
@@ -236,6 +296,7 @@ test("a retry that parks the task again leaves it visible", async () => {
           report = options.onReport;
           return fakeOpened(harness);
         },
+        ...noBootstrap,
       }),
     );
     assert.ok(result.ok);
@@ -279,7 +340,7 @@ test("a task parked before this process started is surfaced and retryable", asyn
   try {
     const result = await startApp(
       { dataDir: dir, host: "127.0.0.1", port: 0 },
-      quietDeps({ openHarness: async () => fakeOpened(harness) }),
+      quietDeps({ openHarness: async () => fakeOpened(harness), ...noBootstrap }),
     );
     assert.ok(result.ok);
     assert.deepEqual(

@@ -29,9 +29,10 @@ import type {
   ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { createLogger, type Logger } from "./log.ts";
-import { dataPaths, ensureDataDir, type DataDir } from "./config.ts";
+import { dataPaths, dataStores, ensureDataDir, type DataDir } from "./config.ts";
 import { acquireLock, SERVER_LOCK_FILE, type LockHandle } from "./lock.ts";
 import { closeHarness, openHarness, type OpenedHarness, type OpenHarnessOptions } from "./harness.ts";
+import { bootstrapSession, type BootstrapResult } from "./domain/bootstrap.ts";
 
 /** Long enough to let task code notice its abort, short enough to beat the
  * launcher's 3 s SIGTERM -> SIGKILL ladder (src/launcher/supervisor.ts). */
@@ -100,8 +101,19 @@ export interface HttpListener {
   close(): Promise<void>;
 }
 
+export interface BootstrapInput {
+  dataDir: string;
+  opened: OpenedHarness;
+  context: Context;
+  now: () => Date;
+}
+
+/** Creates/repairs the session documents; injected in lifecycle tests. */
+export type BootstrapRunner = (input: BootstrapInput) => Promise<BootstrapResult | void>;
+
 export interface AppDeps {
   openHarness?: (options: OpenHarnessOptions) => Promise<OpenedHarness>;
+  bootstrap?: BootstrapRunner;
   acquireLock?: (
     dataDir: string,
     pid?: number,
@@ -178,6 +190,18 @@ export async function listenHttp(
         server.close(() => resolve());
       }),
   };
+}
+
+async function defaultBootstrap(input: BootstrapInput): Promise<BootstrapResult> {
+  // config.json is the auth authority and the seed for profiles; the launcher
+  // ensures it exists before spawning the server. A missing config here is a
+  // partial restore or a direct server start, and must fail loudly.
+  const config = await dataStores(input.dataDir).config.read();
+  return bootstrapSession(input.opened.harness, {
+    config,
+    context: input.context,
+    now: input.now,
+  });
 }
 
 async function releaseQuietly(lock: LockHandle | undefined, logger: Logger): Promise<void> {
@@ -321,6 +345,42 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     })();
     return stopping;
   };
+
+  // Bootstrap the household before scheduling starts: the first boot creates the
+  // two conversations and four documents in one commit, and every later boot
+  // only repairs what is missing. A failure here is a startup failure, not a
+  // half-open server.
+  let bootstrapped: BootstrapResult | void;
+  try {
+    bootstrapped = await (deps.bootstrap ?? defaultBootstrap)({
+      dataDir: directory.path,
+      opened,
+      context,
+      now: () => new Date(options.now?.() ?? Date.now()),
+    });
+  } catch (error) {
+    const message = `session bootstrap failed: ${(error as Error).message}`;
+    logger.error("refusing to start", { error: message });
+    const closeResult = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
+    if (closeResult === "closed") await releaseQuietly(lock, logger);
+    return { ok: false, code: EXIT_OPEN_FAILED, message };
+  }
+  if (bootstrapped) {
+    logger.info("session bootstrap", {
+      created: bootstrapped.created,
+      members: bootstrapped.household.members.length,
+      profilesCreated: bootstrapped.profilesCreated,
+      profilesRemoved: bootstrapped.profilesRemoved,
+      docsCreated: bootstrapped.docsCreated.length,
+      nameDrift: bootstrapped.nameDrift.length,
+      clearedSystemModel: bootstrapped.clearedSystemModel,
+    });
+    if (bootstrapped.nameDrift.length > 0) {
+      logger.warn("household display names differ from config; the household name is kept", {
+        count: bootstrapped.nameDrift.length,
+      });
+    }
+  }
 
   // A failed Session closes itself; this is the only place the process learns
   // that it must exit rather than keep a dead harness behind a live port.
