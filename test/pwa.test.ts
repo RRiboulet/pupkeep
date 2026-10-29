@@ -362,4 +362,33 @@ test("the service worker caches only the static shell", async () => {
   assert.match(sw, /\/api\(/, "the /api prefix is reserved");
   assert.match(sw, /\/sse/, "the SSE path is reserved");
   assert.doesNotMatch(sw, /fetch\(["']/, "no offline writes: the worker never fabricates requests");
+
+  // Runtime caching is allowlisted, not "everything except api/sse": derive
+  // the shell pathnames from PRECACHE the way the worker does, and prove the
+  // dynamic and unknown surfaces are outside it.
+  const shell = new Set(entries.map((entry) => "/" + entry.replace(/^\.\//, "")));
+  assert.ok(shell.has("/"), "the shell document is on the allowlist");
+  assert.ok(shell.has("/index.html"), "index.html is on the allowlist");
+  assert.ok(shell.has("/app.js"), "app modules are on the allowlist");
+  for (const dynamic of ["/healthz", "/login", "/invite", "/tos", "/download"] as const) {
+    assert.ok(
+      !shell.has(dynamic),
+      `${dynamic} is not a shell asset and must not be runtime-cached`,
+    );
+  }
+  // And the fetch handler refuses to touch the cache for anything off the
+  // allowlist, in both directions, before any cache operation could happen.
+  const fetchHandler = sw.slice(sw.indexOf("addEventListener(\"fetch\""));
+  const allowlist = fetchHandler.indexOf("!isShellAsset(url.pathname)");
+  const cacheOpen = fetchHandler.indexOf("caches.open(CACHE)");
+  assert.ok(allowlist !== -1, "the fetch handler checks the shell allowlist");
+  assert.ok(cacheOpen !== -1, "the fetch handler uses its own shell cache");
+  assert.ok(allowlist < cacheOpen, "non-shell requests never reach the cache at all");
+  assert.match(
+    fetchHandler,
+    /if \(!isShellAsset\(url\.pathname\)\) \{\s*event\.respondWith\(fetch\(request\)\);\s*return;/,
+    "off-allowlist requests bypass the cache untouched",
+  );
+  const put = fetchHandler.indexOf("cache.put(request");
+  assert.ok(put !== -1 && put > allowlist, "cache.put is reachable only after the allowlist gate");
 });

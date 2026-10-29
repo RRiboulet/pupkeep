@@ -2034,7 +2034,13 @@ that the partner is reached out-of-app is gated on P0-10.
       shell); 233 tests total, typecheck clean. **Not verified:** real browser
       install on localhost and the partner's Tailscale load are device checks
       for P0-03's carrier/P0-10; the actual P1-09 composition can only be
-      proven once the HTTP layer lands.
+      proven once the HTTP layer lands. **Reviewed and repaired:** the initial
+      worker cached any same-origin GET 200 except `/api`/`/sse`, which would
+      have stored dynamic pages (a login page can carry a token). Runtime
+      caching is now gated on a shell allowlist (`SHELL_PATHS`, the pathnames
+      derived from `PRECACHE`, so the lists cannot drift): off-allowlist
+      requests bypass the cache in both directions and go straight to the
+      network, with a test pinning `/healthz` and `/login` outside it.
 - [ ] **P1-11** Puppy profile: domain service, HTTP routes, agent tools
       (`get_context`, `update_puppy_profile`), UI.
 - [ ] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake

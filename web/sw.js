@@ -50,6 +50,21 @@ function isReserved(pathname) {
   return RESERVED.some((pattern) => pattern.test(pathname));
 }
 
+// The runtime-cache allowlist: exactly the static shell, derived from the same
+// PRECACHE list the install step fills the cache with. The two can never drift
+// apart. Anything not on this list — `/healthz`, a future `/login` or
+// `/invite` page, or any other dynamic response — is never read from, written
+// to, or replayed from the cache in either direction: a dynamic response can
+// carry session state (e.g. a login page that sets a token), so caching one
+// would leak it into a shared storage that outlives the request.
+const SHELL_PATHS = new Set(
+  PRECACHE.map((entry) => new URL(entry, self.location).pathname),
+);
+
+function isShellAsset(pathname) {
+  return SHELL_PATHS.has(pathname);
+}
+
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
@@ -83,13 +98,22 @@ self.addEventListener("fetch", (event) => {
   // API and SSE are never cached, never answered from cache.
   if (isReserved(url.pathname)) return;
 
-  // Anything outside the worker's own scope (e.g. the launcher's future
-  // endpoints) falls through to the network untouched.
+  // Anything outside the static shell allowlist — `/healthz`, a future
+  // `/login` or `/invite` page, any other dynamic response — goes straight to
+  // the network untouched: no cache read, no cache write.
+  if (!isShellAsset(url.pathname)) {
+    event.respondWith(fetch(request));
+    return;
+  }
+
   event.respondWith(
     caches.open(CACHE).then(async (cache) => {
       const cached = await cache.match(request, { ignoreSearch: true });
       if (cached) return cached;
       const response = await fetch(request);
+      // The allowlist check above already excludes dynamic paths; a non-200 or
+      // non-basic answer is likewise never stored. This put() can therefore
+      // only ever write shell assets — the same set install() precaches.
       if (response && response.status === 200 && response.type === "basic") {
         cache.put(request, response.clone());
       }
