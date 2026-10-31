@@ -12,20 +12,22 @@ cd "$REPO"
 
 export GH_CONFIG_DIR="${GH_CONFIG_DIR:-/home/vscode/.pi/gh}"
 
-# The pi-config volume can arrive root-owned on its first mount. Fix that before
-# pi or gh write anything. The image already creates both directories.
-# The javascript-node base has no vscode user; common-utils creates one after the
-# image build, and the home directory can arrive root-owned. Fix the whole home
-# before writing ~/.gitconfig or the pi volume.
-sudo chown -R vscode:vscode /home/vscode /tmp/pupkeep-dev
+# /home/vscode itself belongs to vscode from the image on (the Dockerfile
+# renames the base image's uid-1000 `node` user), so VS Code can create
+# ~/.vscode-server before this script runs at all. What Docker still cannot
+# promise is the volume: a named volume is created root-owned and the copy-up
+# does not carry the mount point's ownership. Create and repair those paths
+# before pi or gh write anything; `sudo mkdir` also keeps this working if the
+# image ever stops pre-creating them.
+sudo mkdir -p "$GH_CONFIG_DIR" /tmp/pupkeep-dev
+sudo chown -R vscode:vscode /home/vscode/.pi /tmp/pupkeep-dev
+chmod 700 /tmp/pupkeep-dev
 # A bind mount can arrive owned by a host UID that does not match vscode, which
 # would make `npm ci` fail on node_modules. Only pay for the recursive chown
 # when the checkout is not already writable.
 if [ ! -w "$REPO" ]; then
   sudo chown -R vscode:vscode "$REPO"
 fi
-mkdir -p "$GH_CONFIG_DIR" /tmp/pupkeep-dev
-chmod 700 /tmp/pupkeep-dev
 
 # --- git identity and gh credential helper --------------------------------
 # A fresh container has no git identity, and this repo's workflow is commit ->
