@@ -59,6 +59,12 @@ jobs:
           imageName: pupkeep-devcontainer
           userDataFolder: .devcontainer/.cache
           push: never
+          # The action defaults this to false: on Linux the CLI then rewrites a
+          # non-root remote user's uid/gid to the *host* user's (`runner` is 1001
+          # here) and chowns that user's home. That would move vscode off the uid
+          # the image pins at 1000, and repair the very home the check below
+          # proves writable — the check would pass for the wrong reason.
+          skipContainerUserIdUpdate: true
           # The action's `devcontainer up` did not run postCreateCommand on the
           # first hosted attempt (`.env` was absent), so run the same script
           # explicitly when the container does not already have its fingerprint.
@@ -66,6 +72,18 @@ jobs:
           # the CI proof independent of that lifecycle detail.
           runCmd: |
             set -eux
+            # `devcontainer up` creates the container and runs postCreate; it
+            # never installs the VS Code Server, which a real window does as the
+            # remote user and *before* postCreate. Reproduce that first command
+            # here, ahead of any repair, or a postCreate chown of the home would
+            # hide the return of this bug. `devcontainer exec` already runs this
+            # as the remote user, so no sudo: a `(root)` sudoers rule does not
+            # allow `sudo -u vscode`.
+            test "$(id -un)" = "vscode"
+            test "$(id -u vscode)" = "1000"
+            test "$(stat -c %u:%g /home/vscode)" = "1000:1000"
+            mkdir -p /home/vscode/.vscode-server/bin
+            rm -rf /home/vscode/.vscode-server
             if [ ! -f .env ]; then
               bash .devcontainer/postCreate.sh
             fi

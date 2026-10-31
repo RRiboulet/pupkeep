@@ -388,6 +388,14 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
 - Base: `mcr.microsoft.com/devcontainers/javascript-node:24-bookworm`
   (Node 24, npm).
 - Features: common-utils (zsh), git, GitHub CLI.
+- uid/gid 1000 is `vscode`. The base image ships that uid as `node`, so the
+  Dockerfile renames the user (asserting uid, gid and `/home/vscode`'s owner at
+  build time) instead of letting common-utils create a second one on 1001. A
+  second user would leave the bind-mounted repo, owned by the host user's 1000,
+  unwritable; and because `useradd -m` does not adopt a home directory that
+  already exists, a `/home/vscode` this Dockerfile had created as root would
+  stay root-owned, which stops VS Code creating `~/.vscode-server` — it does
+  that as the remote user *before* `postCreate` can chown anything.
 - apt: `tmux`, `jq`, `sqlite3`, `curl`, `ripgrep`, `rclone`, `openssl`,
   `ca-certificates`, `unzip`, `git`, `age`, `expect`, `tar`, `sudo`.
 - `cloudflared` installed in the image: amd64 `2026.10.5`, pinned by version
@@ -1801,7 +1809,15 @@ that the partner is reached out-of-app is gated on P0-10.
       `ubuntu-latest` with `devcontainers/ci`, runs `postCreate.sh`, and
       reported Node `24.22.1`, pi `1.4.0`, gh `2.103.2`, cloudflared
       `2026.10.5`, sqlite3 `3.40.1`, rclone `1.60.1`, the shared package
-      `v1.9.0`, and **201/201 tests** (run `40947860932`). The base tag still
+      `v1.9.0`, and **201/201 tests** (run `40947860932`). **Follow-up:** the
+      `~/.vscode-server` fix (§5.1) renames the base image's uid-1000 `node`
+      user to `vscode`, adds a seventh guard, and makes this job reproduce VS
+      Code's first `mkdir` as `vscode` *before* `postCreate`, with the CLI's uid
+      rewrite disabled (`skipContainerUserIdUpdate`) so the runner's uid 1001
+      cannot mask it. Run `41208562595` is the fix's proof: the image was built
+      with the rename and `parsed OK` for `/etc/sudoers.d/vscode`, `mkdir
+      ~/.vscode-server` succeeded as `vscode` before `postCreate`, and 218/218
+      tests passed. The base tag still
       floats Node 24 patch releases by design; pin it by digest if exact
       patches matter. P1-12 still owns the general application CI.
 - [x] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
