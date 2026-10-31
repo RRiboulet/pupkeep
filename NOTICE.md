@@ -65,9 +65,12 @@ that is the whole point of vendoring them.
 | `web/vendor/htm.mjs` | `htm` (dist/htm.mjs) | `3.1.1` | `ab33dd3f38059b9be4d5f5350128eefb2356639c4e0bbe9d9e8b3ba75847e9e4` |
 | `web/vendor/htm-preact.mjs` | `htm` (preact/index.module.js) | `3.1.1` | `b3f51db71c12eabba61819feb74ace7cadc2744af41866c3fcad2ab960415746` |
 
-The two files that import bare `preact` / `htm` specifiers are unmodified: the
-page resolves them with an import map (`web/index.html`, P1-10), so the checksums
-stay honest instead of an edited copy nobody can diff against upstream.
+The two files that import bare `preact` / `htm` specifiers
+(`preact-hooks.mjs`, `htm-preact.mjs`) are unmodified and stay pinned for a
+future import map: the shell imports `preact.mjs` and `htm.mjs` relatively,
+serves no import map and does not load the two bare-specifier builds (P1-10), so
+their checksums stay honest instead of an edited copy nobody can diff against
+upstream.
 
 ## Cloudflare Tunnel
 

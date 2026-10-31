@@ -345,6 +345,7 @@ pupkeep/
 │   │   ├── http.ts            # routes, SSE, static files
 │   │   ├── lock.ts            # one process per data dir
 │   │   ├── push.ts            # VAPID + Web Push
+│   │   ├── static.ts          # static shell + security headers (P1-10)
 │   │   ├── domain/            # pure domain functions over docs
 │   │   ├── agent/             # system prompt, tools, conversation
 │   │   ├── reminders/         # tasks + outbox
@@ -1437,7 +1438,10 @@ displayed but not pushed in v1.
 - Desktop: sidebar + wider layout.
 - PWA manifest + home-screen icons on the host/localhost and the HTTPS test
   origin; the partner’s daily Tailscale origin is a browser app.
-- No build step; Preact + htm ES modules; import map; vendor files.
+- No build step; Preact + htm ES modules via relative imports to the vendored
+  files; no inline import map (an inline import map is subject to CSP `script-src`,
+  so keeping `default-src 'self'` without `unsafe-inline` means shell modules
+  import `web/vendor/` directly).
 - SSE with long-poll fallback.
 - Accessible labels, focus, reduced motion.
 - No offline writes; show reconnect banner.
@@ -1513,9 +1517,10 @@ Pi Pocket style, simplified for two caregivers:
   scaffold's `/healthz` is an unauthenticated liveness endpoint returning only
   `{"ok":true}` (no version, counts or paths); P1-09/P1-10 decide whether it
   stays public or joins the authz matrix.
-- Security headers: CSP `default-src 'self'`, `X-Content-Type-Options:
-  nosniff`, `Referrer-Policy: no-referrer`; the service worker caches the static
-  shell only, never API/SSE responses.
+- Security headers: CSP `default-src 'self'; frame-ancestors 'none';
+  base-uri 'none'; form-action 'self'`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`; the service worker caches the static shell
+  only, never API/SSE responses.
 - Cloudflare Access is only available on a named tunnel/domain; the quick tunnel
   is testing-only and protected by the app’s auth. The app’s auth remains
   mandatory everywhere.
@@ -2005,8 +2010,87 @@ that the partner is reached out-of-app is gated on P0-10.
       "continue"`, `watchEvents` → SSE, full snapshot on attach/reconnect.
       Labels for entries and tool writes resolve through `app.household`; never
       use `session.displayName` (it is the auth seed and may drift).
-- [ ] **P1-10** PWA shell: manifest, service worker registration, nav, Today
+- [x] **P1-10** PWA shell: manifest, service worker registration, nav, Today
       placeholder, connection status, CSP/security headers, static-only cache.
+      **Landed:** `web/index.html` (no inline script/style/handler, so the CSP
+      needs no `script-src` exception: `default-src 'self'` plus the
+      non-inheriting `frame-ancestors`/`base-uri`/`form-action` directives),
+      `web/app.js` (bottom navigation
+      Today/Calendar/Pup/Agent/Settings with hash routing over Preact+htm from
+      `web/vendor/`, a `role="status"` online/offline banner, focus-visible and
+      reduced-motion styles in `web/style.css`), `web/manifest.webmanifest`
+      (relative `start_url`/`scope`, real 192/512 PNG icons, `any` +
+      `maskable`), `web/sw.js` (versioned `pupkeep-static-*` shell-only cache:
+      precaches the shell, skips non-GET, skips `self.location.origin` cross
+      origin, skips `/api/*` and `/sse`, stores only same-origin 200s, deletes
+      previous caches on activate, does no offline writes and no push yet),
+      and placeholder views under `web/views/`. Registration happens only
+      when `window.isSecureContext` — the host's `http://127.0.0.1` origin —
+      so the partner's Tailscale HTTP origin runs as an ordinary browser app
+      with no install/service-worker/push claim.
+      `src/server/static.ts` is the P1-10 half of the HTTP seam, self-contained
+      and composed around a Node `http` server: `serveStaticRequest` answers
+      GET/HEAD from `web/` only (query strings stripped, percent-decoding
+      validated per segment, `..`/backslash/NUL escaping and dotfiles refused,
+      the resolved file pinned by realpath inside the root's own realpath),
+      explicit MIME types because nosniff makes shorthand types load-bearing,
+      `no-cache` for the document/worker/manifest and `max-age=3600` only for
+      `web/vendor/` and icons; it returns "not mine" for everything else
+      (any non-GET method, `/api/*`, `/sse`, unknown paths), so the live layer
+      routes them. `applySecurityHeaders(res)` (CSP/nosniff/Referrer-Policy,
+      idempotent under setHeader) and `API_CACHE_CONTROL` ("no-store") are
+      exported for P1-09 to apply to every response. The final wiring into
+      P1-09's HTTP layer is the small follow-up this task carves out.
+      Decision change: §13.2's import map is dropped in favour of direct
+      relative imports (reasons above). The app icons are placeholder paw
+      graphics generated algorithmically (composer kept out of git; the PNGs
+      are checked in).
+      **Verified:** 16 new tests in `test/pwa.test.ts` against a real
+      `node:http` server (shell serving/headers, correct types + cache rules,
+      HEAD, query strings, raw-socket traversal/escape targets — are never
+      served and never served from cache, API/SSE/POST not claimed, PNG icon
+      dims match the manifest, precache list is static-only and its files
+      exist, secure-context guard precedes registration, no push code in the
+      shell); 233 tests total, typecheck clean. **Not verified:** real browser
+      install on localhost and the partner's Tailscale load are device checks
+      for P0-03's carrier/P0-10; the actual P1-09 composition can only be
+      proven once the HTTP layer lands. **Reviewed and repaired:** the initial
+      worker cached any same-origin GET 200 except `/api`/`/sse`, which would
+      have stored dynamic pages (a login page can carry a token). Runtime
+      caching is now gated on a shell allowlist (`SHELL_PATHS`, the pathnames
+      derived from `PRECACHE`, so the lists cannot drift): off-allowlist
+      requests bypass the cache in both directions and go straight to the
+      network, with a test pinning `/healthz` and `/login` outside it.
+      **Reviewed and repaired again:** the install path was still ungated —
+      `cache.addAll(PRECACHE)` stored whatever the network returned, including
+      a followed redirect, so `/` could hold the login page — and the runtime
+      cache was authoritative: `match(request, {ignoreSearch: true})` answered
+      `/?token=…` from the cached `/` and overrode the document/modules/manifest
+      `no-cache` policy, making a deploy invisible until `VERSION` was bumped.
+      Install now fetches each entry with `redirect: "error"` and
+      `cache: "no-cache"`, refuses anything that is not a pristine same-origin
+      200 (`ok && type === "basic" && !redirected`) before writing any of them,
+      and fails loudly; a non-empty query string bypasses the cache in both
+      directions; the document, `app.js`, `store.js`, `views/*`, `style.css`
+      and the manifest are network-first with the precache as the offline
+      fallback, while only `vendor/*` and `icons/*` stay cache-first. The
+      header comment states that policy. `test/pwa.test.ts` now executes
+      `web/sw.js` in a `vm` sandbox (fake `self`/`caches`/`fetch`) instead of
+      grepping it: install fills exactly `PRECACHE` or rejects, the reserved,
+      off-allowlist and query-string paths touch no cache, the
+      network-first/cache-first split and the non-200/redirected write gate are
+      behavioural. `src/server/static.ts` lowercases before expanding percent
+      escapes in the traversal pre-filter (`%2E`/`%2F`/`%5C`), pins the realpath
+      inside the root before any `stat`/`access`/`readFile` (so an escaping
+      target is not an existence oracle), reserves the same `/api` and `/sse`
+      namespaces as the worker (a parity test compares the two), and the CSP
+      adds `frame-ancestors 'none'; base-uri 'none'; form-action 'self'`.
+      `web/app.js`'s frame scheduler now reads the latest `(route, online)`
+      when the queued frame runs, so two state changes in one frame both land
+      and the last wins. NOTICE.md records that the shell imports the vendored
+      modules relatively and the bare-specifier builds stay pinned but unused,
+      and §4 lists `static.ts`; `web/views/.gitkeep` was already removed by
+      this task's first commit.
 - [ ] **P1-11** Puppy profile: domain service, HTTP routes, agent tools
       (`get_context`, `update_puppy_profile`), UI.
 - [ ] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake
