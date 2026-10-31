@@ -14,11 +14,18 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
-import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
-import { SIGNIN_LIMIT, SUBMIT_LIMIT } from "../src/server/http.ts";
+import { SESSION_COOKIE, Auth, RateLimiter, hashToken, newToken } from "../src/server/auth.ts";
+import {
+  REQUEST_HEADER,
+  REQUEST_HEADER_VALUE,
+  SIGNIN_LIMIT,
+  SUBMIT_LIMIT,
+  createAppHandler,
+} from "../src/server/http.ts";
+import { ThreadBus, type Subscriber } from "../src/server/agent/bus.ts";
 import { dataStores } from "../src/server/config.ts";
 import { createLogger } from "../src/server/log.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
+import { listenHttp, startApp, type AppHandle } from "../src/server/app.ts";
 import { PROBE_CACHE_VERSION } from "../src/server/models/cache.ts";
 import { HouseholdDoc } from "../src/server/domain/docs.ts";
 import type { TranscriptEntry, ThreadSnapshot } from "../src/shared/chat.ts";
@@ -180,6 +187,7 @@ async function postMessage(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
       Cookie: cookieFor(cookieToken),
       // A browser mutation always carries Origin; tests are explicit so a
       // missing-Origin 403 cannot be confused with an auth refusal.
@@ -270,6 +278,37 @@ async function longPoll(
   return fetch(`${fixture.url}/api/agent/events/poll?since=${since}&ms=${budgetMs}`, {
     headers: { Cookie: cookieFor(cookieToken) },
   });
+}
+
+/**
+ * A minimal fanout for ordering tests: `commit()` bumps the seq and notifies
+ * whoever is subscribed *now*, so a test can prove when the SSE handler attached.
+ */
+function fakeBus(): { bus: ThreadBus; commit: () => number } {
+  let seq = 0;
+  const subscribers = new Set<Subscriber>();
+  const bus = {
+    get seq(): number {
+      return seq;
+    },
+    get closed(): boolean {
+      return false;
+    },
+    subscribe(_userId: string, subscriber: Subscriber): () => void {
+      subscribers.add(subscriber);
+      return () => {
+        subscribers.delete(subscriber);
+      };
+    },
+  } as unknown as ThreadBus;
+  return {
+    bus,
+    commit: () => {
+      seq += 1;
+      for (const subscriber of [...subscribers]) subscriber.notice("batch", []);
+      return seq;
+    },
+  };
 }
 
 // --- tests ------------------------------------------------------------------
@@ -389,6 +428,45 @@ test("a duplicate clientMessageId returns the same submission and one entry", as
   }
 });
 
+test("two caregivers may reuse a clientMessageId; the dedupe key is namespaced per author", async () => {
+  const fixture = await startThread();
+  try {
+    const first = await postMessage(fixture, fixture.alexCookie, "Alex's note", "shared-client-id");
+    assert.equal(first.status, 202);
+    const firstBody = (await first.json()) as { submissionId: number };
+
+    await until(async () => {
+      const snapshot = await threadOf(fixture, fixture.alexCookie);
+      return snapshot.entries.some((entry) => entry.kind === "assistant") ? true : undefined;
+    });
+    fixture.appendResponses([ALWAYS()]);
+
+    const second = await postMessage(fixture, fixture.samCookie, "Sam's note", "shared-client-id");
+    assert.equal(second.status, 202);
+    const secondBody = (await second.json()) as { submissionId: number };
+    assert.notEqual(
+      firstBody.submissionId,
+      secondBody.submissionId,
+      "Sam's submit is not deduped against Alex's identical client id",
+    );
+    await until(async () => {
+      const snapshot = await threadOf(fixture, fixture.alexCookie);
+      return snapshot.entries.filter((entry) => entry.kind === "assistant").length >= 2 ? true : undefined;
+    });
+
+    const snapshot = await threadOf(fixture, fixture.alexCookie);
+    const chats = snapshot.entries
+      .filter((entry): entry is Extract<TranscriptEntry, { kind: "chat" }> => entry.kind === "chat")
+      .map((entry) => ({ author: entry.authorName, text: entry.text, clientId: entry.clientMessageId }));
+    assert.deepEqual(chats, [
+      { author: "Alex", text: "Alex's note", clientId: "shared-client-id" },
+      { author: "Sam", text: "Sam's note", clientId: "shared-client-id" },
+    ]);
+  } finally {
+    await stop(fixture);
+  }
+});
+
 test("SSE sends the full snapshot at attach, then deltas; a fresh attach starts from a snapshot again", async () => {
   const fixture = await startThread();
   try {
@@ -441,6 +519,108 @@ test("SSE sends the full snapshot at attach, then deltas; a fresh attach starts 
       true,
     );
   } finally {
+    await stop(fixture);
+  }
+});
+
+test("SSE subscribes before the snapshot read, so a commit during the read is queued as a delta", async () => {
+  const fixture = await startThread();
+  const { bus, commit } = fakeBus();
+  let origin = "";
+  let attachedSeq = 0;
+  const deps = {
+    auth: fixture.auth,
+    thread: { harness: fixture.app.app, context: BACKGROUND_CONTEXT },
+    bus,
+    submitLimiter: new RateLimiter(SUBMIT_LIMIT, 60_000),
+    signInLimiter: new RateLimiter(SIGNIN_LIMIT, 60_000),
+    allowedOrigins: () => (origin === "" ? [] : [origin]),
+    logger: createLogger({ scope: "test", sink: () => undefined }),
+    // The deterministic interleaving: the read returns a snapshot from seq 0,
+    // then a commit broadcasts before the handler can write that snapshot.
+    // Only a handler that subscribed first still holds the delta.
+    readSnapshot: async (): Promise<ThreadSnapshot> => {
+      attachedSeq = bus.seq;
+      const snapshot: ThreadSnapshot = {
+        conversationId: 1,
+        seq: attachedSeq,
+        status: { busy: false, queued: 0 },
+        entries: [],
+      };
+      commit();
+      return snapshot;
+    },
+  };
+  const gate = await listenHttp("127.0.0.1", 0, createAppHandler(deps));
+  origin = gate.url;
+  try {
+    const response = await fetch(`${gate.url}/api/agent/events`, {
+      headers: { Cookie: cookieFor(fixture.alexCookie) },
+    });
+    assert.equal(response.status, 200);
+    const frames = framesOf(response);
+    const snapshotFrame = await nextFrame(frames);
+    assert.equal(snapshotFrame.event, "snapshot");
+    assert.equal((snapshotFrame.data as ThreadSnapshot).seq, attachedSeq);
+
+    const delta = await nextFrame(frames, 3000);
+    assert.equal(delta.event, "batch", "the commit during the snapshot read is not lost");
+    assert.equal((delta.data as { seq: number }).seq, attachedSeq + 1);
+  } finally {
+    await gate.close();
+    await stop(fixture);
+  }
+});
+
+test("a new SSE attach after the stream ended answers 503, not heartbeats forever", async () => {
+  const fixture = await startThread();
+  try {
+    const bus = fixture.app.threadBus;
+    assert.ok(bus, "the shared-thread wiring exposes its fanout");
+    bus.stop();
+    assert.equal(bus.closed, true);
+
+    const response = await fetch(`${fixture.url}/api/agent/events`, {
+      headers: { Cookie: cookieFor(fixture.alexCookie) },
+    });
+    assert.equal(response.status, 503);
+    const body = (await response.json()) as { error: string };
+    assert.match(body.error, /stream ended|reconnect/);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("/healthz answers before any session lookup, so a probe cookie cannot read config", async () => {
+  const fixture = await startThread();
+  const { bus } = fakeBus();
+  let origin = "";
+  let sessionLookups = 0;
+  const deps = {
+    auth: {
+      authenticate: async (token: string) => {
+        sessionLookups += 1;
+        return fixture.auth.authenticate(token);
+      },
+    } as unknown as Auth,
+    thread: { harness: fixture.app.app, context: BACKGROUND_CONTEXT },
+    bus,
+    submitLimiter: new RateLimiter(SUBMIT_LIMIT, 60_000),
+    signInLimiter: new RateLimiter(SIGNIN_LIMIT, 60_000),
+    allowedOrigins: () => (origin === "" ? [] : [origin]),
+    logger: createLogger({ scope: "test", sink: () => undefined }),
+  };
+  const gate = await listenHttp("127.0.0.1", 0, createAppHandler(deps));
+  origin = gate.url;
+  try {
+    const response = await fetch(`${gate.url}/healthz`, {
+      headers: { Cookie: `${SESSION_COOKIE}=not-a-session` },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(sessionLookups, 0, "liveness never parses config or walks sessions");
+  } finally {
+    await gate.close();
     await stop(fixture);
   }
 });
@@ -535,6 +715,68 @@ test("a poll is bound by the same per-user connection cap", async () => {
         assert.match(body.error ?? "", /reconnect|thread stream ended/);
       }
     }
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("a throwing subscriber is evicted without aborting the fan-out", async () => {
+  const fixture = await startThread();
+  try {
+    const bus = fixture.app.threadBus;
+    assert.ok(bus, "the shared-thread wiring exposes its fanout");
+    let goodBatches = 0;
+    let badCalls = 0;
+    const badUnsub = bus.subscribe("m-sam-fixture", {
+      notice: () => {
+        badCalls += 1;
+        throw new Error("the socket is gone");
+      },
+      onClose: () => undefined,
+    });
+    const goodUnsub = bus.subscribe("owner", {
+      notice: (type) => {
+        if (type === "batch") goodBatches += 1;
+      },
+      onClose: () => undefined,
+    });
+    try {
+      const posted = await postMessage(fixture, fixture.alexCookie, "Fan out past a broken socket", "m-fanout");
+      assert.equal(posted.status, 202);
+      await until(() => (goodBatches > 0 ? true : undefined));
+      assert.equal(badCalls >= 1, true, "the broken subscriber was called first");
+    } finally {
+      badUnsub();
+      goodUnsub();
+    }
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("a long-poll's timer is disarmed when the stream closes", async () => {
+  const fixture = await startThread();
+  try {
+    let handle: NodeJS.Timeout | undefined;
+    const bus = new ThreadBus({
+      harness: fixture.app.app,
+      conversationId: 1,
+      context: BACKGROUND_CONTEXT,
+      setTimer: (callback, ms) => {
+        handle = setTimeout(callback, ms);
+        handle.unref?.();
+        return handle;
+      },
+    });
+    const waiting = bus.poll("owner", 0, 60_000);
+    const armed = handle as (NodeJS.Timeout & { _destroyed?: boolean }) | undefined;
+    assert.ok(armed);
+    assert.equal(armed._destroyed, false);
+
+    bus.stop();
+    assert.equal(await waiting, "closed");
+    assert.equal(armed._destroyed, true, "the closed path clears the wait timer");
+    assert.equal(bus.waiterCount, 0);
   } finally {
     await stop(fixture);
   }
@@ -753,6 +995,7 @@ test("the owner link signs a browser in over HTTP; anything else is a refusal", 
     });
     assert.equal(good.status, 303);
     assert.equal(good.headers.get("location"), "/");
+    assert.equal(good.headers.get("referrer-policy"), "no-referrer", "the credential never rides a Referer");
     const header = good.headers.get("set-cookie") ?? "";
     assert.match(header, /HttpOnly/);
     assert.match(header, /SameSite=Lax/);
@@ -780,6 +1023,7 @@ test("the owner mints an invite over HTTP; the partner lands with a member sessi
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
         Cookie: sessionOfCookie(alexCookie),
         Origin: fixture.url,
       },
@@ -821,6 +1065,7 @@ test("a member cannot create an invite, and the ones that exist still work", asy
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
         Cookie: sessionOfCookie(fixture.samCookie),
         Origin: fixture.url,
       },
@@ -842,7 +1087,12 @@ test("logout revokes the session and clears the cookie", async () => {
 
     const out = await fetch(`${fixture.url}/logout`, {
       method: "POST",
-      headers: { Cookie: sessionOfCookie(fixture.alexCookie), Origin: fixture.url },
+      headers: {
+        "Content-Type": "application/json",
+        [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+        Cookie: sessionOfCookie(fixture.alexCookie),
+        Origin: fixture.url,
+      },
       redirect: "manual",
     });
     assert.equal(out.status, 303);
@@ -853,6 +1103,45 @@ test("logout revokes the session and clears the cookie", async () => {
       headers: { Cookie: sessionOfCookie(fixture.alexCookie) },
     });
     assert.equal(after.status, 401, "the session row is gone, not merely the cookie");
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("every mutation refuses a missing custom header (403) and a non-JSON body (415)", async () => {
+  const fixture = await startThread();
+  try {
+    const mutations = [
+      { path: "/api/agent/messages", body: JSON.stringify({ text: "CSRF probe", clientMessageId: "m-csrf" }) },
+      { path: "/api/invites", body: JSON.stringify({ displayName: "Imposter" }) },
+      { path: "/logout", body: JSON.stringify({}) },
+    ];
+    for (const mutation of mutations) {
+      const common = {
+        Cookie: sessionOfCookie(fixture.alexCookie),
+        Origin: fixture.url,
+      };
+      const missingHeader = await fetch(`${fixture.url}${mutation.path}`, {
+        method: "POST",
+        headers: { ...common, "Content-Type": "application/json" },
+        body: mutation.body,
+        redirect: "manual",
+      });
+      assert.equal(missingHeader.status, 403, `${mutation.path} needs ${REQUEST_HEADER}: ${REQUEST_HEADER_VALUE}`);
+
+      const wrongType = await fetch(`${fixture.url}${mutation.path}`, {
+        method: "POST",
+        headers: { ...common, "Content-Type": "text/plain", [REQUEST_HEADER]: REQUEST_HEADER_VALUE },
+        body: mutation.body,
+        redirect: "manual",
+      });
+      assert.equal(wrongType.status, 415, `${mutation.path} needs application/json`);
+    }
+
+    const still = await fetch(`${fixture.url}/api/session`, {
+      headers: { Cookie: sessionOfCookie(fixture.alexCookie) },
+    });
+    assert.equal(still.status, 200, "a refused logout never revokes the session");
   } finally {
     await stop(fixture);
   }

@@ -21,6 +21,8 @@
 //   * a mutation must come from an origin the server serves, checked with
 //     `originAllowed` plus a same-origin `Host` check for the tailnet
 //     addresses this process cannot enumerate (it only knows its bind host);
+//   * every mutation also carries the fixed `X-Pupkeep-Request: 1` header and
+//     a JSON content type (§14.2); the PWA client (P1-10) must send both;
 //   * every failure answers through one mapper, so no stack trace leaves.
 //   * sign-in/invite links are clicked from an SMS/chat client, so they are
 //     GETs without an Origin; tokens and codes are single-use credentials,
@@ -64,6 +66,9 @@ export const SIGNIN_WINDOW_MS = 60_000;
 export const BODY_LIMIT_BYTES = 8_192;
 export const TEXT_LIMIT = 2000;
 export const CLIENT_ID_LIMIT = 100;
+/** Fixed custom header every mutation must carry (§14.2); P1-10 sends it. */
+export const REQUEST_HEADER = "x-pupkeep-request";
+export const REQUEST_HEADER_VALUE = "1";
 /** SSE keep-alive; short enough to survive phone TCP idle timeouts. */
 export const KEEPALIVE_MS = 15_000;
 
@@ -74,6 +79,13 @@ const BUSY_MESSAGE =
 export class RateLimitError extends Refusal {
   constructor(message: string) {
     super(message, 429, "RateLimitError");
+  }
+}
+
+/** A mutation without a JSON body is refused before the body is parsed (§14.2). */
+export class UnsupportedMediaTypeError extends Refusal {
+  constructor(message: string) {
+    super(message, 415, "UnsupportedMediaTypeError");
   }
 }
 
@@ -98,6 +110,11 @@ export interface HttpDeps {
   readonly logger: Logger;
   /** Long-poll wait; capped to THREAD_POLL_MAX_MS. */
   readonly pollTimeoutMs?: number;
+  /**
+   * Test seam for the attach ordering: production leaves this unset. A test can
+   * commit after the read returns and prove the commit is not lost.
+   */
+  readonly readSnapshot?: (thread: ThreadRef, seq: number) => Promise<ThreadSnapshot>;
 }
 
 /**
@@ -165,6 +182,9 @@ function redirect(res: ServerResponse, location: string): void {
   res.statusCode = 303;
   res.setHeader("Location", location);
   res.setHeader("Cache-Control", "no-store");
+  // A credential in `/login?token=` or `/invite?code=` must not ride a
+  // same-origin subresource's `Referer` (§14.2).
+  res.setHeader("Referrer-Policy", "no-referrer");
   res.end();
 }
 
@@ -199,6 +219,27 @@ function parseSubmitBody(raw: unknown): SubmitBody | undefined {
     return undefined;
   }
   return { text: record.text, clientMessageId: record.clientMessageId };
+}
+
+function headerValue(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * §14.2's CSRF layers beyond Origin and `SameSite=Lax`: a fixed custom header
+ * (a cross-site form cannot set it) and a JSON content type on every mutation.
+ * The PWA client (P1-10) must send both.
+ */
+function requireMutationHeaders(req: IncomingMessage): void {
+  if (headerValue(req, REQUEST_HEADER) !== REQUEST_HEADER_VALUE) {
+    throw new Refusal("a mutation needs the X-Pupkeep-Request: 1 header", 403, "ForbiddenError");
+  }
+  const contentType = headerValue(req, "content-type") ?? "";
+  const mediaType = contentType.split(";")[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    throw new UnsupportedMediaTypeError("a mutation must be application/json");
+  }
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -260,8 +301,8 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
   }
 
   try {
-    const session = await sessionOf(deps, req);
-
+    // Liveness answers before any session lookup: a probe with a cookie must
+    // not read/parse config.json or walk sessions just to hear "ok" (§14.2).
     if (pathname === "/healthz" || pathname === "/health") {
       if (req.method === "GET" || req.method === "HEAD") {
         res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -272,6 +313,8 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       }
       throw new NotFoundError("no such method");
     }
+
+    const session = await sessionOf(deps, req);
 
     if (pathname === "/login" && req.method === "GET") {
       await handleLogin(deps, req, res);
@@ -351,6 +394,7 @@ async function handleMessage(
   if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
     throw new ForbiddenError(session?.role, "agent");
   }
+  requireMutationHeaders(req);
 
   if (!deps.submitLimiter.hit(`submit:${session.memberId}`)) {
     throw new RateLimitError("too many messages right now; take your time");
@@ -436,6 +480,7 @@ async function handleLogout(
   if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
     throw new ForbiddenError(session.role, "agent");
   }
+  requireMutationHeaders(req);
   const token = parseSessionCookie(req.headers.cookie);
   if (token) await deps.auth.revokeSession(token);
   res.setHeader("Set-Cookie", sessionCookie("", { ...cookieOptionsFor(req), maxAgeSeconds: 0 }));
@@ -467,6 +512,7 @@ async function handleInvites(
   if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
     throw new ForbiddenError(actor.role, "invite");
   }
+  requireMutationHeaders(req);
   if (!deps.signInLimiter.hit(`signin:${clientIp(req)}`)) {
     throw new RateLimitError("too many attempts; wait a minute");
   }
@@ -485,6 +531,7 @@ async function handleInvites(
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {
+  if (deps.readSnapshot !== undefined) return deps.readSnapshot(deps.thread, deps.bus.seq);
   return readThreadSnapshot(deps.thread, deps.bus.seq);
 }
 
@@ -506,16 +553,6 @@ async function handleEvents(
   res: ServerResponse,
   session: Session,
 ): Promise<void> {
-  // The snapshot is read before the SSE headers are set: a thread that cannot
-  // be read fails as a clean JSON 503, not as part-opened event stream.
-  const initial = await snapshotOf(deps);
-
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Connection", "keep-alive");
-  res.statusCode = 200;
-  res.write("retry: 3000\n\n");
-
   let live = true;
   let opened = false;
   const queue: Array<{ type: "batch" | "reconnect"; events?: readonly AgentEvent[] }> = [];
@@ -546,12 +583,44 @@ async function handleEvents(
       live = false;
     },
   };
+
+  if (deps.bus.closed) throw new ThreadUnavailableError("the thread stream ended; reconnect");
+
+  // Subscribe before the snapshot read: a commit that lands while the read is
+  // in flight must reach either the snapshot or the queue, never neither. The
+  // snapshot still precedes the headers (and every delta), so a failed read is
+  // a clean JSON 503 instead of a half-open event stream.
   const unsubscribe = deps.bus.subscribe(session.memberId, subscriber);
+
+  let initial: ThreadSnapshot;
+  try {
+    initial = await snapshotOf(deps);
+  } catch (error) {
+    live = false;
+    unsubscribe();
+    throw error;
+  }
+
+  if (!live || res.writableEnded) {
+    unsubscribe();
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Connection", "keep-alive");
+  res.statusCode = 200;
+  res.write("retry: 3000\n\n");
+
   writeEvent(res, "snapshot", initial);
   opened = true;
   for (const item of queue.splice(0)) {
     if (!live) break;
     deliver(item);
+  }
+  if (!live) {
+    unsubscribe();
+    return;
   }
 
   const heartbeat = setInterval(() => {

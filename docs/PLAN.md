@@ -1038,7 +1038,9 @@ or "Household" and the confirming human.
   asks the caregiver to send again when the thread is free. There is **no
   mid-run input placement and no queue** in v1. This keeps actor attribution
   sound. Queueing is deferred until run-input mapping is proven.
-- `requestId: clientMessageId` dedupes double-sends. `afterFailedRun:
+- ``requestId: `${authorId}:${clientMessageId}` `` dedupes double-sends
+  **per author**; `data.clientMessageId` stays the raw client id, so two
+  caregivers may reuse the same browser-generated id. `afterFailedRun:
   "continue"` so a model failure does not strand the next message.
 - No private agent threads. Both see all messages, tool cards and approvals.
   This is the chosen model.
@@ -1106,8 +1108,10 @@ replay.
 - **P1-09 origin rule:** a mutation needs `Origin` in the launcher's origin
   list (`bindOrigins`: localhost, loopback, and the literal bind address) or
   same-origin with the request's `Host` for the tailnet addresses the server
-  cannot enumerate. The quick-tunnel origin is joined by the launcher wiring
-  (P1-10). SSE/snapshots are reads; they are authenticated but not origin-checked.
+  cannot enumerate. It also needs the fixed `X-Pupkeep-Request: 1` header and a
+  JSON content type (§14.2); the PWA client sends both. The quick-tunnel origin
+  is joined by the launcher wiring (P1-10). SSE/snapshots are reads; they are
+  authenticated but not origin-checked.
 
 ### 9.5 System prompt
 
@@ -1501,8 +1505,10 @@ Pi Pocket style, simplified for two caregivers:
   `https://*.trycloudflare.com` URL, and a VPS deployment’s configured
   `PUPKEEP_PUBLIC_ORIGIN` (HTTPS via Caddy/`sslip.io`). A mutation must match
   one of them.
-- CSRF: `SameSite=Lax` + `Origin` check + a custom request header.
-- Mutations require JSON content type; no CORS headers (default-deny).
+- CSRF: `SameSite=Lax` + `Origin` check + the fixed `X-Pupkeep-Request: 1`
+  custom request header (missing header is 403).
+- Mutations require JSON content type (415 otherwise); no CORS headers
+  (default-deny).
 - `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-For` and
   `CF-Connecting-IP` are trusted **only from a loopback peer** (cloudflared).
   Rate limits key off `CF-Connecting-IP` behind the tunnel, not the tunnel’s
@@ -2025,7 +2031,18 @@ that the partner is reached out-of-app is gated on P0-10.
       member's 403 on invite creation; and the IP rate limit. A member who
       joined after boot has no profile until the next boot reconciles, so
       their label says `Household` — the one open seam, carried by P1-11's
-      profile service. **Not verified:** a real provider, the PWA client
+      profile service. Review repairs:
+      the SSE attach subscribes before reading its snapshot, so a commit that
+      lands during the read is queued as a delta rather than lost; the
+      `requestId` dedupe key is namespaced per author, so two caregivers may
+      reuse a client id and both messages land; a new SSE attach after the
+      Pi Durable stream ended answers 503 instead of heartbeating forever;
+      every mutation requires `content-type: application/json` (415) and
+      `X-Pupkeep-Request: 1` (403); sign-in/invite redirects send
+      `Referrer-Policy: no-referrer`; `/healthz` answers before any session or
+      config read; a throwing subscriber is evicted without aborting the
+      fan-out; and long-poll timers are cleared on every settle path. Tests
+      cover each repair. **Not verified:** a real provider, the PWA client
       (P1-10), and the network failure/recovery path; §15.3's ≥50-entry
       pagination and run-input mapping are P1-12 devices.
 - [ ] **P1-10** PWA shell: manifest, service worker registration, nav, Today

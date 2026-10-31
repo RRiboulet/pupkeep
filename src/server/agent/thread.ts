@@ -96,8 +96,9 @@ async function sharedConversation(thread: ThreadRef, household: Household, what:
 /**
  * Submit one caregiver message. `whenBusy: "reject"` keeps one-at-a-time real:
  * a busy thread throws `ConversationBusy`, nothing is written, and the client
- * keeps its draft. `requestId: clientMessageId` dedupes double-sends — a known
- * id returns its existing submission without writing.
+ * keeps its draft. `requestId: authorId:clientMessageId` dedupes a double-send
+ * per author, so two caregivers may reuse the same client id; a known id from
+ * the same author returns its existing submission without writing.
  */
 export async function submitChatMessage(
   thread: ThreadRef,
@@ -113,7 +114,9 @@ export async function submitChatMessage(
         type: "input",
         content,
         whenBusy: "reject",
-        requestId: request.clientMessageId,
+        // Namespaced by author: the client id is only unique per browser, so a
+        // bare id would silently swallow the other caregiver's message.
+        requestId: `${request.authorId}:${request.clientMessageId}`,
         entry: {
           kind: CHAT_ENTRY_KIND,
           data: {

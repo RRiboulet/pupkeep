@@ -117,14 +117,20 @@ export class ThreadBus {
     this.#seq += 1;
     for (const connection of [...this.#connections]) {
       if (connection.evicted) continue;
-      connection.subscriber.notice("batch", events);
+      try {
+        connection.subscriber.notice("batch", events);
+      } catch {
+        // One broken socket must not abort the fan-out for every other
+        // connection; evict it and let its close handler clean up.
+        connection.evicted = true;
+      }
     }
     for (const waiter of [...this.#waiters]) {
       if (this.#seq > waiter.since) this.#settleWaiter(waiter, "changed");
     }
   }
 
-  /** Settle with bookkeeping; the timer path cleans itself in the poll. */
+  /** Settle with bookkeeping; the waiter's own timer is cleared in `poll`. */
   #settleWaiter(waiter: Waiter, result: "changed" | "closed"): void {
     this.#waiters = this.#waiters.filter((entry) => entry !== waiter);
     waiter.settle(result);
@@ -132,9 +138,15 @@ export class ThreadBus {
 
   /**
    * Subscribe one browser socket. Returns its unsubscribe; the *order* matters
-   * for the cap rule, because entries push oldest first.
+   * for the cap rule, because entries push oldest first. Once the Pi Durable
+   * stream has ended, a subscription is refused with a `reconnect` notice
+   * instead of a heartbeating connection that can never carry a delta.
    */
   subscribe(userId: string, subscriber: Subscriber): () => void {
+    if (this.#closed) {
+      subscriber.notice("reconnect");
+      return () => undefined;
+    }
     const userConnections = this.#connections.filter((connection) => connection.userId === userId);
     if (userConnections.length >= THREAD_CONNECTIONS_PER_USER) {
       for (const stale of userConnections) {
@@ -169,12 +181,19 @@ export class ThreadBus {
   poll(userId: string, since: number, timeoutMs: number): Promise<"changed" | "timeout" | "closed"> {
     if (this.#closed) return Promise.resolve("closed");
     return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | undefined;
       const waiter: Waiter = {
         since,
         finished: false,
         settle: (result) => {
           if (waiter.finished) return;
           waiter.finished = true;
+          // Every settle path (change, closed, timeout) disarms the wait: an
+          // unref'd timer left behind is still a handle per expired poll.
+          if (timer !== undefined) {
+            clearTimeout(timer);
+            timer = undefined;
+          }
           // Leave on any settle, whatever the path: a long stream of expired
           // polls must never grow this list.
           this.#waiters = this.#waiters.filter((entry) => entry !== waiter);
@@ -205,7 +224,15 @@ export class ThreadBus {
             handle.unref?.();
             return handle;
           });
-        arm(() => waiter.settle("timeout"), Math.max(0, timeoutMs));
+        timer = arm(() => waiter.settle("timeout"), Math.max(0, timeoutMs));
+        // A synchronous timer may already have settled; do not track it then.
+        if (waiter.finished) {
+          if (timer !== undefined) {
+            clearTimeout(timer);
+            timer = undefined;
+          }
+          return;
+        }
         this.#waiters.push(waiter);
         if (this.#seq > since) waiter.settle("changed");
       }
