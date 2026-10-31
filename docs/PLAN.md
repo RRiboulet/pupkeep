@@ -388,6 +388,14 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
 - Base: `mcr.microsoft.com/devcontainers/javascript-node:24-bookworm`
   (Node 24, npm).
 - Features: common-utils (zsh), git, GitHub CLI.
+- uid/gid 1000 is `vscode`. The base image ships that uid as `node`, so the
+  Dockerfile renames the user (asserting uid, gid and `/home/vscode`'s owner at
+  build time) instead of letting common-utils create a second one on 1001. A
+  second user would leave the bind-mounted repo, owned by the host user's 1000,
+  unwritable; and because `useradd -m` does not adopt a home directory that
+  already exists, a `/home/vscode` this Dockerfile had created as root would
+  stay root-owned, which stops VS Code creating `~/.vscode-server` — it does
+  that as the remote user *before* `postCreate` can chown anything.
 - apt: `tmux`, `jq`, `sqlite3`, `curl`, `ripgrep`, `rclone`, `openssl`,
   `ca-certificates`, `unzip`, `git`, `age`, `expect`, `tar`, `sudo`.
 - `cloudflared` installed in the image: amd64 `2026.10.5`, pinned by version
@@ -1794,11 +1802,13 @@ that the partner is reached out-of-app is gated on P0-10.
       repo's `.pi/settings.json`, and skipped when the project declares it),
       pins gh to `2.103.2`, sets the owner's public noreply git identity, and
       prints the start command. Port 8787 is forwarded; the dev database is
-      `/tmp/pupkeep-dev`, never the workspace mount. Six static guards live in
-      `test/devcontainer.test.ts` (201 tests total); `npm start` loads `.env`
+      `/tmp/pupkeep-dev`, never the workspace mount. Seven static guards live in
+      `test/devcontainer.test.ts` (218 tests total); `npm start` loads `.env`
       with `--env-file-if-exists`, so the seed is not inert. **Verified by
       CI:** `.github/workflows/devcontainer.yml` builds the image on
       `ubuntu-latest` with `devcontainers/ci`, runs `postCreate.sh`, and
+      reproduces VS Code's `mkdir ~/.vscode-server` as vscode — the step
+      `devcontainer up` skips, and the one that failed outside CI. A green run
       reported Node `24.22.1`, pi `1.4.0`, gh `2.103.2`, cloudflared
       `2026.10.5`, sqlite3 `3.40.1`, rclone `1.60.1`, the shared package
       `v1.9.0`, and **201/201 tests** (run `40947860932`). The base tag still

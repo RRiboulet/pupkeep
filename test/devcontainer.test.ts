@@ -92,7 +92,43 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
 
   assert.match(dockerfile, /git config --system credential\.https:\/\/github\.com\.helper/);
   assert.match(dockerfile, /WORKDIR \/workspace/);
-  // The base image has no vscode user; the common-utils feature creates it.
+});
+
+test("the image renames the base uid-1000 user to vscode, so its home is writable before postCreate", async () => {
+  const dockerfile = await read(".devcontainer/Dockerfile");
+
+  // The base image ships uid/gid 1000 as `node`; its own metadata says
+  // `remoteUser: node`. common-utils cannot put a second user on that uid, and
+  // `useradd -m` leaves a home directory that already exists alone — so a
+  // /home/vscode created here as root stays root-owned, and VS Code installs
+  // ~/.vscode-server as `vscode` *before* postCreate runs. Repairing the home
+  // there is always too late: the image has to get it right.
+  assert.match(dockerfile, /test "\$\(id -u node\)" = "1000"/);
+  assert.match(dockerfile, /groupmod --new-name vscode node/);
+  assert.match(dockerfile, /usermod --login vscode --home \/home\/vscode --move-home node/);
+  assert.match(dockerfile, /test "\$\(id -u vscode\)" = "1000"/);
+  assert.match(dockerfile, /test "\$\(id -g vscode\)" = "1000"/);
+  assert.match(dockerfile, /test "\$\(stat -c %u:%g \/home\/vscode\)" = "1000:1000"/);
+
+  // The base image's sudoers entry names `node`; postCreate runs `sudo chown`
+  // and cannot depend on the feature re-running to get one that matches.
+  assert.match(dockerfile, /NOPASSWD:ALL' > \/etc\/sudoers\.d\/vscode/);
+  assert.match(dockerfile, /rm -f \/etc\/sudoers\.d\/node/);
+
+  // The rename has to come before the image creates anything in the home.
+  const renamed = dockerfile.indexOf("--new-name vscode node");
+  assert.ok(renamed > 0, "the base image's user must be renamed, not left for a feature");
+  assert.ok(
+    dockerfile.indexOf("mkdir -p /home/vscode") > renamed,
+    "the user must exist before the image creates paths in its home",
+  );
+
+  // Whatever the image does create there belongs to vscode, so a fresh volume
+  // copies up writable; the volume's root is postCreate's business.
+  assert.match(dockerfile, /chown -R vscode:vscode \/home\/vscode\/\.pi/);
+
+  // Still root: the layers install system-wide and postCreate runs `sudo git
+  // config --system`. `remoteUser` and Compose's `user:` decide who connects.
   assert.doesNotMatch(dockerfile, /^USER vscode$/m);
 });
 
@@ -106,6 +142,9 @@ test("postCreate seeds .env, runs the suite, checks versions and installs the sh
   assert.match(script, /npm run typecheck/);
   assert.match(script, /npm test/);
   assert.match(script, /chmod 700 \/tmp\/pupkeep-dev/);
+  // The home belongs to vscode from the image on; only the named volume's own
+  // root can still arrive root-owned, and that is what postCreate repairs.
+  assert.match(script, /sudo chown -R vscode:vscode \/home\/vscode\/\.pi/);
 
   assert.match(script, /node_major/);
   assert.match(script, /v24/);

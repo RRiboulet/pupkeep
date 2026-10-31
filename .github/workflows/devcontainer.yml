@@ -72,6 +72,15 @@ jobs:
             test -f .env
             test -d node_modules
             test -d /tmp/pupkeep-dev
+            # `devcontainer up` creates the container and runs postCreate; it
+            # does not install the VS Code Server, which a real window does as
+            # the remote user and *before* postCreate. Reproduce that first
+            # command: a home the remote user cannot write fails the whole
+            # create, and this job would otherwise report success.
+            test "$(id -u vscode)" = "1000"
+            test "$(stat -c %u:%g /home/vscode)" = "1000:1000"
+            sudo -u vscode mkdir -p /home/vscode/.vscode-server/bin
+            sudo -u vscode rm -rf /home/vscode/.vscode-server
             test "$(node --version | cut -d. -f1)" = "v24"
             test "$(pi --version)" = "1.4.0"
             gh --version | grep '2.103.2' >/dev/null
