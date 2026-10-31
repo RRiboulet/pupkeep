@@ -29,6 +29,7 @@ import { listenHttp, startApp, type AppHandle } from "../src/server/app.ts";
 import { PROBE_CACHE_VERSION } from "../src/server/models/cache.ts";
 import { HouseholdDoc } from "../src/server/domain/docs.ts";
 import type { TranscriptEntry, ThreadSnapshot } from "../src/shared/chat.ts";
+import { CONTENT_SECURITY_POLICY } from "../src/server/static.ts";
 
 // The configured default model of PLAN §11.2, as the P1-03 probe would cache it.
 const DEFAULT_PROVIDER = "opencode-go";
@@ -1217,6 +1218,42 @@ test("repeated polls leave no waiters behind", async () => {
       assert.equal(response.status, 200);
     }
     assert.equal(busT.waiterCount, 0, "settled waiters are removed, not accumulated");
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("the live handler serves the PWA shell first, under the security headers", async () => {
+  const fixture = await startThread();
+  try {
+    // The shell is the one unauthenticated static surface (§14.2). It must be
+    // answered by the real router without a session, with the CSP the header
+    // module exports (not a copy that could drift).
+    const shell = await fetch(`${fixture.url}/`);
+    assert.equal(shell.status, 200);
+    assert.match(shell.headers.get("content-type") ?? "", /^text\/html/);
+    assert.equal(shell.headers.get("content-security-policy"), CONTENT_SECURITY_POLICY);
+    assert.equal(shell.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(shell.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(shell.headers.get("cache-control"), "no-cache");
+    assert.match(await shell.text(), /<title>Pupkeep<\/title>/);
+
+    const worker = await fetch(`${fixture.url}/sw.js`);
+    assert.equal(worker.status, 200);
+    assert.match(worker.headers.get("content-type") ?? "", /javascript/);
+
+    // The dynamic layer keeps its own routes and cache policy, and now carries
+    // the same policy headers — the shell must not shadow the API.
+    const api = await fetch(`${fixture.url}/api/session`, { headers: { Cookie: cookieFor(fixture.alexCookie) } });
+    assert.equal(api.status, 200);
+    assert.equal(api.headers.get("content-security-policy"), CONTENT_SECURITY_POLICY);
+    assert.equal(api.headers.get("cache-control"), "no-store");
+    assert.equal(((await api.json()) as { memberId: string }).memberId, "owner");
+
+    // Anything that is neither a shell file nor a route still falls through to
+    // the P1-09 "not served yet" answer instead of the document.
+    const unknown = await fetch(`${fixture.url}/care/today`);
+    assert.equal(unknown.status, 503);
   } finally {
     await stop(fixture);
   }

@@ -5,6 +5,7 @@
 // This is deliberately a small functions-over-`node:http` router, not a frame-
 // work: the server runs on one phone for two caregivers, and the routes are
 //
+//   GET  /                     the PWA shell (P1-10, served before any route)
 //   GET  /healthz                liveness (no version, no counts, no paths)
 //   GET  /login?token=          owner sign-in link: session cookie, 303 to /
 //   GET  /invite?code=          partner invite link: session cookie, 303 to /
@@ -56,6 +57,7 @@ import {
   type ThreadRef,
 } from "./agent/thread.ts";
 import type { ThreadBus } from "./agent/bus.ts";
+import { applySecurityHeaders, serveStaticRequest } from "./static.ts";
 
 /** Generous click-submit cadence; a double-send dedupes before this counts. */
 export const SUBMIT_LIMIT = 20;
@@ -301,6 +303,15 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
   }
 
   try {
+    // The static shell is served first and is the only unauthenticated surface
+    // (§14.2 allows it): it answers GET/HEAD for `web/` and declines everything
+    // else, so `/api/…`, `/sse`, `/healthz`, `/login` and `/invite` fall through
+    // to the routes below. The security headers go on before that attempt, so
+    // every response — static, JSON, SSE, 503 and the mapper's 500 — rides under
+    // the same policy and nothing can be sent before they are set.
+    applySecurityHeaders(res);
+    if (await serveStaticRequest(req, res)) return;
+
     // Liveness answers before any session lookup: a probe with a cookie must
     // not read/parse config.json or walk sessions just to hear "ok" (§14.2).
     if (pathname === "/healthz" || pathname === "/health") {
