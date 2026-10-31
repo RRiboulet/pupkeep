@@ -1802,16 +1802,19 @@ that the partner is reached out-of-app is gated on P0-10.
       repo's `.pi/settings.json`, and skipped when the project declares it),
       pins gh to `2.103.2`, sets the owner's public noreply git identity, and
       prints the start command. Port 8787 is forwarded; the dev database is
-      `/tmp/pupkeep-dev`, never the workspace mount. Seven static guards live in
-      `test/devcontainer.test.ts` (218 tests total); `npm start` loads `.env`
+      `/tmp/pupkeep-dev`, never the workspace mount. Six static guards live in
+      `test/devcontainer.test.ts` (201 tests total); `npm start` loads `.env`
       with `--env-file-if-exists`, so the seed is not inert. **Verified by
       CI:** `.github/workflows/devcontainer.yml` builds the image on
       `ubuntu-latest` with `devcontainers/ci`, runs `postCreate.sh`, and
-      reproduces VS Code's `mkdir ~/.vscode-server` as vscode — the step
-      `devcontainer up` skips, and the one that failed outside CI. A green run
       reported Node `24.22.1`, pi `1.4.0`, gh `2.103.2`, cloudflared
       `2026.10.5`, sqlite3 `3.40.1`, rclone `1.60.1`, the shared package
-      `v1.9.0`, and **201/201 tests** (run `40947860932`). The base tag still
+      `v1.9.0`, and **201/201 tests** (run `40947860932`). **Follow-up:** the
+      `~/.vscode-server` fix (§5.1) renames the base image's uid-1000 `node`
+      user to `vscode`, adds a seventh guard, and makes this job reproduce VS
+      Code's first `mkdir` as `vscode` *before* `postCreate`, with the CLI's uid
+      rewrite disabled (`skipContainerUserIdUpdate`) so the runner's uid 1001
+      cannot mask it; that run is the fix's CI proof. The base tag still
       floats Node 24 patch releases by design; pin it by digest if exact
       patches matter. P1-12 still owns the general application CI.
 - [x] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
