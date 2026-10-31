@@ -1814,7 +1814,10 @@ that the partner is reached out-of-app is gated on P0-10.
       user to `vscode`, adds a seventh guard, and makes this job reproduce VS
       Code's first `mkdir` as `vscode` *before* `postCreate`, with the CLI's uid
       rewrite disabled (`skipContainerUserIdUpdate`) so the runner's uid 1001
-      cannot mask it; that run is the fix's CI proof. The base tag still
+      cannot mask it. Run `41208562595` is the fix's proof: the image was built
+      with the rename and `parsed OK` for `/etc/sudoers.d/vscode`, `mkdir
+      ~/.vscode-server` succeeded as `vscode` before `postCreate`, and 218/218
+      tests passed. The base tag still
       floats Node 24 patch releases by design; pin it by digest if exact
       patches matter. P1-12 still owns the general application CI.
 - [x] **P1-03** package.json: pinned Pi Durable/Pi AI/Chord; **Preact/htm are
