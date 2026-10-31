@@ -32,8 +32,14 @@ import { join, resolve, sep } from "node:path";
  * vendored Preact/htm modules, the stylesheet, the manifest, the icons and
  * the (future) same-origin API/SSE. No `unsafe-inline`, no `unsafe-eval`, no
  * third-party origins, no CORS. New client code must keep loading the
- * modules through relative imports, not inline scripts. */
-export const CONTENT_SECURITY_POLICY = "default-src 'self'";
+ * modules through relative imports, not inline scripts.
+ *
+ * `frame-ancestors`, `base-uri` and `form-action` do not inherit from
+ * `default-src`, so they are stated explicitly: without them the app is
+ * framable (clickjacking in front of the approval cards) and a `<base>` or a
+ * form could be pointed off-origin. */
+export const CONTENT_SECURITY_POLICY =
+  "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 /** The headers every response (static and dynamic) should carry. */
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
@@ -46,8 +52,12 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze(
  * them by path; this is the HTTP layer's half of the guarantee. */
 export const API_CACHE_CONTROL = "no-store";
 
-/** Path prefixes the static surface never claims — the dynamic app. */
-export const RESERVED_PREFIXES: readonly string[] = Object.freeze(["/api/", "/sse"]);
+/** Path prefixes the static surface never claims — the dynamic app. This list
+ * is kept identical to `RESERVED` in `web/sw.js` — test/pwa.test.ts compares
+ * the two, so they cannot drift apart. The whole namespace is reserved
+ * (`/api`, `/api/…`, `/sse`, `/ssefoo`): no static file lives under either
+ * prefix, and over-reserving a prefix costs nothing. */
+export const RESERVED_PREFIXES: readonly string[] = Object.freeze(["/api", "/sse"]);
 export const RESERVED_PATHS: readonly string[] = Object.freeze([]);
 
 export type Mime = string;
@@ -89,11 +99,25 @@ export function cacheControlFor(requestPath: string): string {
   return "no-cache";
 }
 
+/** The filesystem calls the static surface makes. Injected only by tests, so
+ * a test can prove the containment check runs before anything stats or opens
+ * the target; production always uses the real filesystem. */
+export interface StaticFileSystem {
+  realpath: (path: string) => Promise<string>;
+  stat: (path: string) => Promise<Stats>;
+  access: (path: string, mode?: number) => Promise<void>;
+  readFile: (path: string) => Promise<Buffer>;
+}
+
+const REAL_FS: StaticFileSystem = { realpath, stat, access: fsAccess, readFile };
+
 export interface StaticOptions {
   /** Absolute path of the directory whose root is served. Default: `web/`. */
   root?: string;
   /** Lowercased, query-stripped request paths that are never static. */
   reserved?: readonly string[];
+  /** Filesystem seam, injected only by tests. Default: the real filesystem. */
+  fs?: StaticFileSystem;
 }
 
 export interface StaticResponse {
@@ -155,19 +179,27 @@ function mimeFor(fileName: string): Mime {
   return MIME_TYPES[fileName.slice(dot).toLowerCase()] ?? DEFAULT_MIME;
 }
 
-/** Resistor: the classic traversal tricks, as raw request targets. */
+/** Resistor: the classic traversal tricks, as raw request targets. Percent
+ * escapes are case-insensitive (`%2E` is `%2e` is `.`), so the target is
+ * lowercased before they are expanded — otherwise an uppercase escape walks
+ * past this layer. It is a cheap pre-filter; the decoded-segment walk in
+ * `normalizeRequestPath` and the realpath containment check below are the
+ * layers that actually decide, so refusing here is defence in depth. */
 export function looksLikeTraversal(requestPath: string): boolean {
-  const unescaped = requestPath.replaceAll("%2e", ".").replaceAll("%2f", "/").replaceAll("%5c", "\\");
-  const decoded = unescaped.toLowerCase();
-  return decoded.includes("..") || unescaped.includes("\\") || unescaped.includes("%00");
+  const lowered = requestPath.toLowerCase();
+  const unescaped = lowered.replaceAll("%2e", ".").replaceAll("%2f", "/").replaceAll("%5c", "\\");
+  return unescaped.includes("..") || lowered.includes("\\") || lowered.includes("%00");
 }
 
 const rootRealpaths = new Map<string, string>();
 
-async function rootRealpath(root: string): Promise<string> {
+async function rootRealpath(root: string, fs: StaticFileSystem): Promise<string> {
+  // The cache belongs to the real filesystem; an injected one (tests) is never
+  // cached, so a spy sees every call.
+  if (fs !== REAL_FS) return fs.realpath(root);
   const cached = rootRealpaths.get(root);
   if (cached) return cached;
-  const real = await realpath(root);
+  const real = await fs.realpath(root);
   if (rootRealpaths.size > 16) rootRealpaths.clear();
   rootRealpaths.set(root, real);
   return real;
@@ -186,6 +218,7 @@ export async function resolveStatic(
   options: StaticOptions = {},
 ): Promise<StaticResult> {
   const root = options.root ?? defaultRoot();
+  const fs = options.fs ?? REAL_FS;
   if (method !== "GET" && method !== "HEAD") return { served: false };
   if (isReservedPath(requestPath, options.reserved)) return { served: false };
   if (looksLikeTraversal(requestPath)) return { served: false };
@@ -196,28 +229,16 @@ export async function resolveStatic(
   const segments = normalized.segments;
   const target = segments.length === 0 ? join(root, "index.html") : join(root, ...segments);
 
-  let stats: Stats;
-  let filePath = target;
-  try {
-    stats = await stat(target);
-    if (stats.isDirectory()) {
-      // A directory request (e.g. `/vendor/`) is not a shell asset; the HTTP
-      // layer decides what non-static paths mean.
-      return { served: false };
-    }
-    if (!stats.isFile()) return { served: false };
-    // May the process read it at all — before believing the stat.
-    await fsAccess(filePath, fsConstants.R_OK);
-  } catch {
-    return { served: false };
-  }
-
-  // Pin the final answer to the root's own identity: a symlink anywhere in
-  // or under the root cannot point outside it.
+  // Pin the final answer to the root's own identity *first*: a symlink anywhere
+  // in or under the root, or a segment that decoded to an embedded slash plus
+  // `..`, cannot point outside it. Doing this before `stat`/`access` also keeps
+  // the handler from probing an out-of-root path for existence or readability —
+  // the containment check, not a rejected stat, is what refuses the request.
+  let filePath: string;
   try {
     const [rootReal, fileReal] = await Promise.all([
-      rootRealpath(root),
-      realpath(filePath),
+      rootRealpath(root, fs),
+      fs.realpath(target),
     ]);
     if (fileReal !== rootReal && !fileReal.startsWith(rootReal + sep)) {
       return { served: false };
@@ -227,7 +248,21 @@ export async function resolveStatic(
     return { served: false };
   }
 
-  const body = await readFile(filePath).catch(() => undefined);
+  let stats: Stats;
+  try {
+    stats = await fs.stat(filePath);
+    if (!stats.isFile()) {
+      // A directory request (e.g. `/vendor/`) is not a shell asset; the HTTP
+      // layer decides what non-static paths mean.
+      return { served: false };
+    }
+    // May the process read it at all — after believing the stat is contained.
+    await fs.access(filePath, fsConstants.R_OK);
+  } catch {
+    return { served: false };
+  }
+
+  const body = await fs.readFile(filePath).catch(() => undefined);
   if (!body) return { served: false };
 
   const originalName = segments.length === 0 ? "index.html" : segments[segments.length - 1]!;

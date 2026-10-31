@@ -345,6 +345,7 @@ pupkeep/
 │   │   ├── http.ts            # routes, SSE, static files
 │   │   ├── lock.ts            # one process per data dir
 │   │   ├── push.ts            # VAPID + Web Push
+│   │   ├── static.ts          # static shell + security headers (P1-10)
 │   │   ├── domain/            # pure domain functions over docs
 │   │   ├── agent/             # system prompt, tools, conversation
 │   │   ├── reminders/         # tasks + outbox
@@ -1508,9 +1509,10 @@ Pi Pocket style, simplified for two caregivers:
   scaffold's `/healthz` is an unauthenticated liveness endpoint returning only
   `{"ok":true}` (no version, counts or paths); P1-09/P1-10 decide whether it
   stays public or joins the authz matrix.
-- Security headers: CSP `default-src 'self'`, `X-Content-Type-Options:
-  nosniff`, `Referrer-Policy: no-referrer`; the service worker caches the static
-  shell only, never API/SSE responses.
+- Security headers: CSP `default-src 'self'; frame-ancestors 'none';
+  base-uri 'none'; form-action 'self'`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`; the service worker caches the static shell
+  only, never API/SSE responses.
 - Cloudflare Access is only available on a named tunnel/domain; the quick tunnel
   is testing-only and protected by the app’s auth. The app’s auth remains
   mandatory everywhere.
@@ -1995,7 +1997,9 @@ that the partner is reached out-of-app is gated on P0-10.
 - [x] **P1-10** PWA shell: manifest, service worker registration, nav, Today
       placeholder, connection status, CSP/security headers, static-only cache.
       **Landed:** `web/index.html` (no inline script/style/handler, so the CSP
-      is plain `default-src 'self'`), `web/app.js` (bottom navigation
+      needs no `script-src` exception: `default-src 'self'` plus the
+      non-inheriting `frame-ancestors`/`base-uri`/`form-action` directives),
+      `web/app.js` (bottom navigation
       Today/Calendar/Pup/Agent/Settings with hash routing over Preact+htm from
       `web/vendor/`, a `role="status"` online/offline banner, focus-visible and
       reduced-motion styles in `web/style.css`), `web/manifest.webmanifest`
@@ -2041,6 +2045,36 @@ that the partner is reached out-of-app is gated on P0-10.
       derived from `PRECACHE`, so the lists cannot drift): off-allowlist
       requests bypass the cache in both directions and go straight to the
       network, with a test pinning `/healthz` and `/login` outside it.
+      **Reviewed and repaired again:** the install path was still ungated —
+      `cache.addAll(PRECACHE)` stored whatever the network returned, including
+      a followed redirect, so `/` could hold the login page — and the runtime
+      cache was authoritative: `match(request, {ignoreSearch: true})` answered
+      `/?token=…` from the cached `/` and overrode the document/modules/manifest
+      `no-cache` policy, making a deploy invisible until `VERSION` was bumped.
+      Install now fetches each entry with `redirect: "error"` and
+      `cache: "no-cache"`, refuses anything that is not a pristine same-origin
+      200 (`ok && type === "basic" && !redirected`) before writing any of them,
+      and fails loudly; a non-empty query string bypasses the cache in both
+      directions; the document, `app.js`, `store.js`, `views/*`, `style.css`
+      and the manifest are network-first with the precache as the offline
+      fallback, while only `vendor/*` and `icons/*` stay cache-first. The
+      header comment states that policy. `test/pwa.test.ts` now executes
+      `web/sw.js` in a `vm` sandbox (fake `self`/`caches`/`fetch`) instead of
+      grepping it: install fills exactly `PRECACHE` or rejects, the reserved,
+      off-allowlist and query-string paths touch no cache, the
+      network-first/cache-first split and the non-200/redirected write gate are
+      behavioural. `src/server/static.ts` lowercases before expanding percent
+      escapes in the traversal pre-filter (`%2E`/`%2F`/`%5C`), pins the realpath
+      inside the root before any `stat`/`access`/`readFile` (so an escaping
+      target is not an existence oracle), reserves the same `/api` and `/sse`
+      namespaces as the worker (a parity test compares the two), and the CSP
+      adds `frame-ancestors 'none'; base-uri 'none'; form-action 'self'`.
+      `web/app.js`'s frame scheduler now reads the latest `(route, online)`
+      when the queued frame runs, so two state changes in one frame both land
+      and the last wins. NOTICE.md records that the shell imports the vendored
+      modules relatively and the bare-specifier builds stay pinned but unused,
+      and §4 lists `static.ts`; `web/views/.gitkeep` was already removed by
+      this task's first commit.
 - [ ] **P1-11** Puppy profile: domain service, HTTP routes, agent tools
       (`get_context`, `update_puppy_profile`), UI.
 - [ ] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake

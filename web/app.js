@@ -81,20 +81,25 @@ function App({ route, online }) {
 const root = document.getElementById("app");
 if (root) {
   let pending = false;
-  let lastRoute = hashRoute();
-  let lastOnline = navigator.onLine;
+  // The newest state, updated on every request. The queued frame reads this
+  // object instead of closing over one `(route, online)` pair: two state
+  // changes in the same frame (a hashchange and an offline event) must both
+  // land, with the last one winning, not the first one freezing the view.
+  const latest = { route: hashRoute(), online: navigator.onLine };
 
-  const draw = (route, online) => {
+  const draw = () => {
     pending = false;
-    render(html`<${App} route=${route} online=${online} />`, root);
+    render(html`<${App} route=${latest.route} online=${latest.online} />`, root);
   };
   const schedule = (route, online) => {
+    latest.route = route;
+    latest.online = online;
     if (pending) return;
     pending = true;
-    requestAnimationFrame(() => draw(route, online));
+    requestAnimationFrame(draw);
   };
 
-  schedule(lastRoute, lastOnline);
+  schedule(latest.route, latest.online);
   subscribe((next) => schedule(next.route, next.online));
 
   window.addEventListener("hashchange", () => {

@@ -10,15 +10,23 @@
 
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, before, after } from "node:test";
+import { createContext, Script } from "node:vm";
 import {
   API_CACHE_CONTROL,
   CONTENT_SECURITY_POLICY,
+  RESERVED_PATHS,
+  RESERVED_PREFIXES,
   applySecurityHeaders,
+  isReservedPath,
+  looksLikeTraversal,
   requestPathOf,
+  resolveStatic,
   serveStaticRequest,
+  type StaticFileSystem,
 } from "../src/server/static.ts";
 
 const WEB = join(import.meta.dirname, "..", "web");
@@ -108,7 +116,7 @@ test("the shell is served at / with the CSP, nosniff and no-referrer", async () 
   const res = await fetchRaw("/");
   assert.equal(res.status, 200);
   assert.equal(res.headers["content-type"], "text/html; charset=utf-8");
-  assert.equal(res.headers["content-security-policy"], "default-src 'self'");
+  assert.equal(res.headers["content-security-policy"], CONTENT_SECURITY_POLICY);
   assert.equal(res.headers["x-content-type-options"], "nosniff");
   assert.equal(res.headers["referrer-policy"], "no-referrer");
   // No CORS anywhere.
@@ -117,6 +125,21 @@ test("the shell is served at / with the CSP, nosniff and no-referrer", async () 
   }
   assert.match(res.body, /<div id="app">/);
   assert.match(res.body, /<link rel="manifest" href="\.\/manifest\.webmanifest">/);
+});
+
+test("the CSP closes framing, base and form action without opening the document", () => {
+  // `frame-ancestors`, `base-uri` and `form-action` do not inherit from
+  // `default-src`; without them the app is framable (clickjacking in front of
+  // the future approval cards) and a `<base>`/form could be pointed elsewhere.
+  assert.equal(
+    CONTENT_SECURITY_POLICY,
+    "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  );
+  for (const directive of ["frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'"]) {
+    assert.ok(CONTENT_SECURITY_POLICY.includes(directive), `missing ${directive}`);
+  }
+  // Tightening must not become loosening: no inline, no eval, no remote origin.
+  assert.doesNotMatch(CONTENT_SECURITY_POLICY, /unsafe-inline|unsafe-eval|(?:https?:|wss?:|\*)/);
 });
 
 test("the shell mounts and navigates only through module scripts", async () => {
@@ -159,7 +182,7 @@ test("the shell imports the vendored modules by relative path", async () => {
 test("HEAD / serves the shell headers without a body", async () => {
   const res = await fetchRaw("/", "HEAD");
   assert.equal(res.status, 200);
-  assert.equal(res.headers["content-security-policy"], "default-src 'self'");
+  assert.equal(res.headers["content-security-policy"], CONTENT_SECURITY_POLICY);
   assert.equal(res.body, "");
 });
 
@@ -269,7 +292,7 @@ test("API and SSE paths are never claimed by the static layer", async () => {
     const res = await fetchRaw(path);
     assert.equal(res.status, 404, `${path} must not resolve to a file`);
     assert.equal(res.headers["cache-control"], API_CACHE_CONTROL, path);
-    assert.equal(res.headers["content-security-policy"], "default-src 'self'", path);
+    assert.equal(res.headers["content-security-policy"], CONTENT_SECURITY_POLICY, path);
     assert.match(res.body, /"error"/);
     assert.doesNotMatch(res.body, /<html/i, `${path} must not answer with the shell`);
   }
@@ -321,6 +344,85 @@ test("dotfiles and odd escapes are refused outright", async () => {
   }
 });
 
+test("the traversal pre-filter expands percent-escapes case-insensitively", () => {
+  // Percent escapes are case-insensitive: `%2E` is `%2e` is `.`. The older
+  // filter lowercased the decoded copy but not the unescaping, so an uppercase
+  // escape walked past the layer the comment claimed caught the classic tricks.
+  for (const target of [
+    "/%2e%2e/package.json",
+    "/%2E%2E/package.json",
+    "/%2E%2e/package.json",
+    "/..%2Fpackage.json",
+    "/..%2fpackage.json",
+    "/%2E%2E%2Fpackage.json",
+    "/..%5Cpackage.json",
+    "/..%5cpackage.json",
+    "/.%00./package.json",
+  ]) {
+    assert.equal(looksLikeTraversal(target), true, target);
+  }
+  for (const target of ["/", "/app.js", "/vendor/preact.mjs", "/views/today.js"]) {
+    assert.equal(looksLikeTraversal(target), false, target);
+  }
+});
+
+test("containment is decided before an out-of-root target is stat'ed or opened", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "pupkeep-static-"));
+  try {
+    const root = join(sandbox, "web");
+    await mkdir(root);
+    await writeFile(join(root, "app.js"), "inside the root");
+    await writeFile(join(sandbox, "package.json"), `{${PACK_NAME}:"outside"}`);
+    await symlink(join(sandbox, "package.json"), join(root, "escape.txt"));
+
+    const calls: string[] = [];
+    const fs: StaticFileSystem = {
+      realpath: async (path) => {
+        calls.push(`realpath ${path}`);
+        return realpath(path);
+      },
+      stat: async (path) => {
+        calls.push(`stat ${path}`);
+        return stat(path);
+      },
+      access: async (path, mode) => {
+        calls.push(`access ${path}`);
+        await access(path, mode);
+      },
+      readFile: async (path) => {
+        calls.push(`readFile ${path}`);
+        return readFile(path);
+      },
+    };
+
+    // The symlink resolves outside the root: containment must refuse it, and
+    // the solution path must never be stat'ed, access'ed or read — otherwise
+    // the handler is an existence/readability oracle for files it will refuse.
+    assert.deepEqual(await resolveStatic("GET", "/escape.txt", { root, fs }), { served: false });
+    assert.deepEqual(
+      calls,
+      [`realpath ${root}`, `realpath ${join(root, "escape.txt")}`],
+      "containment must be the only filesystem call for an escaping target",
+    );
+
+    // A contained file is pinned first, then stat'ed, access'ed and read.
+    calls.length = 0;
+    const served = await resolveStatic("GET", "/app.js", { root, fs });
+    assert.equal(served.served, true);
+    if (!served.served) assert.fail("app.js was not served");
+    assert.equal(served.response.body?.toString(), "inside the root");
+    assert.deepEqual(calls, [
+      `realpath ${root}`,
+      `realpath ${join(root, "app.js")}`,
+      `stat ${join(root, "app.js")}`,
+      `access ${join(root, "app.js")}`,
+      `readFile ${join(root, "app.js")}`,
+    ]);
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
 // === Browser-side guarantees (static assertions) ============================
 
 test("the service worker registers only in a secure context and never claims push now", async () => {
@@ -337,58 +439,594 @@ test("the service worker registers only in a secure context and never claims pus
   assert.doesNotMatch(app, /Notification\.requestPermission/, "no notification prompt in the shell");
 });
 
-test("the service worker caches only the static shell", async () => {
-  const sw = await readFile(join(WEB, "sw.js"), "utf8");
-  // Extract the precache list and check every entry is a real file in web/.
-  const list = sw.match(/const PRECACHE = \[([\s\S]*?)\];/);
-  assert.ok(list, "PRECACHE list found");
-  const entries = [...(list[1]?.matchAll(/"([^"]+)"/g) ?? [])].map((m) => m[1]!);
-  assert.ok(entries.includes("./index.html"), "the document is precached");
-  assert.ok(entries.some((entry) => entry.startsWith("./vendor/")), "vendored modules are precached");
-  assert.ok(entries.some((entry) => entry.startsWith("./icons/")), "icons are precached");
-  for (const entry of entries) {
-    assert.ok(!entry.includes("api"), `${entry} is not an API path`);
-    assert.ok(!entry.includes("sse"), `${entry} is not an SSE path`);
-    if (entry === "./") {
-      // The scope root: served as index.html by the static layer.
-      continue;
-    }
-    const file = join(WEB, entry);
-    await assert.doesNotReject(() => readFile(file), `${entry} does not exist in web/`);
-  }
-  // The dynamic paths are skipped by name in the fetch handler.
-  assert.match(sw, /method !== "GET"/, "never touches non-GET requests");
-  assert.match(sw, /isReserved/, "reserved paths (API/SSE) are excluded");
-  assert.match(sw, /\/api\(/, "the /api prefix is reserved");
-  assert.match(sw, /\/sse/, "the SSE path is reserved");
-  assert.doesNotMatch(sw, /fetch\(["']/, "no offline writes: the worker never fabricates requests");
 
-  // Runtime caching is allowlisted, not "everything except api/sse": derive
-  // the shell pathnames from PRECACHE the way the worker does, and prove the
-  // dynamic and unknown surfaces are outside it.
-  const shell = new Set(entries.map((entry) => "/" + entry.replace(/^\.\//, "")));
-  assert.ok(shell.has("/"), "the shell document is on the allowlist");
-  assert.ok(shell.has("/index.html"), "index.html is on the allowlist");
-  assert.ok(shell.has("/app.js"), "app modules are on the allowlist");
-  for (const dynamic of ["/healthz", "/login", "/invite", "/tos", "/download"] as const) {
+// === The service worker, executed ==========================================
+//
+// The worker is loaded into a `vm` sandbox with a fake `self`, `caches` and
+// `fetch`, then driven through real install/activate/fetch events. The source
+// is the shipped `web/sw.js`; only a one-line probe is appended so the test can
+// read the cache list and the reserved prefixes the worker derived at boot.
+
+const ORIGIN = "https://pupkeep.test";
+
+interface WorkerRequest {
+  url: string;
+  method: string;
+}
+
+interface WorkerResponse {
+  status: number;
+  ok: boolean;
+  type: string;
+  redirected: boolean;
+  body: string;
+  clone(): WorkerResponse;
+}
+
+function shellResponse(init: Partial<Omit<WorkerResponse, "ok" | "clone">> = {}): WorkerResponse {
+  const status = init.status ?? 200;
+  const response: WorkerResponse = {
+    status,
+    ok: status >= 200 && status < 300,
+    type: init.type ?? "basic",
+    redirected: init.redirected ?? false,
+    body: init.body ?? "shell",
+    clone: () => ({ ...response, clone: response.clone }),
+  };
+  return response;
+}
+
+function fetchRequest(path: string, method = "GET"): WorkerRequest {
+  return { url: new URL(path, ORIGIN).href, method };
+}
+
+interface MatchOptions {
+  ignoreSearch?: boolean;
+}
+
+class FakeCache {
+  readonly store = new Map<string, WorkerResponse>();
+  readonly log: string[] = [];
+  fetchImpl: (input: WorkerRequest | string, init?: RequestInit) => Promise<WorkerResponse>;
+
+  constructor(fetchImpl: (input: WorkerRequest | string, init?: RequestInit) => Promise<WorkerResponse>) {
+    this.fetchImpl = fetchImpl;
+  }
+
+  key(input: WorkerRequest | string): string {
+    return new URL(typeof input === "string" ? input : input.url, ORIGIN).href;
+  }
+
+  async match(input: WorkerRequest | string, options?: MatchOptions): Promise<WorkerResponse | undefined> {
+    const key = this.key(input);
+    this.log.push(`match ${new URL(key).pathname}${options?.ignoreSearch ? " ignoreSearch" : ""}`);
+    if (options?.ignoreSearch) {
+      const bare = key.split("?")[0];
+      for (const [candidate, response] of this.store) {
+        if (candidate.split("?")[0] === bare) return response;
+      }
+      return undefined;
+    }
+    return this.store.get(key);
+  }
+
+  async put(input: WorkerRequest | string, response: WorkerResponse): Promise<void> {
+    const key = this.key(input);
+    this.log.push(`put ${new URL(key).pathname}`);
+    this.store.set(key, response);
+  }
+
+  /** Cache API fidelity: the pre-fix worker used `addAll`, so the harness has
+   * to be able to run it (with the default redirect-following fetch) to show
+   * what the install path did before the fix. The fixed worker never calls it. */
+  async addAll(inputs: readonly (WorkerRequest | string)[]): Promise<void> {
+    for (const input of inputs) {
+      this.log.push(`addAll ${new URL(this.key(input)).pathname}`);
+      this.store.set(this.key(input), await this.fetchImpl(input));
+    }
+  }
+
+  get(path: string): WorkerResponse | undefined {
+    return this.store.get(new URL(path, ORIGIN).href);
+  }
+
+  remove(path: string): void {
+    this.store.delete(new URL(path, ORIGIN).href);
+  }
+
+  paths(): string[] {
+    return [...this.store.keys()].map((key) => new URL(key).pathname).sort();
+  }
+}
+
+class FakeCaches {
+  readonly stores = new Map<string, FakeCache>();
+  readonly opened: string[] = [];
+  fetchImpl: (input: WorkerRequest | string, init?: RequestInit) => Promise<WorkerResponse>;
+
+  constructor(fetchImpl: (input: WorkerRequest | string, init?: RequestInit) => Promise<WorkerResponse>) {
+    this.fetchImpl = fetchImpl;
+  }
+
+  async open(name: string): Promise<FakeCache> {
+    this.opened.push(name);
+    const existing = this.stores.get(name);
+    if (existing) return existing;
+    const cache = new FakeCache(this.fetchImpl);
+    this.stores.set(name, cache);
+    return cache;
+  }
+
+  async keys(): Promise<string[]> {
+    return [...this.stores.keys()];
+  }
+
+  async delete(name: string): Promise<boolean> {
+    return this.stores.delete(name);
+  }
+
+  get only(): FakeCache {
+    const first = this.stores.values().next();
+    if (first.done) throw new Error("the worker opened no cache");
+    return first.value;
+  }
+}
+
+interface SwProbe {
+  PRECACHE: string[];
+  RESERVED: string[];
+  CACHE: string;
+  SHELL_PATHS: string[];
+  IMMUTABLE: string[];
+  isReserved(pathname: string): boolean;
+}
+
+interface SwEvent {
+  request?: WorkerRequest;
+  waitUntil(promise: Promise<unknown>): void;
+  respondWith(promise: Promise<WorkerResponse>): void;
+}
+
+type SwListener = (event: SwEvent) => void;
+type NetworkRoute = (url: URL, init: RequestInit | undefined) => WorkerResponse | Promise<WorkerResponse>;
+type FetchCall = { url: string; init: RequestInit | undefined };
+
+interface WorkerHarness {
+  storage: FakeCaches;
+  network: FetchCall[];
+  readonly cache: FakeCache;
+  probe: SwProbe;
+  precache: string[];
+  reserved: string[];
+  install(): Promise<void>;
+  activate(): Promise<void>;
+  dispatch(request: WorkerRequest): Promise<WorkerResponse | undefined>;
+  skipWaitingCalls(): number;
+  claimCalls(): number;
+}
+
+async function loadWorker(route: NetworkRoute = () => shellResponse()): Promise<WorkerHarness> {
+  const network: FetchCall[] = [];
+  const listeners = new Map<string, SwListener[]>();
+  let skipWaiting = 0;
+  let claimed = 0;
+
+  const self = {
+    location: new URL(`${ORIGIN}/sw.js`),
+    addEventListener(type: string, listener: SwListener) {
+      const list = listeners.get(type) ?? [];
+      list.push(listener);
+      listeners.set(type, list);
+    },
+    skipWaiting: async () => {
+      skipWaiting += 1;
+    },
+    clients: {
+      claim: async () => {
+        claimed += 1;
+      },
+    },
+  };
+
+  const fetchSpy = async (input: WorkerRequest | string, init?: RequestInit): Promise<WorkerResponse> => {
+    const url = new URL(typeof input === "string" ? input : input.url, ORIGIN);
+    network.push({ url: url.href, init });
+    return route(url, init);
+  };
+  const storage = new FakeCaches(fetchSpy);
+
+  const source = `${await readFile(join(WEB, "sw.js"), "utf8")}
+;globalThis.__swProbe = { PRECACHE, RESERVED, CACHE, SHELL_PATHS: [...SHELL_PATHS], IMMUTABLE: typeof IMMUTABLE === "undefined" ? [] : [...IMMUTABLE], isReserved };`;
+  const context = createContext({ self, caches: storage, fetch: fetchSpy, URL, Error, Promise, console });
+  new Script(source, { filename: "web/sw.js" }).runInContext(context);
+  const probe = (context as unknown as { __swProbe: SwProbe }).__swProbe;
+
+  const dispatchWait = (type: "install" | "activate"): Promise<void> => {
+    let waited: Promise<unknown> | undefined;
+    const event: SwEvent = {
+      waitUntil(promise) {
+        waited = promise;
+      },
+      respondWith() {
+        throw new Error(`${type} must not call respondWith`);
+      },
+    };
+    for (const listener of listeners.get(type) ?? []) listener(event);
+    if (!waited) throw new Error(`${type} listener never called waitUntil`);
+    return Promise.resolve(waited).then(() => undefined);
+  };
+
+  const dispatch = async (request: WorkerRequest): Promise<WorkerResponse | undefined> => {
+    let responded: Promise<WorkerResponse> | undefined;
+    const event: SwEvent = {
+      request,
+      waitUntil() {
+        throw new Error("fetch must not call waitUntil");
+      },
+      respondWith(promise) {
+        responded = promise;
+      },
+    };
+    for (const listener of listeners.get("fetch") ?? []) listener(event);
+    return responded;
+  };
+
+  return {
+    storage,
+    network,
+    get cache() {
+      return storage.only;
+    },
+    probe,
+    precache: probe.PRECACHE,
+    reserved: probe.RESERVED,
+    install: () => dispatchWait("install"),
+    activate: () => dispatchWait("activate"),
+    dispatch,
+    skipWaitingCalls: () => skipWaiting,
+    claimCalls: () => claimed,
+  };
+}
+
+test("install fills exactly PRECACHE, from pristine same-origin 200s", async () => {
+  const worker = await loadWorker((url) => shellResponse({ body: `shell ${url.pathname}` }));
+  await worker.install();
+
+  const expected = [...worker.precache]
+    .map((entry) => new URL(entry, `${ORIGIN}/sw.js`).pathname)
+    .sort();
+  assert.equal(expected.length, 15, "the shell is the document, styles, modules, manifest and icons");
+  assert.deepEqual(worker.cache.paths(), expected, "the cache holds exactly the precache list");
+  assert.equal(worker.network.length, worker.precache.length, "one network fetch per entry");
+  for (const call of worker.network) {
+    assert.equal(call.init?.redirect, "error", `${call.url} must not follow a redirect`);
+    assert.equal(call.init?.cache, "no-cache", `${call.url} must revalidate`);
+  }
+  assert.equal(worker.skipWaitingCalls(), 1);
+  assert.deepEqual(worker.storage.opened, [worker.probe.CACHE]);
+
+  for (const entry of worker.precache) {
+    assert.ok(!entry.includes("/api") && !entry.includes("/sse"), `${entry} is a dynamic path`);
+    if (entry === "./") continue; // the scope root, served as index.html
+    await assert.doesNotReject(() => readFile(join(WEB, entry)), `${entry} does not exist in web/`);
+  }
+});
+
+test("install refuses a redirected shell response instead of storing it under /", async () => {
+  // The browser got `302 / -> /login`, followed it, and answered 200 with the
+  // login body. `ok` is true and the type is basic; only `redirected` shows it.
+  const worker = await loadWorker((url) =>
+    url.pathname === "/"
+      ? shellResponse({ redirected: true, body: "<html>sign in</html>" })
+      : shellResponse(),
+  );
+  await assert.rejects(worker.install(), /\/ is not a same-origin 200.*redirected true/);
+  assert.deepEqual(worker.storage.opened, [], "nothing is written when one entry is bad");
+});
+
+test("install fails loudly on a non-200, a cross-origin or a rejected fetch", async () => {
+  const cases: Array<[string, NetworkRoute]> = [
+    ["404", (url) => (url.pathname === "/app.js" ? shellResponse({ status: 404 }) : shellResponse())],
+    ["cors", (url) => (url.pathname === "/app.js" ? shellResponse({ type: "cors" }) : shellResponse())],
+    [
+      "redirect:error",
+      (_url, init) => {
+        if (init?.redirect === "error") throw new TypeError("redirect mode is error");
+        return shellResponse();
+      },
+    ],
+  ];
+  for (const [label, route] of cases) {
+    const worker = await loadWorker(route);
+    await assert.rejects(worker.install(), /install|redirect/i, label);
+    assert.equal(worker.storage.stores.size, 0, `${label}: no partial cache is left behind`);
+  }
+});
+
+test("activate deletes the previous cache and claims the clients", async () => {
+  const worker = await loadWorker();
+  const old = await worker.storage.open("pupkeep-static-v0");
+  await old.put("/index.html", shellResponse({ body: "old shell" }));
+  await worker.install();
+  await worker.activate();
+  assert.deepEqual(await worker.storage.keys(), [worker.probe.CACHE]);
+  assert.equal(worker.claimCalls(), 1);
+});
+
+test("the worker and the static layer reserve the same namespaces", async () => {
+  const worker = await loadWorker();
+  assert.deepEqual([...worker.reserved], [...RESERVED_PREFIXES, ...RESERVED_PATHS]);
+  const candidates = [
+    "/api",
+    "/api/",
+    "/api/feed",
+    "/apifoo",
+    "/sse",
+    "/sse/",
+    "/ssefoo",
+    "/sessions",
+    "/healthz",
+    "/app.js",
+    "/",
+  ];
+  for (const path of candidates) {
+    assert.equal(worker.probe.isReserved(path), isReservedPath(path), path);
+  }
+});
+
+test("the worker never intercepts /api, /sse, non-GET or cross-origin requests", async () => {
+  const worker = await loadWorker();
+  for (const path of ["/api", "/api/", "/api/feed", "/api/v1/events", "/sse", "/sse/stream", "/ssefoo"]) {
+    assert.equal(await worker.dispatch(fetchRequest(path)), undefined, path);
+  }
+  assert.equal(await worker.dispatch(fetchRequest("/", "POST")), undefined, "non-GET");
+  assert.equal(await worker.dispatch(fetchRequest("/app.js", "HEAD")), undefined, "HEAD is not a GET");
+  assert.equal(
+    await worker.dispatch({ url: "https://elsewhere.test/app.js", method: "GET" }),
+    undefined,
+    "cross-origin",
+  );
+  assert.equal(worker.network.length, 0, "nothing was fetched on the worker's behalf");
+  assert.deepEqual(worker.storage.opened, [], "the cache was never opened");
+});
+
+test("off-allowlist and query-string requests go to the network with no cache read or write", async () => {
+  const worker = await loadWorker((url) => shellResponse({ body: `${url.pathname}${url.search}` }));
+  await worker.install();
+  const cache = worker.cache;
+  const before = cache.paths();
+  cache.log.length = 0;
+
+  const offAllowlist = ["/healthz", "/login", "/invite", "/tos", "/vendor/preact-hooks.mjs"];
+  for (const path of offAllowlist) {
+    const response = await worker.dispatch(fetchRequest(path));
+    assert.equal(response?.body, path, `${path} must be a live network answer`);
+  }
+
+  const withQuery = ["/?token=secret", "/index.html?v=2", "/app.js?x=1", "/vendor/preact.mjs?v=1"];
+  for (const path of withQuery) {
+    const url = new URL(path, ORIGIN);
+    const response = await worker.dispatch(fetchRequest(path));
+    assert.equal(response?.body, url.pathname + url.search, `${path} must reach the network`);
+  }
+
+  assert.deepEqual(cache.paths(), before, "nothing was written");
+  assert.ok(
+    cache.log.every((entry) => !entry.includes("ignoreSearch")),
+    "the shell must never be matched with ignoreSearch",
+  );
+  assert.deepEqual(cache.log, [], `the cache was touched: ${cache.log.join(", ")}`);
+  assert.equal(worker.network.length, worker.precache.length + offAllowlist.length + withQuery.length);
+  // The query survived to the network: `/?token=…` was not collapsed to `/`.
+  assert.ok(worker.network.some((call) => call.url === `${ORIGIN}/?token=secret`));
+});
+
+test("revalidating shell files are network-first with a cache fallback", async () => {
+  let online = true;
+  const worker = await loadWorker((url) => {
+    if (!online) throw new TypeError("offline");
+    return shellResponse({ body: `fresh ${url.pathname}` });
+  });
+  await worker.install();
+
+  // The files the HTTP layer serves `Cache-Control: no-cache`.
+  for (const path of ["/", "/index.html", "/app.js", "/store.js", "/views/today.js", "/manifest.webmanifest", "/style.css"]) {
+    worker.network.length = 0;
+    const response = await worker.dispatch(fetchRequest(path));
+    assert.equal(response?.body, `fresh ${path}`, `${path} must be answered by the network first`);
+    assert.equal(worker.network.length, 1, `${path} must hit the network`);
+    assert.equal(worker.network[0]?.url, new URL(path, ORIGIN).href, path);
+    assert.equal(worker.cache.get(path)?.body, `fresh ${path}`, `${path} refreshed the cache`);
+  }
+
+  online = false;
+  for (const path of ["/", "/app.js", "/views/calendar.js"]) {
+    worker.network.length = 0;
+    const response = await worker.dispatch(fetchRequest(path));
+    assert.equal(response?.body, `fresh ${path}`, `${path} fell back to the precache offline`);
+    assert.equal(worker.network.length, 1, `${path} still tried the network once`);
+  }
+
+  // Offline with nothing cached is an honest failure, not a fabricated shell.
+  worker.cache.remove("/views/pup.js");
+  await assert.rejects(worker.dispatch(fetchRequest("/views/pup.js")), /offline/);
+});
+
+test("vendored modules and icons are answered from cache first", async () => {
+  const worker = await loadWorker((url) => shellResponse({ body: `network ${url.pathname}` }));
+  await worker.install();
+  const cache = worker.cache;
+
+  for (const path of ["/vendor/preact.mjs", "/vendor/htm.mjs", "/icons/icon-192.png", "/icons/icon-512.png"]) {
+    worker.network.length = 0;
+    const response = await worker.dispatch(fetchRequest(path));
+    assert.equal(response?.body, `network ${path}`, `${path} came from the precache`);
+    assert.equal(worker.network.length, 0, `${path} did not hit the network`);
+  }
+
+  // A cache miss fetches once and fills the cache.
+  cache.remove("/vendor/htm.mjs");
+  worker.network.length = 0;
+  const fetched = await worker.dispatch(fetchRequest("/vendor/htm.mjs"));
+  assert.equal(fetched?.body, "network /vendor/htm.mjs");
+  assert.equal(worker.network.length, 1);
+  assert.equal(cache.get("/vendor/htm.mjs")?.body, "network /vendor/htm.mjs");
+});
+
+test("a non-200, cross-origin-typed or redirected answer is never stored", async () => {
+  const cases: Array<[string, WorkerResponse]> = [
+    ["/app.js", shellResponse({ status: 500 })],
+    ["/style.css", shellResponse({ status: 404 })],
+    ["/app.js", shellResponse({ type: "cors" })],
+    ["/vendor/preact.mjs", shellResponse({ redirected: true })],
+  ];
+  for (const [path, answer] of cases) {
+    // Install succeeds first; only the runtime answer is the bad one.
+    let answering = false;
+    const worker = await loadWorker((url) =>
+      answering && url.pathname === path ? answer : shellResponse({ body: `precached ${url.pathname}` }),
+    );
+    await worker.install();
+    answering = true;
+    const cached = worker.cache.get(path)?.body;
+    assert.ok(cached, `${path} was precached`);
+    worker.cache.log.length = 0;
+
+    const served = await worker.dispatch(fetchRequest(path));
+    assert.equal(served?.status, answer.status, path);
+    assert.equal(worker.cache.get(path)?.body, cached, `${path} was overwritten`);
     assert.ok(
-      !shell.has(dynamic),
-      `${dynamic} is not a shell asset and must not be runtime-cached`,
+      !worker.cache.log.some((entry) => entry.startsWith("put ")),
+      `${path} was written despite status ${answer.status}, type ${answer.type}, redirected ${answer.redirected}`,
     );
   }
-  // And the fetch handler refuses to touch the cache for anything off the
-  // allowlist, in both directions, before any cache operation could happen.
-  const fetchHandler = sw.slice(sw.indexOf("addEventListener(\"fetch\""));
-  const allowlist = fetchHandler.indexOf("!isShellAsset(url.pathname)");
-  const cacheOpen = fetchHandler.indexOf("caches.open(CACHE)");
-  assert.ok(allowlist !== -1, "the fetch handler checks the shell allowlist");
-  assert.ok(cacheOpen !== -1, "the fetch handler uses its own shell cache");
-  assert.ok(allowlist < cacheOpen, "non-shell requests never reach the cache at all");
-  assert.match(
-    fetchHandler,
-    /if \(!isShellAsset\(url\.pathname\)\) \{\s*event\.respondWith\(fetch\(request\)\);\s*return;/,
-    "off-allowlist requests bypass the cache untouched",
+});
+
+// === app.js scheduling ======================================================
+//
+// app.js has no build step and no module mocking; the test strips its imports
+// (their behaviour is the fake store's) and runs the rest against a fake DOM.
+
+test("app.js applies every state change in a frame and the last one wins", async () => {
+  const source = await readFile(join(WEB, "app.js"), "utf8");
+  const body = source
+    .split("\n")
+    .filter((line) => !line.startsWith("import "))
+    .join("\n")
+    .replace(/^export /gm, "");
+  assert.doesNotMatch(body, /^\s*(?:import|export)\b/m, "the harness could not strip the module syntax");
+
+  const routes = new Set(["today", "calendar", "pup", "agent", "settings"]);
+  const location = { hash: "" };
+  const state = { route: "today", online: true as boolean };
+  const subscribers = new Set<(next: typeof state) => void>();
+  const hashRoute = () =>
+    routes.has(String(location.hash).replace(/^#\/?/, "")) ? String(location.hash).replace(/^#\/?/, "") : "today";
+  const setState = (patch: Partial<typeof state>) => {
+    let changed = false;
+    for (const [key, value] of Object.entries(patch)) {
+      if (state[key as keyof typeof state] === value) continue;
+      (state as Record<string, unknown>)[key] = value;
+      changed = true;
+    }
+    if (changed) for (const listener of subscribers) listener(state);
+  };
+  const subscribe = (listener: (next: typeof state) => void) => {
+    subscribers.add(listener);
+    return () => subscribers.delete(listener);
+  };
+
+  const frames: Array<() => void> = [];
+  const renders: Array<{ route: string; online: boolean }> = [];
+  const htm = {
+    bind: () => (_strings: TemplateStringsArray, ...values: unknown[]) => ({ values }),
+  };
+  const h = () => null;
+  const render = (vnode: { values: unknown[] }) => {
+    renders.push({ route: String(vnode.values[1]), online: Boolean(vnode.values[2]) });
+  };
+  const windowListeners = new Map<string, Array<() => void>>();
+  const window = {
+    isSecureContext: true,
+    addEventListener(type: string, listener: () => void) {
+      const list = windowListeners.get(type) ?? [];
+      list.push(listener);
+      windowListeners.set(type, list);
+    },
+  };
+  const dispatchWindow = (type: string) => {
+    for (const listener of windowListeners.get(type) ?? []) listener();
+  };
+  const navigator = { onLine: true };
+  const document = { getElementById: () => ({}) };
+  const requestAnimationFrame = (callback: () => void) => frames.push(callback);
+  const View = () => null;
+
+  new Function(
+    "h",
+    "render",
+    "htm",
+    "hashRoute",
+    "setState",
+    "subscribe",
+    "Today",
+    "Calendar",
+    "Pup",
+    "Agent",
+    "Settings",
+    "document",
+    "navigator",
+    "window",
+    "requestAnimationFrame",
+    body,
+  )(
+    h,
+    render,
+    htm,
+    hashRoute,
+    setState,
+    subscribe,
+    View,
+    View,
+    View,
+    View,
+    View,
+    document,
+    navigator,
+    window,
+    requestAnimationFrame,
   );
-  const put = fetchHandler.indexOf("cache.put(request");
-  assert.ok(put !== -1 && put > allowlist, "cache.put is reachable only after the allowlist gate");
+
+  const flush = () => {
+    const frame = frames.shift();
+    assert.ok(frame, "a frame was queued");
+    frame();
+  };
+
+  // The first frame is still pending when the user navigates and goes offline.
+  location.hash = "#calendar";
+  navigator.onLine = false;
+  dispatchWindow("hashchange");
+  dispatchWindow("offline");
+  assert.equal(frames.length, 1, "both changes coalesce into the one queued frame");
+  flush();
+  assert.deepEqual(renders[0], { route: "calendar", online: false });
+
+  // The frame reset `pending`: the next change paints again.
+  navigator.onLine = true;
+  dispatchWindow("online");
+  assert.equal(frames.length, 1, "a later change queues a new frame");
+  flush();
+  assert.deepEqual(renders[1], { route: "calendar", online: true });
+
+  // Two navigation changes in one frame: the last route wins, not the first.
+  location.hash = "#pup";
+  dispatchWindow("hashchange");
+  location.hash = "#agent";
+  dispatchWindow("hashchange");
+  assert.equal(frames.length, 1);
+  flush();
+  assert.deepEqual(renders[2], { route: "agent", online: true });
+
+  assert.equal(renders.length, 3, "one render per frame, no dropped or duplicated paint");
 });
