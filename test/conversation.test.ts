@@ -572,6 +572,46 @@ test("SSE subscribes before the snapshot read, so a commit during the read is qu
   }
 });
 
+test("a delta the snapshot's counter already covers is not replayed", async () => {
+  const fixture = await startThread();
+  const { bus, commit } = fakeBus();
+  let origin = "";
+  const deps = {
+    auth: fixture.auth,
+    thread: { harness: fixture.app.app, context: BACKGROUND_CONTEXT },
+    bus,
+    submitLimiter: new RateLimiter(SUBMIT_LIMIT, 60_000),
+    signInLimiter: new RateLimiter(SIGNIN_LIMIT, 60_000),
+    allowedOrigins: () => (origin === "" ? [] : [origin]),
+    logger: createLogger({ scope: "test", sink: () => undefined }),
+    // The other side of the attach race: the commit lands during the read and
+    // the snapshot returned for it already carries the new counter, so the
+    // queued batch is a duplicate and must not be replayed.
+    readSnapshot: async (): Promise<ThreadSnapshot> => {
+      const seq = commit();
+      return { conversationId: 1, seq, status: { busy: false, queued: 0 }, entries: [] };
+    },
+  };
+  const gate = await listenHttp("127.0.0.1", 0, createAppHandler(deps));
+  origin = gate.url;
+  try {
+    const response = await fetch(`${gate.url}/api/agent/events`, {
+      headers: { Cookie: cookieFor(fixture.alexCookie) },
+    });
+    assert.equal(response.status, 200);
+    const frames = framesOf(response);
+    const snapshotFrame = await nextFrame(frames);
+    assert.equal(snapshotFrame.event, "snapshot");
+    assert.equal((snapshotFrame.data as ThreadSnapshot).seq, 1);
+    // Nothing follows: the recovered batch is inside the snapshot, so a client
+    // applying deltas idempotently never sees the entry twice.
+    await assert.rejects(nextFrame(frames, 400), /no SSE frame in time/);
+  } finally {
+    await gate.close();
+    await stop(fixture);
+  }
+});
+
 test("a new SSE attach after the stream ended answers 503, not heartbeats forever", async () => {
   const fixture = await startThread();
   try {

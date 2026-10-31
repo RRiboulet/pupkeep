@@ -555,11 +555,17 @@ async function handleEvents(
 ): Promise<void> {
   let live = true;
   let opened = false;
-  const queue: Array<{ type: "batch" | "reconnect"; events?: readonly AgentEvent[] }> = [];
+  // A batch remembers the counter value it was broadcast at. Reporting
+  // `bus.seq` at delivery time instead would blur the counter across the
+  // attach and hide a gap from a client that watches for one (§9.4).
+  type QueueItem =
+    | { type: "batch"; seq: number; events?: readonly AgentEvent[] }
+    | { type: "reconnect" };
+  const queue: QueueItem[] = [];
 
-  const deliver = (item: { type: "batch" | "reconnect"; events?: readonly AgentEvent[] }): void => {
+  const deliver = (item: QueueItem): void => {
     if (item.type === "batch") {
-      writeEvent(res, "batch", { seq: deps.bus.seq, ...(item.events ? { events: item.events } : {}) });
+      writeEvent(res, "batch", { seq: item.seq, ...(item.events ? { events: item.events } : {}) });
       return;
     }
     // Not a fake event from another conversation: a marker to reattach.
@@ -573,11 +579,17 @@ async function handleEvents(
       if (!live) return;
       // §9.4 on every attach: the snapshot is written first, so deltas that
       // arrive between subscribe() and the snapshot write queue up here.
-      if (!opened) {
-        queue.push({ type: type === "batch" ? "batch" : "reconnect", ...(events ? { events } : {}) });
+      if (type !== "batch") {
+        if (!opened) queue.push({ type: "reconnect" });
+        else deliver({ type: "reconnect" });
         return;
       }
-      deliver({ type: type === "batch" ? "batch" : "reconnect", ...(events ? { events } : {}) });
+      const item: QueueItem = { type: "batch", seq: deps.bus.seq, ...(events ? { events } : {}) };
+      if (!opened) {
+        queue.push(item);
+        return;
+      }
+      deliver(item);
     },
     onClose: () => {
       live = false;
@@ -616,6 +628,10 @@ async function handleEvents(
   opened = true;
   for (const item of queue.splice(0)) {
     if (!live) break;
+    // A batch at or below the snapshot's counter was broadcast before the
+    // snapshot was read, so the snapshot already carries it: replaying it
+    // would duplicate entries. Anything later is a genuine delta.
+    if (item.type === "batch" && item.seq <= initial.seq) continue;
     deliver(item);
   }
   if (!live) {
