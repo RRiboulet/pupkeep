@@ -354,6 +354,8 @@ pupkeep/
 ├── web/
 │   ├── index.html
 │   ├── app.js
+│   ├── client.js             # fetch + mutation headers (P1-11)
+│   ├── live.js               # the one event stream (P1-11)
 │   ├── store.js
 │   ├── views/                 # Today, Calendar, Pup, Agent, Settings
 │   ├── sw.js
@@ -891,7 +893,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | Document | Contents | Invariants |
 |---|---|---|
 | `app.household` | Name, timezone, display-member profiles, settings, shared conversation ID, hidden system conversation ID, reminder task IDs | Max two members; auth/roles live in `config.json`; the system conversation never calls a model |
-| `app.puppy` | Name, birthday, breed, sex, target weight | One puppy; birthday is a local date; age computed; the shower interval is `app.household.settings.showerIntervalDays` (one source) |
+| `app.puppy` | Name, birthday, breed, sex, target weight, revision | One puppy; birthday is a local date; age computed; the shower interval is `app.household.settings.showerIntervalDays` (one source) |
 | `app.feeding` | Meal slots, feed events | One normal feed per slot per local date; extra feeds have no slot |
 | `app.walks` | One open walk + history | One open walk at a time; duration from server timestamps |
 | `app.growth` | Measurements (weight, height, note, who, when) | Ascending history; optional target weight |
@@ -910,8 +912,12 @@ adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
 members, settings or pending idempotency records. `checkpointWhen` stores a
 base every 100 deltas. Activity keeps its last 200 entries and commands keep
-24h/1000; those caps are enforced by the domain maintenance in P2/P4, not by
-the bootstrap.
+24h/1000, enforced in the domain helpers as each document first gains a writer
+(activity and commands with P1-11).
+
+The first shape change is P1-11's `app.puppy.rev`: the value is schema 2 and
+the document version 2, and `migrate` fills `rev: 0` for a version-1 document so
+a phone that ran P1-08 keeps its puppy instead of failing boot.
 
 ### 8.2 Host-side data
 
@@ -2171,8 +2177,57 @@ that the partner is reached out-of-app is gated on P0-10.
       modules relatively and the bare-specifier builds stay pinned but unused,
       and §4 lists `static.ts`; `web/views/.gitkeep` was already removed by
       this task's first commit.
-- [ ] **P1-11** Puppy profile: domain service, HTTP routes, agent tools
-      (`get_context`, `update_puppy_profile`), UI.
+- [x] **P1-11** Puppy profile: domain service, HTTP routes, agent tools
+      (`get_context`, `get_puppy`, `update_puppy_profile`), UI.
+      **Landed:** `src/server/domain/profile.ts` (read/view/update over
+      `app.puppy`, the only writer of the document), `src/server/domain/time.ts`
+      (household-local date/time, calendar-month age, `days → weeks(20) →
+      months → years` label), `src/server/domain/activity.ts` (built by domain
+      code, 200-entry cap), `src/server/domain/commands.ts` (`app.commands`
+      idempotency: same key + same request hash replays as success, same key +
+      another request is 409, 24 h/1000 cap, pruned on write),
+      `src/server/domain/errors.ts` (503/409 domain refusals for the one HTTP
+      mapper), `src/shared/profile.ts` (the wire view and the one patch parser
+      both callers use), `src/server/agent/tools.ts` (the `puppy-profile`
+      extension: `get_puppy`, `get_context`, `update_puppy_profile`, the last
+      one `replay: "safe"` on `api.taskId`), `src/server/agent/state.ts` (live
+      profile frames from committed documents), `GET`/`PATCH /api/puppy`, the
+      `event: profile` frame on the existing SSE stream, and the PWA Pup view
+      (`web/client.js` for the mutation headers, `web/live.js` for the single
+      stream, `web/views/pup.js` as a class component because no import map is
+      served and the vendored hooks build needs a bare `preact` specifier).
+      Decisions: (1) `app.puppy` gains `rev` and moves to schema/document
+      version 2 with a `migrate` that fills `rev: 0`, so a P1-08 database is
+      never reset; (2) the revision check runs **inside** the commit and after
+      the idempotency lookup, so a retried save replays as success instead of
+      reporting itself stale; (3) the profile frame rides the existing SSE
+      stream rather than a second endpoint, does not touch the thread's `seq`,
+      and carries the whole view (P2's meals join the same frame); (4) tools
+      resolve the actor from the newest `app.chat` entry **inside** the write
+      commit (§9.2 rule 2) instead of trusting the model; (5) `readHousehold`
+      now mirrors a member who joined after boot into `app.household`
+      (creates only, never removes — removal stays a boot decision), which
+      closes the P1-09 `Household`-label seam without weakening the
+      "auth is the authority" rule; (6) `get_context` names the §10.1 sections
+      this build does not track yet (`meals`, `walks`, `growth`, `milestones`,
+      `appointments`, `showers`) so an empty result cannot be read as "nothing
+      happened"; (7) the shared-thread prompt loses its "get_context is not
+      available yet" parenthesis, which P1-09 had left in place.
+      **Verified:** 24 new tests in `test/profile.test.ts` (local date vs UTC,
+      age boundaries, month clamping, the v1→v2 migration, rev bump + one
+      activity entry, exact-request replay, key conflict, stale refusal with
+      the current profile, future birthday, retired document, the HTTP auth/
+      origin/header/content-type/key matrix, a two-caregiver conflict over
+      HTTP with replay, the `profile` SSE frame arriving on the *other*
+      caregiver's stream, the three tools as thin domain wrappers with the
+      household fallback actor, and one real faux-provider run proving the
+      registry wiring and Alex's activity attribution); 289 tests total,
+      typecheck clean. The P1-09/09-test seam was repaired in place: the
+      invite-joiner label assertion now expects `Sam`, and the stale
+      `ThreadUnavailableError`/prompt notes are gone. **Not verified:** a real
+      browser render of the Pup form, a real provider, and the partner's
+      iPhone; the service-worker shell bump (`pupkeep-shell-v2`) is exercised
+      only through the worker harness in `test/pwa.test.ts`.
 - [ ] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake
       provider, busy reject, restart, SSE, log scrub.
 - [ ] **P1-13** Phone runbook draft: Termux install, wake lock, boot script,

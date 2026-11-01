@@ -1,7 +1,8 @@
 # Todo guide — how to work the Pupkeep plan
 
-**Status:** Phase 1 in progress. P1-01..P1-07 are on `main`; P0-03/P0-08/P0-10
-remain device-gated partner checks and do not block the host-side work.
+**Status:** Phase 1 in progress. P1-01..P1-11 are on `main` (P1-12..P1-14 open);
+P0-03/P0-08/P0-10 remain device-gated partner checks and do not block the
+host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The
