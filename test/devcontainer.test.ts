@@ -70,10 +70,20 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
   assert.match(dockerfile, /test "\$\(pi --version\)" = "1\.4\.0"/);
 
   assert.match(dockerfile, /CLOUDFLARED_VERSION=2026\.10\.5/);
-  assert.match(dockerfile, /CLOUDFLARED_SHA256=149d1ec4ac8e58bdbf08a41cc42347da9184d9fb4ef0df6528d75c90a85ac0ed/);
-  assert.match(dockerfile, /cloudflared-linux-amd64\.deb/);
+  // Cloudflare publishes a `.deb` per architecture and no shared manifest, so
+  // each one carries its own SHA-256. A single checksum cannot describe both.
+  assert.match(dockerfile, /CLOUDFLARED_SHA256_AMD64=149d1ec4ac8e58bdbf08a41cc42347da9184d9fb4ef0df6528d75c90a85ac0ed/);
+  assert.match(dockerfile, /CLOUDFLARED_SHA256_ARM64=361584f9c6a1af6f9c553011291494b72fb6c887841ce6735dc6df8b6e727e72/);
+  // The download must be architecture-selected, not hardcoded to one build.
+  assert.match(dockerfile, /cloudflared-linux-\$\{arch\}\.deb/);
+  assert.doesNotMatch(dockerfile, /cloudflared-linux-amd64\.deb/);
   assert.match(dockerfile, /sha256sum -c -/);
-  assert.match(dockerfile, /dpkg --print-architecture/, "the amd64 guard must not no-op without TARGETARCH");
+  assert.match(dockerfile, /dpkg --print-architecture/, "the arch guard must not no-op without TARGETARCH");
+  // Each allowed architecture must map to its own checksum, and an unknown one
+  // must fail before dpkg sees a package for the wrong platform.
+  assert.match(dockerfile, /amd64\) sha="\$\{CLOUDFLARED_SHA256_AMD64\}"/);
+  assert.match(dockerfile, /arm64\) sha="\$\{CLOUDFLARED_SHA256_ARM64\}"/);
+  assert.match(dockerfile, /amd64\|arm64\)/, "the guard must accept both supported architectures");
 
   const apt = /apt-get install -y --no-install-recommends([\s\S]*?)&& rm -rf \/var\/lib\/apt\/lists/.exec(
     dockerfile,
