@@ -11,7 +11,8 @@
 import type { JsonValue } from "@earendil-works/chord";
 
 export const HOUSEHOLD_SCHEMA_VERSION = 1 as const;
-export const PUPPY_SCHEMA_VERSION = 1 as const;
+/** Version 2 adds `rev` (P1-11); a version-1 document migrates on read. */
+export const PUPPY_SCHEMA_VERSION = 2 as const;
 export const ACTIVITY_SCHEMA_VERSION = 1 as const;
 export const COMMANDS_SCHEMA_VERSION = 1 as const;
 
@@ -42,7 +43,13 @@ export type PuppySex = "male" | "female";
 
 export type Puppy = {
   schemaVersion: typeof PUPPY_SCHEMA_VERSION;
-  /** Empty on a fresh boot; P1-14's first-run wizard fills it. */
+  /**
+   * Optimistic-concurrency revision (PLAN §7.4): every profile edit echoes the
+   * revision it read back, and a stale one is a 409 with the current profile
+   * instead of a silent overwrite. Starts at 0.
+   */
+  rev: number;
+  /** Empty on a fresh boot; P1-11's UI and P1-14's wizard fill it. */
   name: string;
   /** Local date `YYYY-MM-DD`, not an instant. */
   birthday: string | null;
