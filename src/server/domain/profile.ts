@@ -23,11 +23,6 @@ import { type CommandOutcome, requestHashOf, runIdempotent } from "./commands.ts
 import { DomainConflictError, UnavailableError } from "./errors.ts";
 import { ageOf, localDateAt } from "./time.ts";
 
-/**
- * The service's view of storage. Named separately so call sites read as
- * "the profile store"; the shape itself is the domain-wide `DocStore`.
- */
-export type ProfileStore = DocStore;
 
 /** `app.puppy` is missing or unreadable; retry once the server has booted. */
 export class ProfileUnavailableError extends UnavailableError {
@@ -76,7 +71,7 @@ export type ProfileUpdateOutcome =
   | { kind: "key-conflict" };
 
 function readDoc<T extends JsonObject>(
-  store: ProfileStore,
+  store: DocStore,
   token: SessionDocToken<T>,
   context: Context,
   parse: (value: unknown) => T | undefined,
@@ -89,11 +84,11 @@ function readDoc<T extends JsonObject>(
   });
 }
 
-export function readHouseholdDoc(store: ProfileStore, context: Context): Promise<Household> {
+export function readHouseholdDoc(store: DocStore, context: Context): Promise<Household> {
   return readDoc(store, HouseholdDoc, context, (value) => parseHousehold(value), "app.household");
 }
 
-export function readPuppy(store: ProfileStore, context: Context): Promise<Puppy> {
+export function readPuppy(store: DocStore, context: Context): Promise<Puppy> {
   return readDoc(store, PuppyDoc, context, (value) => parsePuppy(value), "app.puppy");
 }
 
@@ -120,7 +115,7 @@ export function profileView(household: Household, puppy: Puppy, now: Date): Pupp
 }
 
 /** Read both documents and build the current view. */
-export async function readProfile(store: ProfileStore, context: Context, now: Date): Promise<PuppyProfile> {
+export async function readProfile(store: DocStore, context: Context, now: Date): Promise<PuppyProfile> {
   const [household, puppy] = await Promise.all([readHouseholdDoc(store, context), readPuppy(store, context)]);
   return profileView(household, puppy, now);
 }
@@ -146,7 +141,7 @@ function summaryOf(before: Puppy, after: Puppy, actorLabel: string): string {
  * success even though its own earlier commit bumped the revision.
  */
 export async function updatePuppyProfile(
-  store: ProfileStore,
+  store: DocStore,
   context: Context,
   input: ProfileUpdate,
 ): Promise<ProfileUpdateOutcome> {
@@ -162,7 +157,7 @@ export async function updatePuppyProfile(
   let outcome: CommandOutcome<{ rev: number }>;
   try {
     outcome = await runIdempotent(
-      { harness: store, context },
+      { store, context },
       { key: input.actionId, requestHash: requestHashOf(request), now },
       async (tx) => {
         const actor = await input.actor(tx, household);

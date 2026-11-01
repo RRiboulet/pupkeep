@@ -25,12 +25,8 @@ import { emptyConfig, type AppConfig, type MemberRecord } from "../src/server/co
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
 import { ActivityDoc, HouseholdDoc, PuppyDoc, parsePuppy } from "../src/server/domain/docs.ts";
 import { DomainConflictError } from "../src/server/domain/errors.ts";
-import {
-  ProfileUnavailableError,
-  readProfile,
-  updatePuppyProfile,
-  type ProfileStore,
-} from "../src/server/domain/profile.ts";
+import { ProfileUnavailableError, readProfile, updatePuppyProfile } from "../src/server/domain/profile.ts";
+import type { DocStore } from "../src/server/domain/docs.ts";
 import { ageOf, addMonths, localDateAt, monthsBetween } from "../src/server/domain/time.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import { createLogger } from "../src/server/log.ts";
@@ -144,7 +140,7 @@ const NOON = new Date("2026-10-29T12:00:00.000Z");
 
 test("an edit bumps rev, appends one activity entry and returns the derived view", async () => {
   await withProfileHarness(async ({ harness }) => {
-    const store: ProfileStore = harness;
+    const store: DocStore = harness;
     const outcome = await updatePuppyProfile(store, context, {
       actor,
       actionId: "action-1",
@@ -179,7 +175,7 @@ test("an edit bumps rev, appends one activity entry and returns the derived view
 
 test("the same action replayed is success; the same key with another request is a conflict", async () => {
   await withProfileHarness(async ({ harness }) => {
-    const store: ProfileStore = harness;
+    const store: DocStore = harness;
     const first = await updatePuppyProfile(store, context, {
       actor,
       actionId: "action-1",
@@ -219,7 +215,7 @@ test("the same action replayed is success; the same key with another request is 
 
 test("a stale revision is refused with the current profile, not overwritten", async () => {
   await withProfileHarness(async ({ harness }) => {
-    const store: ProfileStore = harness;
+    const store: DocStore = harness;
     await updatePuppyProfile(store, context, {
       actor,
       actionId: "alex-1",
@@ -246,7 +242,7 @@ test("a stale revision is refused with the current profile, not overwritten", as
 
 test("a birthday in the household's future is refused, and clearing a field works", async () => {
   await withProfileHarness(async ({ harness }) => {
-    const store: ProfileStore = harness;
+    const store: DocStore = harness;
     await assert.rejects(
       updatePuppyProfile(store, context, {
         actor,
@@ -536,15 +532,29 @@ test("a profile change does not wake the long-poll fallback, which is thread-onl
   }
 });
 
-/** A tool-execution API stand-in: committed reads, one commit, a fixed task id. */
-function toolApi(fixture: Fixture, conversationId: number, taskId = "task-1"): ToolExecutionApi {
-  return {
+/**
+ * A tool-execution API stand-in: committed reads, one commit, a fixed task id
+ * and an in-memory memo store (the real one is the task's durable memo).
+ */
+function toolApi(
+  fixture: Fixture,
+  conversationId: number,
+  taskId = "task-1",
+  memos = new Map<string, unknown>(),
+): ToolExecutionApi {
+  const api = {
     taskId,
     conversationId: conversationId as ConversationId,
     now: () => Date.now(),
     snapshot: (token: never, ctx: never) => fixture.app.app.snapshot(token, ctx),
     commit: (change: never, ctx: never) => fixture.app.app.commit(change, ctx),
-  } as unknown as ToolExecutionApi;
+    memo: async (name: string, candidateOrContext: unknown, maybeContext?: unknown) => {
+      if (maybeContext === undefined) return memos.get(name);
+      if (!memos.has(name)) memos.set(name, candidateOrContext);
+      return memos.get(name);
+    },
+  };
+  return api as unknown as ToolExecutionApi;
 }
 
 async function sharedConversationId(fixture: Fixture): Promise<number> {
@@ -564,7 +574,8 @@ test("the tools read the profile, report what is not tracked, and attribute the 
     assert.equal(update.replay, "safe", "the domain write is idempotent on the task id");
 
     const conversationId = await sharedConversationId(fixture);
-    const api = toolApi(fixture, conversationId, "task-42");
+    const memos = new Map<string, unknown>();
+    const api = toolApi(fixture, conversationId, "task-42", memos);
 
     const empty = await getContext!.execute({}, api, context);
     const emptyText = (empty.output as { text: string }[])[0]!.text;
@@ -581,6 +592,9 @@ test("the tools read the profile, report what is not tracked, and attribute the 
     // rather than a name the model supplied.
     assert.equal(activity?.entries[0]?.actorId, null);
     assert.equal(activity?.entries[0]?.actorLabel, "Household");
+    // §9.2: the resolved actor is cached in the tool task's memo, after the
+    // write commit, so a rerun does not rescan the transcript.
+    assert.deepEqual(memos.get("actor"), { id: null, label: "Household" });
 
     const contextText = (await getPuppy!.execute({}, api, context)).output as { text: string }[];
     assert.match(contextText[0]!.text, /Biscuit/);

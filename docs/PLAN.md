@@ -2202,9 +2202,16 @@ that the partner is reached out-of-app is gated on P0-10.
       the idempotency lookup, so a retried save replays as success instead of
       reporting itself stale; (3) the profile frame rides the existing SSE
       stream rather than a second endpoint, does not touch the thread's `seq`,
-      and carries the whole view (P2's meals join the same frame); (4) tools
-      resolve the actor from the newest `app.chat` entry **inside** the write
-      commit (§9.2 rule 2) instead of trusting the model; (5) `readHousehold`
+      and carries the whole view (P2's meals join the same frame); the
+      long-poll fallback stays a thread-only channel, so it re-reads the
+      profile on its own schedule (the PWA uses SSE and fetches on mount); (4) tools follow
+      §9.2 rule 1 exactly: the task input names the `assistant` entry that
+      issued the call, the scan walks back from *that* entry inside the `tx`
+      read, and the resolved actor is cached in the tool task's durable memo
+      (written after the domain commit, never inside it, because a memo write
+      is its own Session write); a nested call fails closed to the household
+      fallback, and the actor is never taken from model arguments;
+      (5) `readHousehold`
       now mirrors a member who joined after boot into `app.household`
       (creates only, never removes — removal stays a boot decision), which
       closes the P1-09 `Household`-label seam without weakening the
@@ -2213,7 +2220,7 @@ that the partner is reached out-of-app is gated on P0-10.
       `appointments`, `showers`) so an empty result cannot be read as "nothing
       happened"; (7) the shared-thread prompt loses its "get_context is not
       available yet" parenthesis, which P1-09 had left in place.
-      **Verified:** 24 new tests in `test/profile.test.ts` (local date vs UTC,
+      **Verified:** 25 new tests in `test/profile.test.ts` (local date vs UTC,
       age boundaries, month clamping, the v1→v2 migration, rev bump + one
       activity entry, exact-request replay, key conflict, stale refusal with
       the current profile, future birthday, retired document, the HTTP auth/
@@ -2221,13 +2228,30 @@ that the partner is reached out-of-app is gated on P0-10.
       HTTP with replay, the `profile` SSE frame arriving on the *other*
       caregiver's stream, the three tools as thin domain wrappers with the
       household fallback actor, and one real faux-provider run proving the
-      registry wiring and Alex's activity attribution); 289 tests total,
-      typecheck clean. The P1-09/09-test seam was repaired in place: the
-      invite-joiner label assertion now expects `Sam`, and the stale
-      `ThreadUnavailableError`/prompt notes are gone. **Not verified:** a real
-      browser render of the Pup form, a real provider, and the partner's
-      iPhone; the service-worker shell bump (`pupkeep-shell-v2`) is exercised
-      only through the worker harness in `test/pwa.test.ts`.
+      registry wiring and Alex's activity attribution, and a pin that a profile
+      write is not thread news: the long-poll fallback must not wake and the
+      thread counter must not move); 290 tests total, typecheck clean. The
+      P1-09 seam was repaired in place: the invite-joiner label assertion now
+      expects `Sam`, and the stale `ThreadUnavailableError`/prompt notes are
+      gone. **Reviewed and repaired:** the client minted a fresh idempotency
+      key per attempt, so the one case the machinery exists for — a committed
+      save whose response was lost — came back as a stale 409 against the
+      caregiver's own edit; the key is now held with the body it belongs to
+      and reused while the body is unchanged. `runIdempotent` converted *any*
+      `DomainConflictError` raised by its callback into "key reused", which
+      P2's already-fed-slot conflict would have misreported; only a private
+      sentinel becomes `key-conflict` now. The profile watcher dropped a commit
+      that landed while a publish was in flight; it now tracks a dirty flag and
+      re-publishes after the in-flight read, and schedules with `setImmediate`
+      rather than a microtask so the read cannot queue on the mutation line the
+      commit still holds. `ProfileStateWatch.refresh()` (no caller) and the
+      unreachable try/catch around the watcher are gone, the profile GET no
+      longer reads the household twice, and `CommandRef.harness` — which is
+      handed a tool's `api` — is `store`.
+      **Not verified:** a real browser render of the Pup form, a real provider,
+      and the partner's iPhone; the service-worker shell bump
+      (`pupkeep-shell-v2`) is exercised only through the worker harness in
+      `test/pwa.test.ts`.
 - [ ] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake
       provider, busy reject, restart, SSE, log scrub.
 - [ ] **P1-13** Phone runbook draft: Termux install, wake lock, boot script,

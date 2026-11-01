@@ -537,19 +537,10 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       return { ok: false, code: EXIT_OPEN_FAILED, message };
     }
 
-    try {
-      // Live care state over the stream that already exists (P1-11): both
-      // caregivers see a profile edit without reloading.
-      profileState = watchProfileState({ harness: opened.harness, context, bus, logger });
-    } catch (error) {
-      const message = `could not watch the care state: ${(error as Error).message}`;
-      logger.error("refusing to start", { error: message });
-      bus.stop();
-      bus = undefined;
-      const closed = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
-      if (closed === "closed") await releaseQuietly(lock, logger);
-      return { ok: false, code: EXIT_OPEN_FAILED, message };
-    }
+    // Live care state over the stream that already exists (P1-11): both
+    // caregivers see a profile edit without reloading. Registering a commit
+    // listener cannot fail; the first publish reports its own failures.
+    profileState = watchProfileState({ harness: opened.harness, context, bus, logger });
 
     try {
       const household = await readHousehold(thread);

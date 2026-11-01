@@ -39,8 +39,8 @@ function draftOf(profile) {
   };
 }
 
-/** The request body: the draft with empty inputs sent as `null` (a clear). */
-function patchOf(draft) {
+/** The draft as wire values: empty inputs are `null` (a clear). */
+function wireOf(draft) {
   return {
     name: draft.name.trim(),
     birthday: draft.birthday === "" ? null : draft.birthday,
@@ -48,6 +48,19 @@ function patchOf(draft) {
     sex: draft.sex === "" ? null : draft.sex,
     targetWeightKg: draft.targetWeightKg === "" ? null : Number(draft.targetWeightKg),
   };
+}
+
+/**
+ * Only the fields that really changed. Saving the whole form unchanged would
+ * otherwise bump the revision and put "updated the profile" in the household's
+ * activity feed for a button press that changed nothing.
+ */
+function changedFields(puppy, draft) {
+  const changed = {};
+  for (const [key, value] of Object.entries(wireOf(draft))) {
+    if (puppy[key] !== value) changed[key] = value;
+  }
+  return changed;
 }
 
 export class Pup extends Component {
@@ -59,6 +72,14 @@ export class Pup extends Component {
     error: null,
     message: null,
     conflict: null,
+    /**
+     * The idempotency key of the save currently on the wire (or last attempted),
+     * with the body it belongs to. A retry of the *same* body must reuse the
+     * key — that is what turns "the response was lost" into a replay instead of
+     * a 409 against the caregiver's own edit. A changed draft changes the body,
+     * so it gets a fresh key.
+     */
+    pending: null,
   };
 
   componentDidMount() {
@@ -113,12 +134,25 @@ export class Pup extends Component {
       return;
     }
 
-    this.setState({ busy: true, error: null, message: null });
+    const patch = changedFields(profile.puppy, draft);
+    if (Object.keys(patch).length === 0) {
+      this.setState({ dirty: false, error: null, message: "No changes to save." });
+      return;
+    }
+
+    const body = { rev: profile.rev, ...patch };
+    const signature = JSON.stringify(body);
+    const pending =
+      this.state.pending && this.state.pending.signature === signature
+        ? this.state.pending
+        : { key: newIdempotencyKey(), signature };
+
+    this.setState({ busy: true, error: null, message: null, pending });
     try {
       const result = await requestJson("/api/puppy", {
         method: "PATCH",
-        body: { rev: profile.rev, ...patchOf(draft) },
-        idempotencyKey: newIdempotencyKey(),
+        body,
+        idempotencyKey: pending.key,
       });
       if (result.status === 401) {
         this.setState({ busy: false, error: "Please sign in again." });
@@ -126,11 +160,19 @@ export class Pup extends Component {
       }
       if (result.status === 409 && result.body?.error === "stale") {
         // Keep the draft, adopt the other caregiver's revision and show their
-        // values; the next save is then a knowing replacement.
-        this.setState({ busy: false, profile: result.body.profile, dirty: true, conflict: CONFLICT_MESSAGE });
+        // values; the next save is then a knowing replacement (and a new body,
+        // so a new key).
+        this.setState({
+          busy: false,
+          profile: result.body.profile,
+          dirty: true,
+          conflict: CONFLICT_MESSAGE,
+          pending: null,
+        });
         return;
       }
       if (!result.ok) {
+        // The key stays pending: another attempt at the same body replays it.
         this.setState({ busy: false, error: result.body?.message ?? "Could not save. Try again." });
         return;
       }
@@ -141,9 +183,12 @@ export class Pup extends Component {
         draft: draftOf(saved),
         dirty: false,
         conflict: null,
+        pending: null,
         message: result.body.replayed ? "Already saved." : "Saved.",
       });
     } catch (error) {
+      // A transport failure may still have committed; keeping `pending` is what
+      // makes the retry a replay (the key is cleared on success).
       this.setState({
         busy: false,
         error: error instanceof NetworkError ? error.message : "Could not save. Try again.",

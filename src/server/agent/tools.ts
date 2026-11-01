@@ -18,7 +18,7 @@
 // explicitly so the model cannot report "no meals logged" from an empty result.
 
 import { Type } from "@earendil-works/pi-ai";
-import type { ConversationId, Tx } from "@earendil-works/pi-durable";
+import type { ConversationId, Cursor, EntryId, TaskId, Tx } from "@earendil-works/pi-durable";
 import { defineExtension, defineTool, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import { CHAT_ENTRY_KIND, HOUSEHOLD_FALLBACK_LABEL } from "../../shared/chat.ts";
 import type { ActivityEntry, Household } from "../../shared/domain.ts";
@@ -29,32 +29,56 @@ import {
   type PuppyFields,
 } from "../../shared/profile.ts";
 import { recentActivity } from "../domain/activity.ts";
-import { ActivityDoc, parseActivity } from "../domain/docs.ts";
-import { readProfile, updatePuppyProfile, type ProfileActor, type ProfileStore } from "../domain/profile.ts";
+import { ActivityDoc, parseActivity, type DocStore } from "../domain/docs.ts";
+import { readProfile, updatePuppyProfile, type ProfileActor } from "../domain/profile.ts";
 import { localTimeAt } from "../domain/time.ts";
 import { chatDataOf, labelFor } from "./thread.ts";
 
 /** §10.1 sections this build does not track yet. Remove one per phase. */
 const NOT_TRACKED = ["meals", "walks", "growth", "milestones", "appointments", "showers"] as const;
 
-/** How far back a tool scans for the caregiver who started the run. */
-const SPEAKER_SCAN_LIMIT = 200;
+/** One page of the backwards scan for the speaker. */
+const SPEAKER_PAGE_SIZE = 100;
+/** The tool task's memo, so a rerun after a crash does not rescan (§9.2). */
+const ACTOR_MEMO = "actor";
 
 /**
- * §9.2 rule 2, at the tool side: the latest `app.chat` entry before this record
- * is its author. A tool task is always started by a human message in the shared
- * thread, so the scan finds it; a transcript richer than the scan window falls
- * back to the household instead of inventing a name.
+ * §9.2 rule 1, at the tool side: read this task's input, take the `assistant`
+ * entry that issued the call, and scan backwards from it to the latest
+ * `app.chat` entry inside the `tx` read. The scan is anchored at the call, not
+ * at the transcript tail, so entries appended after the call (its own result,
+ * later turns) can never change who is attributed.
+ *
+ * A nested call has no assistant entry of its own; §9.2 says fail closed, so it
+ * answers the household fallback instead of guessing from the parent.
  */
-async function speakerIn(tx: Tx, conversationId: ConversationId, household: Household): Promise<ProfileActor> {
-  const page = await tx.scanEntries({ conversationId, order: "descending" }, SPEAKER_SCAN_LIMIT);
-  for (const entry of page.items) {
-    if (entry.kind !== CHAT_ENTRY_KIND) continue;
-    const chat = chatDataOf(entry);
-    if (!chat) continue;
-    return { id: chat.authorId, label: labelFor(household, chat.authorId) };
+async function speakerIn(
+  tx: Tx,
+  taskId: TaskId,
+  conversationId: ConversationId,
+  household: Household,
+): Promise<ProfileActor> {
+  const task = await tx.task(taskId);
+  const input = task?.input as { readonly kind?: unknown; readonly assistant?: unknown } | undefined;
+  if (input?.kind !== "model" || typeof input.assistant !== "number") {
+    return { id: null, label: HOUSEHOLD_FALLBACK_LABEL };
   }
-  return { id: null, label: HOUSEHOLD_FALLBACK_LABEL };
+
+  let cursor: Cursor | undefined;
+  for (;;) {
+    const page = await tx.scanEntries(
+      { conversationId, maxEntryId: input.assistant as EntryId, order: "descending" },
+      SPEAKER_PAGE_SIZE,
+      cursor,
+    );
+    for (const entry of page.items) {
+      if (entry.kind !== CHAT_ENTRY_KIND) continue;
+      const chat = chatDataOf(entry);
+      if (chat) return { id: chat.authorId, label: labelFor(household, chat.authorId) };
+    }
+    if (page.next === undefined) return { id: null, label: HOUSEHOLD_FALLBACK_LABEL };
+    cursor = page.next;
+  }
 }
 
 function profileText(fields: PuppyFields, age: string | null, today: string): string {
@@ -145,15 +169,30 @@ export function createProfileTools(): Extension<ToolRegistration> {
       if (!patch) {
         return { ...text("No valid profile fields to change; send name, birthday, breed, sex or targetWeightKg."), isError: true };
       }
-      const store: ProfileStore = api;
+      const store: DocStore = api;
+      // Read the memo before the commit: the memo API is a Session write, and a
+      // Session call made inside a commit callback queues on the line it holds.
+      const cached = await api.memo<ProfileActor>(ACTOR_MEMO, context);
+      let resolved: ProfileActor | undefined;
       const outcome = await updatePuppyProfile(store, context, {
-        actor: (tx, household) => speakerIn(tx, api.conversationId, household),
+        actor: (tx, household) => {
+          if (cached) return Promise.resolve(cached);
+          return speakerIn(tx, api.taskId, api.conversationId, household).then((actor) => {
+            resolved = actor;
+            return actor;
+          });
+        },
         // The task id is the durable identity of this call: one call, one action.
         actionId: String(api.taskId),
         rev,
         patch,
         now: new Date(api.now()),
       });
+      if (resolved) {
+        // After the domain commit, never inside it. A failed memo costs one
+        // rescan on a rerun and nothing else, so it must not fail the change.
+        await api.memo(ACTOR_MEMO, resolved, context).catch(() => undefined);
+      }
 
       if (outcome.kind === "key-conflict") {
         return {

@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import type { Tx } from "@earendil-works/pi-durable";
 import type { CommandRecord, Commands } from "../../shared/domain.ts";
 import { CommandsDoc, parseCommands, type DocStore } from "./docs.ts";
-import { DomainConflictError, UnavailableError } from "./errors.ts";
+import { UnavailableError } from "./errors.ts";
 
 /** PLAN §7.4: an idempotency record lives for a day. */
 export const COMMAND_TTL_MS = 24 * 60 * 60 * 1000;
@@ -33,7 +33,7 @@ export type CommandOutcome<T extends JsonValue> =
 
 export interface CommandRef {
   /** Committed reads and one commit. A `Harness` and a tool's `api` both fit. */
-  readonly harness: DocStore;
+  readonly store: DocStore;
   readonly context: Context;
 }
 
@@ -48,6 +48,18 @@ export interface CommandRequest {
 }
 
 const KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
+
+/**
+ * One key, two different requests. A private sentinel rather than a domain
+ * refusal: a `change()` callback that refuses (P2's already-fed slot) must
+ * surface as its own 409, never as "this key was used for another request".
+ */
+class KeyCollisionError extends Error {
+  constructor() {
+    super("that idempotency key was used for a different request");
+    this.name = "KeyCollisionError";
+  }
+}
 
 export function isCommandKey(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= COMMAND_KEY_LIMIT && KEY_PATTERN.test(value);
@@ -75,7 +87,7 @@ function isLive(record: CommandRecord, now: Date): boolean {
 }
 
 async function readCommands(ref: CommandRef): Promise<Commands | undefined> {
-  const snapshot = await ref.harness.snapshot(CommandsDoc, ref.context);
+  const snapshot = await ref.store.snapshot(CommandsDoc, ref.context);
   if (snapshot === undefined) return undefined;
   const commands = parseCommands(snapshot);
   if (!commands) throw new UnavailableError("app.commands is not a shape this build understands");
@@ -107,11 +119,11 @@ export async function runIdempotent<T extends JsonValue>(
   let replayed: JsonValue | undefined;
   let committed: T | undefined;
   try {
-    await ref.harness.commit(async (tx) => {
+    await ref.store.commit(async (tx) => {
       const commands = await tx.doc(CommandsDoc);
       const existing = commands.entries.find((entry) => entry.key === request.key && isLive(entry, request.now));
       if (existing) {
-        if (existing.requestHash !== request.requestHash) throw new DomainConflictError("that idempotency key was used for a different request");
+        if (existing.requestHash !== request.requestHash) throw new KeyCollisionError();
         replayed = existing.result;
         return;
       }
@@ -128,10 +140,9 @@ export async function runIdempotent<T extends JsonValue>(
       committed = value;
     }, ref.context);
   } catch (error) {
-    // The conflict is answered here rather than at the call site: the caller's
-    // only alternative to "replayed" is "conflict", and this is the one place
-    // that knows the key collided rather than the domain refusing.
-    if (error instanceof DomainConflictError) return { kind: "conflict" };
+    // Only our own sentinel becomes "conflict"; a refusal thrown by `change` is
+    // the domain's answer to *this* request and must reach the caller unchanged.
+    if (error instanceof KeyCollisionError) return { kind: "conflict" };
     throw error;
   }
 

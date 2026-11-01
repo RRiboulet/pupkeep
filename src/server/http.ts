@@ -53,7 +53,7 @@ import {
 import type { Logger } from "./log.ts";
 import { isCommandKey } from "./domain/commands.ts";
 import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
-import { readProfile, updatePuppyProfile } from "./domain/profile.ts";
+import { readPuppy, profileView, updatePuppyProfile } from "./domain/profile.ts";
 import {
   ThreadUnavailableError,
   labelFor,
@@ -574,9 +574,11 @@ async function handleInvites(
  * same one labels resolve through.
  */
 async function handleProfileRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
-  await readHousehold(deps.thread);
-  const profile = await readProfile(deps.thread.harness, deps.thread.context, new Date());
-  sendJson(res, 200, profile);
+  // The household read reconciles a member who joined after boot; the profile
+  // view is then built from that same value rather than reading it twice.
+  const household = await readHousehold(deps.thread);
+  const puppy = await readPuppy(deps.thread.harness, deps.thread.context);
+  sendJson(res, 200, profileView(household, puppy, new Date()));
 }
 
 /**
@@ -611,9 +613,12 @@ async function handleProfileUpdate(
   const patch = parsePuppyPatch(fields);
   if (!patch) throw new ConflictError("a profile change needs at least one valid field");
 
-  const household = await readHousehold(deps.thread);
+  // The read repairs a household that predates a member joining; the label
+  // itself resolves through the household the domain service reads inside the
+  // commit (§7.1), not through a snapshot taken here.
+  await readHousehold(deps.thread);
   const outcome = await updatePuppyProfile(deps.thread.harness, deps.thread.context, {
-    actor: async () => ({ id: session.memberId, label: labelFor(household, session.memberId) }),
+    actor: async (_tx, household) => ({ id: session.memberId, label: labelFor(household, session.memberId) }),
     actionId: key,
     rev,
     patch,

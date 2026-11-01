@@ -33,8 +33,6 @@ export interface ProfileStateOptions {
 }
 
 export interface ProfileStateWatch {
-  /** Publish the current view once, as if it had just changed. */
-  refresh(): Promise<void>;
   stop(): void;
 }
 
@@ -45,32 +43,48 @@ export interface ProfileStateWatch {
 export function watchProfileState(options: ProfileStateOptions): ProfileStateWatch {
   const now = options.now ?? (() => new Date());
   let stopped = false;
-  let scheduled = false;
-  let running: Promise<void> | undefined;
+  /** A commit arrived that no published frame reflects yet. */
+  let dirty = false;
+  let running = false;
 
   const publish = async (): Promise<void> => {
     if (stopped) return;
+    // Coalesced by the loop in `run`: the read takes the latest documents, so a
+    // commit that lands while it is in flight is picked up by the next pass
+    // instead of being published out of order.
     const profile = await readProfile(options.harness, options.context, now());
     if (stopped) return;
     options.bus.publishState({ kind: "profile", profile });
   };
 
+  const run = async (): Promise<void> => {
+    if (stopped || running) return;
+    running = true;
+    try {
+      while (dirty && !stopped) {
+        dirty = false;
+        await publish();
+      }
+    } catch (error) {
+      // Not retried in a loop: a broken read would spin. The next commit (or a
+      // reload) tries again, and the line makes the failure visible.
+      dirty = false;
+      options.logger.warn("could not publish the profile state frame", { error });
+    } finally {
+      running = false;
+      // A commit that landed during the last await still gets its frame.
+      if (dirty && !stopped) void run();
+    }
+  };
+
   const schedule = (): void => {
-    if (stopped || scheduled) return;
-    scheduled = true;
-    // A microtask is enough: the commit has returned by the time the listener
-    // runs, so the read sees it, and a burst is already queued.
-    queueMicrotask(() => {
-      scheduled = false;
-      if (stopped || running) return;
-      running = publish()
-        .catch((error: unknown) => {
-          options.logger.warn("could not publish the profile state frame", { error });
-        })
-        .finally(() => {
-          running = undefined;
-        });
-    });
+    if (stopped) return;
+    dirty = true;
+    if (running) return;
+    // A macrotask, not a microtask: `subscribeCommits` runs while the commit is
+    // being adopted, and this read must not queue on the mutation line the
+    // commit still holds.
+    setImmediate(() => void run());
   };
 
   const unsubscribe = options.harness.subscribeCommits((publication) => {
@@ -83,7 +97,6 @@ export function watchProfileState(options: ProfileStateOptions): ProfileStateWat
   });
 
   return {
-    refresh: publish,
     stop: () => {
       stopped = true;
       unsubscribe();
