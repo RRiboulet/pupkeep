@@ -509,6 +509,33 @@ test("a profile edit reaches the other caregiver's event stream as a profile fra
   }
 });
 
+test("a profile change does not wake the long-poll fallback, which is thread-only", async () => {
+  const fixture = await startProfileApp();
+  try {
+    const started = Date.now();
+    // Start from the thread's current counter: a fresh conversation already has
+    // one batch (the agent configuration), so `since=0` would settle at once.
+    const seq = fixture.app.threadBus?.seq ?? 0;
+    const poll = fetch(`${fixture.url}/api/agent/events/poll?since=${seq}&ms=1200`, {
+      headers: { Cookie: cookieFor(fixture.samCookie) },
+    });
+    // Let the poll attach before the write, so a seq bump would wake it.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const saved = await patchProfile(fixture, fixture.alexCookie, { rev: 0, name: "Biscuit" }, { key: "alex-poll" });
+    assert.equal(saved.status, 200);
+    assert.equal(fixture.app.threadBus?.seq, seq, "a profile change is not thread news");
+
+    const response = await poll;
+    const elapsed = Date.now() - started;
+    assert.equal(response.status, 200, "the fallback answers with a full snapshot");
+    assert.ok(elapsed >= 1100, `the poll waited out its window instead of waking early (${elapsed} ms)`);
+    const snapshot = (await response.json()) as { entries: unknown[] };
+    assert.ok(Array.isArray(snapshot.entries));
+  } finally {
+    await stop(fixture);
+  }
+});
+
 /** A tool-execution API stand-in: committed reads, one commit, a fixed task id. */
 function toolApi(fixture: Fixture, conversationId: number, taskId = "task-1"): ToolExecutionApi {
   return {
