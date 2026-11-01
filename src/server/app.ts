@@ -18,14 +18,15 @@ import { createServer, type IncomingMessage, type RequestListener, type ServerRe
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord";
 import type { Models } from "@earendil-works/pi-ai/models";
-import type {
-  Harness as HarnessType,
-  HarnessSettings,
-  ReportInfo,
-  ReportTask,
-  RegistryReader,
-  TaskId,
-  ToolRegistration,
+import {
+  createRegistry,
+  type Harness as HarnessType,
+  type HarnessSettings,
+  type Registry,
+  type ReportInfo,
+  type ReportTask,
+  type TaskId,
+  type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { createLogger, type Logger } from "./log.ts";
 import { dataPaths, dataStores, ensureDataDir, type AppConfig, type DataDir } from "./config.ts";
@@ -44,6 +45,8 @@ import {
 } from "./http.ts";
 import { ThreadBus } from "./agent/bus.ts";
 import { pickInitialModel, SHARED_THREAD_INSTRUCTIONS } from "./agent/model.ts";
+import { watchProfileState, type ProfileStateWatch } from "./agent/state.ts";
+import { createProfileTools } from "./agent/tools.ts";
 import {
   configureSharedThread,
   readHousehold,
@@ -77,7 +80,8 @@ export interface AppOptions {
   /** Cap for `harness.close()`; see DEFAULT_CLOSE_TIMEOUT_MS. */
   closeTimeoutMs?: number;
   models?: Models | (() => Models);
-  registry?: RegistryReader<ToolRegistration>;
+  /** Extensions to install; the app always adds the profile tools. */
+  registry?: Registry<ToolRegistration>;
   settings?: HarnessSettings | (() => HarnessSettings | undefined);
   now?: () => number;
   setTimer?: OpenHarnessOptions["setTimer"];
@@ -320,6 +324,14 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   }
   const lock = acquired.lock;
 
+  // One store set for the process: auth, the household reconciliation the HTTP
+  // layer triggers, and the bootstrap all read the same files.
+  const stores = dataStores(directory.path);
+  // The care tools ship with the app, never with a conversation: a registry the
+  // phone's process does not build is a registry the agent cannot call.
+  const registry = options.registry ?? createRegistry<ToolRegistration>();
+  registry.install(createProfileTools());
+
   const parked = new Map<string, ParkedTask>();
   const report = (error: unknown, info: ReportInfo): void => {
     if (info.type === "task_parked") {
@@ -340,7 +352,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     opened = await (deps.openHarness ?? openHarness)({
       path: dataPaths(directory.path).database,
       ...(options.models !== undefined ? { models: options.models } : {}),
-      ...(options.registry !== undefined ? { registry: options.registry } : {}),
+      registry,
       settings: threadSettings(options),
       ...(options.now !== undefined ? { now: options.now } : {}),
       ...(options.setTimer !== undefined ? { setTimer: options.setTimer } : {}),
@@ -362,12 +374,14 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   let stopping: Promise<AppEnd> | undefined;
 
   let bus: ThreadBus | undefined;
+  let profileState: ProfileStateWatch | undefined;
   const shutdown = (reason: "closed" | "failed"): Promise<AppEnd> => {
     if (stopping) return stopping;
     stopping = (async () => {
       logger.info(reason === "failed" ? "the harness failed; shutting down for a restart" : "shutting down");
       // Tell the attached browsers to reattach before the sockets disappear;
       // they restart on a fresh connection instead of waiting out a dead SSE.
+      profileState?.stop();
       bus?.stop();
       // Stop accepting work before waiting for task code to return.
       if (listener) {
@@ -504,16 +518,34 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   // a process that is already leaving. `deps.thread === "scaffold"` keeps the
   // P1-07 scaffold listener for the harness-level contract tests.
   if (!stopping && deps.thread !== "scaffold") {
-    // One store set for the process: the HTTP auth and the bootstrap share it.
-    const stores = dataStores(directory.path);
     const auth = new Auth({ config: stores.config });
-    const thread: ThreadRef = { harness: opened.harness, context };
+    const thread: ThreadRef = {
+      harness: opened.harness,
+      context,
+      // The household document is mirrored from auth at boot; a partner who
+      // joins later is mirrored by this getter on the next read (§7.1).
+      config: () => stores.config.read(),
+    };
 
     try {
       bus = await attachThreadBus(thread, logger);
     } catch (error) {
       const message = `could not attach the shared thread: ${(error as Error).message}`;
       logger.error("refusing to start", { error: message });
+      const closed = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
+      if (closed === "closed") await releaseQuietly(lock, logger);
+      return { ok: false, code: EXIT_OPEN_FAILED, message };
+    }
+
+    try {
+      // Live care state over the stream that already exists (P1-11): both
+      // caregivers see a profile edit without reloading.
+      profileState = watchProfileState({ harness: opened.harness, context, bus, logger });
+    } catch (error) {
+      const message = `could not watch the care state: ${(error as Error).message}`;
+      logger.error("refusing to start", { error: message });
+      bus.stop();
+      bus = undefined;
       const closed = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
       if (closed === "closed") await releaseQuietly(lock, logger);
       return { ok: false, code: EXIT_OPEN_FAILED, message };
