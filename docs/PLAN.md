@@ -2220,7 +2220,7 @@ that the partner is reached out-of-app is gated on P0-10.
       `appointments`, `showers`) so an empty result cannot be read as "nothing
       happened"; (7) the shared-thread prompt loses its "get_context is not
       available yet" parenthesis, which P1-09 had left in place.
-      **Verified:** 25 new tests in `test/profile.test.ts` (local date vs UTC,
+      **Verified:** 26 new tests in `test/profile.test.ts` (local date vs UTC,
       age boundaries, month clamping, the v1→v2 migration, rev bump + one
       activity entry, exact-request replay, key conflict, stale refusal with
       the current profile, future birthday, retired document, the HTTP auth/
@@ -2230,7 +2230,8 @@ that the partner is reached out-of-app is gated on P0-10.
       household fallback actor, and one real faux-provider run proving the
       registry wiring and Alex's activity attribution, and a pin that a profile
       write is not thread news: the long-poll fallback must not wake and the
-      thread counter must not move); 290 tests total, typecheck clean. The
+      thread counter must not move, and a commit that lands while a publish is
+      in flight still gets its own frame); 291 tests total, typecheck clean. The
       P1-09 seam was repaired in place: the invite-joiner label assertion now
       expects `Sam`, and the stale `ThreadUnavailableError`/prompt notes are
       gone. **Reviewed and repaired:** the client minted a fresh idempotency

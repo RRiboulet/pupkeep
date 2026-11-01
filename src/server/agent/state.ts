@@ -16,6 +16,7 @@
 
 import type { Context } from "@earendil-works/chord";
 import type { Harness } from "@earendil-works/pi-durable";
+import type { PuppyProfile } from "../../shared/profile.ts";
 import type { Logger } from "../log.ts";
 import { readProfile } from "../domain/profile.ts";
 import type { ThreadBus } from "./bus.ts";
@@ -30,6 +31,8 @@ export interface ProfileStateOptions {
   readonly logger: Logger;
   /** Test seam; the wall clock otherwise. */
   readonly now?: () => Date;
+  /** Test seam: hold a read to prove a commit during one still gets a frame. */
+  readonly read?: () => Promise<PuppyProfile>;
 }
 
 export interface ProfileStateWatch {
@@ -43,8 +46,14 @@ export interface ProfileStateWatch {
 export function watchProfileState(options: ProfileStateOptions): ProfileStateWatch {
   const now = options.now ?? (() => new Date());
   let stopped = false;
-  /** A commit arrived that no published frame reflects yet. */
-  let dirty = false;
+  /**
+   * Two counters instead of a dirty flag: every commit bumps `requested`, and a
+   * publish records the value it attempted in `published`. A commit that lands
+   * while a read is in flight is therefore still owed a frame, and a read that
+   * fails counts as an attempt at that value rather than spinning.
+   */
+  let requested = 0;
+  let published = 0;
   let running = false;
 
   const publish = async (): Promise<void> => {
@@ -52,7 +61,7 @@ export function watchProfileState(options: ProfileStateOptions): ProfileStateWat
     // Coalesced by the loop in `run`: the read takes the latest documents, so a
     // commit that lands while it is in flight is picked up by the next pass
     // instead of being published out of order.
-    const profile = await readProfile(options.harness, options.context, now());
+    const profile = await (options.read ?? (() => readProfile(options.harness, options.context, now())))();
     if (stopped) return;
     options.bus.publishState({ kind: "profile", profile });
   };
@@ -61,25 +70,27 @@ export function watchProfileState(options: ProfileStateOptions): ProfileStateWat
     if (stopped || running) return;
     running = true;
     try {
-      while (dirty && !stopped) {
-        dirty = false;
-        await publish();
+      while (!stopped && published < requested) {
+        const target = requested;
+        try {
+          await publish();
+        } catch (error) {
+          // A broken read is not retried in a loop; it is reported, and the
+          // next commit (or a reload) tries again.
+          options.logger.warn("could not publish the profile state frame", { error });
+        }
+        published = target;
       }
-    } catch (error) {
-      // Not retried in a loop: a broken read would spin. The next commit (or a
-      // reload) tries again, and the line makes the failure visible.
-      dirty = false;
-      options.logger.warn("could not publish the profile state frame", { error });
     } finally {
       running = false;
-      // A commit that landed during the last await still gets its frame.
-      if (dirty && !stopped) void run();
+      // A commit that landed during the last read still gets its frame.
+      if (!stopped && published < requested) void run();
     }
   };
 
   const schedule = (): void => {
     if (stopped) return;
-    dirty = true;
+    requested += 1;
     if (running) return;
     // A macrotask, not a microtask: `subscribeCommits` runs while the commit is
     // being adopted, and this read must not queue on the mutation line the

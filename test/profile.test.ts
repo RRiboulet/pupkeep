@@ -19,6 +19,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ConversationId, ToolExecutionApi, Tx } from "@earendil-works/pi-durable";
 import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
 import { createProfileTools } from "../src/server/agent/tools.ts";
+import { watchProfileState } from "../src/server/agent/state.ts";
 import { startApp, type AppHandle } from "../src/server/app.ts";
 import { dataStores } from "../src/server/config.ts";
 import { emptyConfig, type AppConfig, type MemberRecord } from "../src/server/config.ts";
@@ -279,6 +280,64 @@ test("the profile is unavailable, not empty, when the puppy document is gone", a
   await withProfileHarness(async ({ harness }) => {
     await harness.commit((tx: Tx) => tx.retireDoc(PuppyDoc), context);
     await assert.rejects(readProfile(harness, context, NOON), ProfileUnavailableError);
+  });
+});
+
+test("a commit that lands during an in-flight publish still gets its own frame", async () => {
+  await withProfileHarness(async ({ harness }) => {
+    const frames: PuppyProfile[] = [];
+    let release: (() => void) | undefined;
+    let blocked = false;
+    let calls = 0;
+
+    const watch = watchProfileState({
+      harness,
+      context,
+      bus: { publishState: (frame) => frames.push(frame.profile) },
+      logger: createLogger({ scope: "test", sink: () => undefined }),
+      now: () => NOON,
+      read: async () => {
+        calls += 1;
+        // Read first, then hold: the frame this publish sends is the state
+        // *before* whatever commit lands while it is blocked.
+        const profile = await readProfile(harness, context, NOON);
+        if (!blocked) {
+          blocked = true;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        return profile;
+      },
+    });
+
+    try {
+      await updatePuppyProfile(harness, context, {
+        actor,
+        actionId: "frame-1",
+        rev: 0,
+        patch: { name: "Biscuit" },
+        now: NOON,
+      });
+      await until(() => (calls === 1 ? true : undefined));
+
+      // A second edit lands while the first frame's read is still held.
+      await updatePuppyProfile(harness, context, {
+        actor,
+        actionId: "frame-2",
+        rev: 1,
+        patch: { breed: "Beagle" },
+        now: NOON,
+      });
+      release?.();
+
+      await until(() => (frames.length >= 2 ? true : undefined));
+      const last = frames[frames.length - 1]!;
+      assert.equal(last.rev, 2, "the frame that landed during the read is not lost");
+      assert.equal(last.puppy.breed, "Beagle");
+    } finally {
+      watch.stop();
+    }
   });
 });
 
