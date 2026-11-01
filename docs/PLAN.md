@@ -2243,13 +2243,27 @@ that the partner is reached out-of-app is gated on P0-10.
       `DomainConflictError` raised by its callback into "key reused", which
       P2's already-fed-slot conflict would have misreported; only a private
       sentinel becomes `key-conflict` now. The profile watcher dropped a commit
-      that landed while a publish was in flight; it now tracks a dirty flag and
-      re-publishes after the in-flight read, and schedules with `setImmediate`
-      rather than a microtask so the read cannot queue on the mutation line the
-      commit still holds. `ProfileStateWatch.refresh()` (no caller) and the
-      unreachable try/catch around the watcher are gone, the profile GET no
-      longer reads the household twice, and `CommandRef.harness` — which is
-      handed a tool's `api` — is `store`.
+      that landed while a publish was in flight; it now counts publish requests
+      and re-publishes after the in-flight read, and schedules with
+      `setImmediate` rather than a microtask so the read cannot queue on the
+      mutation line the commit still holds. `ProfileStateWatch.refresh()` (no
+      caller) and the unreachable try/catch around the watcher are gone, the
+      profile GET no longer reads the household twice, and `CommandRef.harness`
+      — which is handed a tool's `api` — is `store`. From the adversarial pass:
+      text fields refuse control characters (a newline in a name would forge a
+      second line in the activity feed the other caregiver reads), a nameless
+      profile is summarised as "the puppy's profile" instead of an empty quote,
+      the idempotency keys are namespaced (`http:` / `tool:`) so a client
+      cannot plant a record under a predictable task id and hijack or wedge a
+      later tool call, the future-birthday check runs after the idempotency
+      lookup so a replay cannot be refused by a clock correction, and stored
+      free text is JSON-quoted in the model-visible tool output so a crafted
+      name stays visibly data. One finding was not repaired here: the
+      adversarial pass found a narrow duplicate-delivery window in P1-09's SSE
+      attach (a commit whose broadcast drains after the `seq` capture is both
+      inside the snapshot and replayed as a batch); that is a P1-12 carry-over
+      because it is P1-09's delivery ordering, has no impact while the PWA
+      ignores `batch`, and needs its own SSE test.
       **Not verified:** a real browser render of the Pup form, a real provider,
       and the partner's iPhone; the service-worker shell bump
       (`pupkeep-shell-v2`) is exercised only through the worker harness in
