@@ -33,7 +33,11 @@ test("devcontainer.json targets the repo mount, forwards 8787 and runs postCreat
   assert.deepEqual(config.forwardPorts, [8787]);
   assert.equal(config.containerEnv?.PUPKEEP_DATA_DIR, "/tmp/pupkeep-dev");
   assert.equal(config.containerEnv?.PUPKEEP_PORT, "8787");
-  assert.equal(config.containerEnv?.PUPKEEP_ACCESS, "local");
+  // Docker publishes to the container's own interface, never its loopback, so
+  // the in-container server has to bind every interface for the published port
+  // to work. The publish itself is host-loopback only (tested below), which is
+  // what keeps the wider bind inside the container's private namespace.
+  assert.equal(config.containerEnv?.PUPKEEP_ACCESS, "lan");
 
   const features = Object.entries(config.features ?? {});
   assert.ok(features.some(([feature]) => feature.includes("common-utils")));
@@ -59,6 +63,12 @@ test("compose mounts the repo and a persistent, explicitly named pi-config volum
   assert.match(compose, /pupkeep-pi-config:\/home\/vscode\/\.pi/);
   assert.match(compose, /name: pupkeep-pi-config/);
   assert.match(compose, /user: vscode/);
+
+  // Headless clients (the Dev Containers CLI, `docker compose`) never apply
+  // devcontainer.json's `forwardPorts` — that is a VS Code client feature. The
+  // port has to be published by Compose, and only on the host's loopback.
+  assert.match(compose, /- "127\.0\.0\.1:8787:8787"/);
+  assert.doesNotMatch(compose, /"0\.0\.0\.0:8787:8787"/, "8787 must never be published on every host interface");
 });
 
 test("the image is the Node 24 base with the pinned pi and host tools", async () => {

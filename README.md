@@ -122,8 +122,11 @@ seeds `.env` only when it is absent.
   container's personal pi settings; it is deliberately not declared in
   `.pi/settings.json`, which would duplicate the enclosing workspace's
   extensions.
-- Port 8787 is forwarded. The server is still a scaffold: `/healthz` answers and
-  every other route is 503 until P1-09/P1-10.
+- Port 8787 is published on the host's loopback (`127.0.0.1:8787:8787`), which is
+  what makes the dev server reachable from outside the container; `forwardPorts`
+  alone does nothing headless. Reach it from a phone with `ssh -L
+  8787:127.0.0.1:8787 <host>` or `tailscale serve` on the host. Never publish it
+  on `0.0.0.0`.
 - CI builds this image on `.github/workflows/devcontainer.yml`; a devcontainer
   or package-manifest change cannot merge without a real build, a `postCreate`
   run and the test suite.
