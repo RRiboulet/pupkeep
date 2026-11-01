@@ -16,7 +16,7 @@
   "containerEnv": {
     "PUPKEEP_DATA_DIR": "/tmp/pupkeep-dev",
     "PUPKEEP_PORT": "8787",
-    "PUPKEEP_ACCESS": "local"
+    "PUPKEEP_ACCESS": "lan"
   },
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {

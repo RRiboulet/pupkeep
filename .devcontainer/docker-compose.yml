@@ -11,6 +11,15 @@ services:
       - pupkeep-pi-config:/home/vscode/.pi
     command: sleep infinity
     user: vscode
+    # The dev server must be reachable from the VM's browser-facing path, and
+    # Docker can only publish a port that listens on the container's own
+    # interface — not on the container's loopback. So the container runs with
+    # PUPKEEP_ACCESS=lan (devcontainer.json), and the published port is bound to
+    # the *host's* loopback alone: nothing outside this VM can reach 8787 unless
+    # it goes through `ssh -L` or `tailscale serve` from here. Never change the
+    # left-hand address to 0.0.0.0.
+    ports:
+      - "127.0.0.1:8787:8787"
 
 volumes:
   pupkeep-pi-config:

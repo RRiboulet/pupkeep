@@ -441,6 +441,19 @@ No Android SDK, JDK, Gradle or NDK.
 
 - `8787` — server/PWA.
 - Nothing else required. `cloudflared` is outbound.
+- The devcontainer publishes it as `127.0.0.1:8787:8787`. `forwardPorts` is a VS
+  Code client feature and the headless Dev Containers CLI ignores it, so a
+  published port is the only thing that makes the dev server reachable outside
+  the container. The left-hand address is the host's loopback: never `0.0.0.0`,
+  or the dev server would answer the whole internet on a VM whose SSH happens to
+  sit on port 22.
+- Docker publishes to the container's own interface and never to its loopback,
+  so the in-container server binds `0.0.0.0` (`PUPKEEP_ACCESS=lan` in
+  `devcontainer.json`). That wider bind is inside the container's private
+  namespace; the host side stays loopback-only.
+- Reach it from a phone or laptop without opening a public port: `ssh -L
+  8787:127.0.0.1:8787 <host>`, or `tailscale serve` on the host where a tailnet
+  exists.
 
 ### 5.4 Environment
 
@@ -455,6 +468,11 @@ PUPKEEP_ACCESS=local
 OPENCODE_API_KEY=
 OPENROUTER_API_KEY=
 ```
+
+`npm start` loads this with `--env-file-if-exists=.env`, and a real environment
+variable wins over the file: the devcontainer's `containerEnv` overrides
+`PUPKEEP_ACCESS` to `lan` for the reason in §5.3, while a plain host run keeps
+the loopback-only `local` value above.
 
 Provider keys can also be entered in the app’s Settings sheet. The phone stores
 them in `~/.pupkeep/secrets.json` (0600), not in the SQLite database and not in
