@@ -187,7 +187,7 @@ test("postCreate seeds .env, runs the suite, checks versions and installs the sh
   // The shared package goes into the personal pi settings in the volume, never
   // the repo's .pi/settings.json — that is the duplicate-package failure the
   // P1-05 guard pins from the other side.
-  assert.match(script, /SHARED_PACKAGE_REF=.*v1\.9\.0/);
+  assert.match(script, /SHARED_PACKAGE_REF=.*v1\.10\.0/);
   assert.match(script, /grep -q 'my-agent-setup' \.pi\/settings\.json/);
   assert.match(script, /pi install "git:github\.com\/RRiboulet\/my-agent-setup@\$\{SHARED_PACKAGE_REF\}"/);
   assert.doesNotMatch(script, /pi install[^\n]*--local/);
