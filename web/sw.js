@@ -27,7 +27,7 @@
 // Web Push event handlers (push, notificationclick) arrive with the push
 // phase; the worker stays quiet about notifications until then.
 
-const VERSION = "pupkeep-shell-v1";
+const VERSION = "pupkeep-shell-v2";
 const CACHE = `pupkeep-static-${VERSION}`;
 
 // Relative to the worker's scope. Only minimum shell assets: the document,
@@ -37,6 +37,8 @@ const PRECACHE = [
   "./index.html",
   "./style.css",
   "./app.js",
+  "./client.js",
+  "./live.js",
   "./store.js",
   "./views/today.js",
   "./views/calendar.js",

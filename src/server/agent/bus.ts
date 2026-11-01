@@ -13,12 +13,20 @@
 import type { Context } from "@earendil-works/chord";
 import { watchEvents, type AgentEvent, type AgentEventStream, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 import { THREAD_CONNECTIONS_PER_USER } from "../../shared/chat.ts";
+import type { PuppyProfile } from "../../shared/profile.ts";
 
 export type Notice = "snapshot" | "batch" | "reconnect";
 
 export interface Subscriber {
   /** Frame one SSE event or resolve one long-poll turn; must not throw. */
   readonly notice: (type: Notice, events?: readonly AgentEvent[]) => void;
+  /**
+   * One committed care-state change (the puppy profile today), as the whole
+   * view so a client never merges two partial updates. Optional so a
+   * diagnostics-only subscriber need not implement it; a throwing one is
+   * evicted exactly like a broken `notice`. P2's meal views join this frame.
+   */
+  readonly state?: (profile: PuppyProfile) => void;
   readonly onClose: () => void;
 }
 
@@ -110,6 +118,23 @@ export class ThreadBus {
     this.#connections = [];
     for (const waiter of [...this.#waiters]) this.#settleWaiter(waiter, "closed");
     this.#waiters = [];
+  }
+
+  /**
+   * Publish one state frame to every attached browser. This does not bump `seq`:
+   * the counter belongs to the thread stream, and a state change must not make a
+   * long-poll client believe there is new conversation to read.
+   */
+  publishState(profile: PuppyProfile): void {
+    if (this.#closed) return;
+    for (const connection of [...this.#connections]) {
+      if (connection.evicted) continue;
+      try {
+        connection.subscriber.state?.(profile);
+      } catch {
+        connection.evicted = true;
+      }
+    }
   }
 
   #broadcast(events: readonly AgentEvent[]): void {

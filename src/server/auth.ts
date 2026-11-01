@@ -23,6 +23,7 @@ import {
   type MemberRole,
   type PushConfig,
 } from "./config.ts";
+import { hasControlCharacter } from "../shared/profile.ts";
 
 export type { InviteRecord } from "./config.ts";
 
@@ -278,6 +279,11 @@ export class Auth {
     const now = this.#now();
     const wanted = displayName.trim();
     if (wanted === "") throw new ConflictError("a member needs a display name");
+    // The name reaches the household roster, the activity feed and the agent's
+    // context; a control character would forge a line in each.
+    if (hasControlCharacter(wanted)) {
+      throw new ConflictError("a display name cannot contain control characters");
+    }
 
     await this.#config.update((current) => {
       if (activeMembers(current).length >= MAX_MEMBERS) {
@@ -306,7 +312,10 @@ export class Auth {
    * expired or already-used code fails the same way, so the response cannot be
    * used to probe which invites exist.
    */
-  async acceptInvite(code: string, sessionTtlMs = SESSION_TTL_MS): Promise<{ token: string; session: Session }> {
+  async acceptInvite(
+    code: string,
+    sessionTtlMs = SESSION_TTL_MS,
+  ): Promise<{ token: string; session: Session; config: AppConfig }> {
     const hash = hashToken(code);
     const token = newToken();
     const sessionTokenHash = hashToken(token);
@@ -342,6 +351,10 @@ export class Auth {
     return {
       token,
       session: { memberId: member.id, role: member.role, displayName: member.displayName },
+      // The caller mirrors this member into `app.household` (P1-11). Handing
+      // back the config the update produced avoids a second read that could race
+      // another config write.
+      config,
     };
   }
 

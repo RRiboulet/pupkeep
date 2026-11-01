@@ -16,6 +16,8 @@
 //   GET  /api/agent/thread       full snapshot (transcript/tool cards/busy)
 //   GET  /api/agent/events       SSE: snapshot first, then deltas
 //   GET  /api/agent/events/poll  long-poll fallback: full snapshots only
+//   GET  /api/puppy              the puppy profile, age and household roster
+//   PATCH /api/puppy             edit it (rev + Idempotency-Key, 409 on stale)
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -32,6 +34,7 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import type { AgentEvent } from "@earendil-works/pi-durable";
 import { HOUSEHOLD_FALLBACK_LABEL, THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
+import { parsePuppyPatch, type PuppyProfile } from "../shared/profile.ts";
 import {
   Auth,
   AuthError,
@@ -48,14 +51,17 @@ import {
   type Session,
 } from "./auth.ts";
 import type { Logger } from "./log.ts";
+import { CLIENT_KEY_LIMIT, isCommandKey } from "./domain/commands.ts";
+import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
+import { readPuppy, profileView, updatePuppyProfile } from "./domain/profile.ts";
 import {
   ThreadUnavailableError,
   labelFor,
-  readHousehold,
   readThreadSnapshot,
   submitChatMessage,
   type ThreadRef,
 } from "./agent/thread.ts";
+import { readHousehold, syncHouseholdMembers } from "./domain/household.ts";
 import type { ThreadBus } from "./agent/bus.ts";
 import { applySecurityHeaders, serveStaticRequest } from "./static.ts";
 
@@ -95,6 +101,12 @@ export class UnsupportedMediaTypeError extends Refusal {
 function requireAgent(session: Session | undefined): Session {
   if (session === undefined) throw new AuthError("not signed in");
   return requireAction(session, "agent");
+}
+
+/** Care routes use the matrix's `care` action (both caregivers, household scope). */
+function requireCare(session: Session | undefined): Session {
+  if (session === undefined) throw new AuthError("not signed in");
+  return requireAction(session, "care");
 }
 
 export interface HttpDeps {
@@ -263,12 +275,14 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 
 /**
  * The one failure mapper: typed refusals keep their status, unknown failures
- * stay a 500 with no stack. `ThreadUnavailableError` answers 503 like any not-
- * ready moment.
+ * stay a 500 with no stack. A domain `UnavailableError` (the thread or the
+ * profile document is unreadable) answers 503 like any not-ready moment; a
+ * `DomainConflictError` is the domain refusing a well-formed request (409).
  */
 function failure(error: unknown): { status: number; message: string } {
-  if (error instanceof ThreadUnavailableError) return { status: 503, message: error.message };
+  if (error instanceof UnavailableError) return { status: 503, message: error.message };
   if (error instanceof Refusal) return { status: error.status, message: error.message };
+  if (error instanceof DomainConflictError) return { status: error.status, message: error.message };
   return { status: 500, message: "internal error" };
 }
 
@@ -376,11 +390,22 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
-    // Not this task's routes; the remaining app routes arrive with P1-10.
+    if (pathname === "/api/puppy" && req.method === "GET") {
+      requireCare(session);
+      await handleProfileRead(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/puppy" && req.method === "PATCH") {
+      await handleProfileUpdate(deps, req, res, requireCare(session));
+      return;
+    }
+
+    // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
-        "route not served yet: the PWA shell and care routes arrive with P1-10 " +
-        "(the shared thread itself landed with P1-09)",
+        "route not served yet: the care routes (meals, walks, growth, calendar) " +
+        "arrive with their phases; the profile is GET/PATCH /api/puppy",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -416,7 +441,7 @@ async function handleMessage(
 
   // Actor attribution (§9.2): the author is the session member; the label is
   // resolved through the household profiles, never the auth displayName.
-  const household = await readHousehold(deps.thread);
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
   const outcome = await submitChatMessage(deps.thread, {
     authorId: session.memberId,
     authorName: labelFor(household, session.memberId),
@@ -476,6 +501,17 @@ async function handleInvite(
   const code = url.searchParams.get("code") ?? "";
   if (code === "") throw new AuthError("invite is not valid");
   const accepted = await deps.auth.acceptInvite(code);
+  // §7.1: mirror the new member into `app.household` now, so their label is
+  // right on this first request instead of waiting for the next boot. A failure
+  // must not cost the partner their session — boot repairs it.
+  try {
+    const mirrored = await syncHouseholdMembers(deps.thread.harness, deps.thread.context, accepted.config);
+    if (mirrored.skipped !== undefined) {
+      deps.logger.warn("the new member could not be mirrored into the household", { reason: mirrored.skipped });
+    }
+  } catch (error) {
+    deps.logger.warn("the new member could not be mirrored into the household", { error });
+  }
   res.setHeader("Set-Cookie", sessionCookie(accepted.token, cookieOptionsFor(req)));
   redirect(res, "/");
 }
@@ -500,7 +536,7 @@ async function handleLogout(
 
 /** Who is asking — role from auth, but the label from the household profiles. */
 async function handleSession(deps: HttpDeps, res: ServerResponse, session: Session): Promise<void> {
-  const household = await readHousehold(deps.thread);
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
   const profile = household.members.find((member) => member.id === session.memberId);
   const label = profile?.name ?? HOUSEHOLD_FALLBACK_LABEL;
   sendJson(res, 200, {
@@ -541,6 +577,82 @@ async function handleInvites(
   sendJson(res, 200, { code, link });
 }
 
+// --- puppy profile (P1-11) ---------------------------------------------------
+
+/**
+ * The profile the Pup screen (and the agent's view) reads. The household read
+ * reconciles a member who joined after boot, so the roster shown here is the
+ * same one labels resolve through.
+ */
+async function handleProfileRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  // The household read reconciles a member who joined after boot; the profile
+  // view is then built from that same value rather than reading it twice.
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
+  const puppy = await readPuppy(deps.thread.harness, deps.thread.context);
+  sendJson(res, 200, profileView(household, puppy, new Date()));
+}
+
+/**
+ * One profile edit. §7.4: the body carries the `rev` it read plus a partial set
+ * of fields, and the `Idempotency-Key` header makes a retried save a success
+ * instead of a second revision. A stale `rev` is a 409 with the current profile
+ * so the browser can show what the other caregiver changed.
+ */
+async function handleProfileUpdate(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const origin = req.headers.origin;
+  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
+    throw new ForbiddenError(session.role, "care");
+  }
+  requireMutationHeaders(req);
+
+  const key = headerValue(req, "idempotency-key");
+  if (!isCommandKey(key, CLIENT_KEY_LIMIT)) {
+    throw new ConflictError("a profile change needs an Idempotency-Key header");
+  }
+
+  const body = await readJsonBody(req);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ConflictError("a profile change is a JSON object");
+  }
+  const { rev, ...fields } = body as Record<string, unknown>;
+  if (typeof rev !== "number" || !Number.isSafeInteger(rev) || rev < 0) {
+    throw new ConflictError("a profile change needs the revision it read");
+  }
+  const patch = parsePuppyPatch(fields);
+  if (!patch) throw new ConflictError("a profile change needs at least one valid field");
+
+  const outcome = await updatePuppyProfile(deps.thread.harness, deps.thread.context, {
+    actor: async (_tx, household) => ({ id: session.memberId, label: labelFor(household, session.memberId) }),
+    // Namespaced: a client-chosen key can never collide with a tool's task id.
+    actionId: `http:${key}`,
+    rev,
+    patch,
+  });
+
+  if (outcome.kind === "key-conflict") {
+    sendJson(res, 409, {
+      error: "idempotency_conflict",
+      message: "that idempotency key was used for a different profile change",
+    });
+    return;
+  }
+  if (outcome.kind === "stale") {
+    // Terminal for this action: the client re-reads, it does not auto-retry.
+    sendJson(res, 409, {
+      error: "stale",
+      message: "the profile changed since it was read",
+      profile: outcome.profile,
+    });
+    return;
+  }
+  sendJson(res, 200, { profile: outcome.profile, replayed: outcome.kind === "replayed" });
+}
+
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {
   if (deps.readSnapshot !== undefined) return deps.readSnapshot(deps.thread, deps.bus.seq);
   return readThreadSnapshot(deps.thread, deps.bus.seq);
@@ -549,12 +661,15 @@ async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {
 /** One SSE frame; `Notice` types are part of the wire contract with the PWA. */
 function writeEvent(
   res: ServerResponse,
-  type: "snapshot" | "batch" | "reconnect" | "heartbeat",
+  type: "snapshot" | "batch" | "profile" | "reconnect" | "heartbeat",
   payload?: unknown,
 ): void {
   if (res.writableEnded) return;
-  // snapshot/batch frames carry the payload itself; the rest only carry the type.
-  const body = type === "snapshot" || type === "batch" ? JSON.stringify(payload) : JSON.stringify({ type });
+  // A payload-bearing frame carries it; the rest only carry the frame type.
+  const body =
+    type === "snapshot" || type === "batch" || type === "profile"
+      ? JSON.stringify(payload)
+      : JSON.stringify({ type });
   res.write(`event: ${type}\ndata: ${body}\n\n`);
 }
 
@@ -571,12 +686,18 @@ async function handleEvents(
   // attach and hide a gap from a client that watches for one (§9.4).
   type QueueItem =
     | { type: "batch"; seq: number; events?: readonly AgentEvent[] }
+    | { type: "profile"; profile: PuppyProfile }
     | { type: "reconnect" };
   const queue: QueueItem[] = [];
 
   const deliver = (item: QueueItem): void => {
     if (item.type === "batch") {
       writeEvent(res, "batch", { seq: item.seq, ...(item.events ? { events: item.events } : {}) });
+      return;
+    }
+    if (item.type === "profile") {
+      // The whole view, so a client never merges a partial update (P1-11).
+      writeEvent(res, "profile", item.profile);
       return;
     }
     // Not a fake event from another conversation: a marker to reattach.
@@ -596,6 +717,18 @@ async function handleEvents(
         return;
       }
       const item: QueueItem = { type: "batch", seq: deps.bus.seq, ...(events ? { events } : {}) };
+      if (!opened) {
+        queue.push(item);
+        return;
+      }
+      deliver(item);
+    },
+    // Committed care state (the puppy profile today). It is not a thread delta:
+    // it never touches `seq`, so a long-poll client is not woken by it, and it
+    // queues behind the initial snapshot like every other frame.
+    state: (profile: PuppyProfile) => {
+      if (!live) return;
+      const item: QueueItem = { type: "profile", profile };
       if (!opened) {
         queue.push(item);
         return;

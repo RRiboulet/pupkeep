@@ -1,16 +1,22 @@
 // The four session documents PLAN §8.1 assigns to P1-08, plus their parsers.
 //
-// The doc `version` and the value's `schemaVersion` both start at 1. A future
-// shape change increments both and adds `migrate(value, fromVersion)`; the
-// parsers below then accept both shapes explicitly. An unknown schemaVersion or
-// a malformed value is a bootstrap error, never a silent reset: resetting would
-// discard members, settings or pending idempotency records.
+// The doc `version` and the value's `schemaVersion` start at 1. A shape change
+// increments both and adds `migrate(value, fromVersion)`; the parsers below then
+// accept the current shape only, because a migrated value is what the Session
+// hands them. The one exception is deliberate: `app.puppy` moved to version 2
+// when P1-11 added `rev`, and `migrate` fills `rev: 0` for a version-1 document
+// so a phone that ran P1-08 keeps its puppy instead of failing boot.
+//
+// An unknown schemaVersion or a malformed value is a bootstrap error, never a
+// silent reset: resetting would discard members, settings or pending
+// idempotency records.
 //
 // `checkpointWhen` stores a full base every 100 deltas. The documents are small;
 // the point is to bound replay and to keep the policy explicit rather than a
 // permanent `() => false`.
 
-import type { CheckpointInfo } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord";
+import type { CheckpointInfo, DocumentReader, Tx } from "@earendil-works/pi-durable";
 import { defineDoc } from "@earendil-works/pi-durable";
 import {
   ACTIVITY_SCHEMA_VERSION,
@@ -29,6 +35,16 @@ import {
   type Puppy,
   type PuppySex,
 } from "../../shared/domain.ts";
+import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
+
+/**
+ * What a domain function needs from its caller: committed reads plus one
+ * commit. A `Harness` satisfies it, and so does a tool's `ToolExecutionApi`,
+ * which is what lets HTTP and the agent share one domain function.
+ */
+export type DocStore = Pick<DocumentReader, "snapshot"> & {
+  commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T>;
+};
 
 /** Store a base after this many deltas since the previous base. */
 export function checkpointEvery(deltas: number): (_value: unknown, _ops: unknown, info: CheckpointInfo) => boolean {
@@ -54,6 +70,7 @@ export function emptyHousehold(): Household {
 export function emptyPuppy(): Puppy {
   return {
     schemaVersion: PUPPY_SCHEMA_VERSION,
+    rev: 0,
     name: "",
     birthday: null,
     breed: null,
@@ -81,9 +98,24 @@ export const HouseholdDoc = defineDoc<Household>({
 
 export const PuppyDoc = defineDoc<Puppy>({
   kind: "app.puppy",
-  version: 1,
+  version: 2,
   scope: "session",
   initial: emptyPuppy,
+  // A version-1 document (P1-08) predates `rev`. Fill it here rather than
+  // treating the document as corrupt: a phone that already has a puppy keeps it.
+  migrate(value, fromVersion) {
+    if (fromVersion !== 1) {
+      throw new Error(`app.puppy has no migration from version ${fromVersion}`);
+    }
+    const migrated = {
+      ...(value as unknown as Record<string, unknown>),
+      schemaVersion: PUPPY_SCHEMA_VERSION,
+      rev: 0,
+    };
+    const parsed = parsePuppy(migrated);
+    if (!parsed) throw new Error("app.puppy version 1 does not migrate to a valid version 2");
+    return parsed;
+  },
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -119,12 +151,6 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
 function isIsoDate(value: unknown): value is string {
   return typeof value === "string" && ISO_DATE.test(value) && !Number.isNaN(Date.parse(value));
-}
-
-function isLocalDate(value: unknown): value is string {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const date = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
 export function isIanaZone(value: unknown): value is string {
@@ -185,6 +211,9 @@ export function parseMemberProfiles(value: unknown): MemberProfile[] | undefined
     if (!record) return undefined;
     const { id, name } = record;
     if (!isNonEmptyString(id) || !isNonEmptyString(name)) return undefined;
+    // A display name lands in the activity feed and the agent's context; a
+    // control character there would forge a line. Fail closed, as boot does.
+    if (hasControlCharacter(name.trim()) || hasControlCharacter(id.trim())) return undefined;
     if (ids.has(id.trim()) || names.has(name.trim().toLowerCase())) return undefined;
     ids.add(id.trim());
     names.add(name.trim().toLowerCase());
@@ -220,6 +249,7 @@ export function parseHousehold(value: unknown): Household | undefined {
 export function parsePuppy(value: unknown): Puppy | undefined {
   const record = asRecord(value);
   if (!record || record.schemaVersion !== PUPPY_SCHEMA_VERSION) return undefined;
+  if (typeof record.rev !== "number" || !Number.isSafeInteger(record.rev) || record.rev < 0) return undefined;
   if (typeof record.name !== "string") return undefined;
   if (record.birthday !== null && !isLocalDate(record.birthday)) return undefined;
   if (record.breed !== null && typeof record.breed !== "string") return undefined;
@@ -233,6 +263,7 @@ export function parsePuppy(value: unknown): Puppy | undefined {
   if (!isIsoDate(record.createdAt)) return undefined;
   return {
     schemaVersion: PUPPY_SCHEMA_VERSION,
+    rev: record.rev,
     name: record.name,
     birthday: record.birthday,
     breed: record.breed,

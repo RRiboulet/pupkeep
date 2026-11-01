@@ -22,7 +22,7 @@ import {
   type Harness,
   type Submission,
 } from "@earendil-works/pi-durable";
-import type { Household } from "../../shared/domain.ts";
+import type { Household, MemberProfile } from "../../shared/domain.ts";
 import {
   CHAT_ENTRY_KIND,
   HOUSEHOLD_FALLBACK_LABEL,
@@ -31,7 +31,8 @@ import {
   type ThreadSnapshot,
   type TranscriptEntry,
 } from "../../shared/chat.ts";
-import { HouseholdDoc, parseHousehold } from "../domain/docs.ts";
+import { readHousehold } from "../domain/household.ts";
+import { UnavailableError } from "../domain/errors.ts";
 
 export type ThreadRef = {
   readonly harness: Harness;
@@ -39,8 +40,7 @@ export type ThreadRef = {
 };
 
 /** The thread routes cannot run without the bootstrapped household document. */
-export class ThreadUnavailableError extends Error {
-  readonly status = 503;
+export class ThreadUnavailableError extends UnavailableError {
   constructor(message: string) {
     super(message);
     this.name = "ThreadUnavailableError";
@@ -77,12 +77,7 @@ export function labelFor(household: Household, authorId: string | null | undefin
 }
 
 /** Does the household document exist and parse? Boot keeps it true. */
-export async function readHousehold(thread: ThreadRef): Promise<Household> {
-  const snapshot = await thread.harness.snapshot(HouseholdDoc, thread.context);
-  const household = snapshot === undefined ? undefined : parseHousehold(snapshot);
-  if (!household) throw new ThreadUnavailableError("the household document is not available; retry after boot");
-  return household;
-}
+export { readHousehold } from "../domain/household.ts";
 
 async function sharedConversation(thread: ThreadRef, household: Household, what: string) {
   const id = household.conversationId as ConversationId;
@@ -104,7 +99,7 @@ export async function submitChatMessage(
   thread: ThreadRef,
   request: SubmitRequest,
 ): Promise<SubmitOutcome> {
-  const household = await readHousehold(thread);
+  const household = await readHousehold(thread.harness, thread.context);
   const conversation = await sharedConversation(thread, household, request.clientMessageId);
   // The model content names the speaker; the custom `data` carries the record.
   const content = `${request.authorName}: ${request.text}`;
@@ -173,7 +168,7 @@ function actorFrom(chat: Actor | undefined): Actor {
  * here, which is also the "no cross-conversation leak" guarantee.
  */
 export async function readThreadSnapshot(thread: ThreadRef, seq: number): Promise<ThreadSnapshot> {
-  const household = await readHousehold(thread);
+  const household = await readHousehold(thread.harness, thread.context);
   const conversation = await sharedConversation(thread, household, "snapshot");
 
   // Newest first, then reversed, so the response body is the newest
@@ -318,7 +313,7 @@ export async function configureSharedThread(
   thread: ThreadRef,
   config: ThreadAgentConfig,
 ): Promise<{ changed: boolean; model: string | undefined }> {
-  const household = await readHousehold(thread);
+  const household = await readHousehold(thread.harness, thread.context);
   const conversation = await sharedConversation(thread, household, "configure");
   const agent = await conversation.agent(thread.context);
 

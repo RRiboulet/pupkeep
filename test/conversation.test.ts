@@ -1086,9 +1086,11 @@ test("the owner mints an invite over HTTP; the partner lands with a member sessi
     assert.equal(me.status, 200);
     const meBody = (await me.json()) as { role: string; label: string; authorId: string | null };
     assert.equal(meBody.role, "member");
-    // A just-invited member has no profile until the next boot reconciles it:
-    // §9.2 says the label then falls back, never `undefined`.
-    assert.equal(meBody.label, "Household");
+    // P1-11 closed the P1-09 seam: the profile service mirrors a member who
+    // joined after boot into `app.household`, so the label is their name before
+    // any restart (boot would otherwise be the only reconciler).
+    assert.equal(meBody.label, "Sam");
+    assert.match(meBody.authorId ?? "", /^m-/, "the invited member is a real config row, not the fallback");
 
     // The code is one-time: a second use is refused, so a leaked link cannot
     // mint a third caregiver.

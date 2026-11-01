@@ -123,7 +123,7 @@ test("the server binds a real port, answers /healthz, and refuses everything els
 
       const other = await fetch(`${result.app.url}/api/today`);
       assert.equal(other.status, 503);
-      assert.match(await other.text(), /P1-09/);
+      assert.match(await other.text(), /care routes/);
     } finally {
       const end = await result.app.close();
       assert.deepEqual(end, { code: 0, reason: "closed" });

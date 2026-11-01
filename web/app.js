@@ -1,5 +1,6 @@
 // The shell entry: bottom navigation Today/Calendar/Pup/Agent/Settings, an
-// online/offline status region, and the service worker registration.
+// online/offline status region, the live care-state stream, and the service
+// worker registration.
 //
 // There is no build step: Preact and htm come from ./vendor (pinned in
 // NOTICE.md), and every import here is relative.
@@ -14,6 +15,7 @@
 import { h, render } from "./vendor/preact.mjs";
 import htm from "./vendor/htm.mjs";
 import { hashRoute, setState, subscribe } from "./store.js";
+import { startLive } from "./live.js";
 import { Today } from "./views/today.js";
 import { Calendar } from "./views/calendar.js";
 import { Pup } from "./views/pup.js";
@@ -129,7 +131,10 @@ export function registerServiceWorker() {
 // just the first offline-shell step. Surfaced async so a failure never delays
 // the page.
 if (typeof window !== "undefined") {
+  // One stream for the whole app: the profile view (P1-11) and, later, the
+  // shared thread. Started after load so it never competes with the first paint.
   window.addEventListener("load", () => {
     registerServiceWorker();
+    startLive();
   });
 }
