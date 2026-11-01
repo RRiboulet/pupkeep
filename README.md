@@ -141,6 +141,13 @@ from a phone reaches the dev server without opening a port to the internet.
   alone does nothing headless. Reach it from a phone with `ssh -L
   8787:127.0.0.1:8787 <host>` or `tailscale serve` on the host. Never publish it
   on `0.0.0.0`.
+- The dev server runs with `--access lan` inside the container (Docker publishes
+  to the container's interface, never its loopback), so the owner link it mints
+  names the container's own address — `http://172.x.x.x:8787/login?token=…` —
+  which a tunnel cannot open. Read the link and swap the authority before
+  opening it: `sed -E 's#^http://[^/]+#http://127.0.0.1:8787#' ~/.pupkeep/owner-link.txt`
+  (the dev database is `/tmp/pupkeep-dev`, so that path is
+  `/tmp/pupkeep-dev/owner-link.txt` inside the container).
 - CI builds this image on `.github/workflows/devcontainer.yml`; a devcontainer
   or package-manifest change cannot merge without a real build, a `postCreate`
   run and the test suite.

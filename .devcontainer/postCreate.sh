@@ -115,13 +115,20 @@ echo "sqlite3 $(sqlite3 --version | cut -d' ' -f1) · $(rclone version | sed -n 
 # volume persists. `--local` would write the repo's settings file and is the one
 # thing this must never do.
 SHARED_PACKAGE_REF="${PUPKEEP_SHARED_PACKAGE_REF:-v1.10.0}"
-if pi list 2>/dev/null | grep 'my-agent-setup' >/dev/null; then
-  echo "shared pi package already installed; leaving it alone"
-elif [ -f .pi/settings.json ] && grep -q 'my-agent-setup' .pi/settings.json; then
+if [ -f .pi/settings.json ] && grep -q 'my-agent-setup' .pi/settings.json; then
   echo "this project already declares the shared pi package; not installing a second copy"
+elif pi list 2>/dev/null | grep -F "my-agent-setup@${SHARED_PACKAGE_REF}" >/dev/null; then
+  echo "shared pi package already at ${SHARED_PACKAGE_REF}"
 else
+  # An installed package is not necessarily the *wanted* one: the pin moves, the
+  # volume keeps the old ref, and a bare "already installed" check then silently
+  # serves last release's extensions forever. Say what is there, then upgrade.
+  CURRENT_REF="$(pi list 2>/dev/null | grep -o 'my-agent-setup@[^[:space:]]*' | head -n1 | sed 's/.*@//' || true)"
+  if [ -n "$CURRENT_REF" ]; then
+    echo "shared pi package is at ${CURRENT_REF}; switching to ${SHARED_PACKAGE_REF}"
+  fi
   if pi install "git:github.com/RRiboulet/my-agent-setup@${SHARED_PACKAGE_REF}"; then
-    echo "installed the shared pi package at ${SHARED_PACKAGE_REF} into the pi-config volume"
+    echo "shared pi package is at ${SHARED_PACKAGE_REF}"
   else
     echo "WARNING: could not install the shared pi package at ${SHARED_PACKAGE_REF}." >&2
     echo "         The app and its tests do not need it; run the command again when online:" >&2

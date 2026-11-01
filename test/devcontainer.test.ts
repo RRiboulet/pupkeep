@@ -190,6 +190,12 @@ test("postCreate seeds .env, runs the suite, checks versions and installs the sh
   assert.match(script, /SHARED_PACKAGE_REF=.*v1\.10\.0/);
   assert.match(script, /grep -q 'my-agent-setup' \.pi\/settings\.json/);
   assert.match(script, /pi install "git:github\.com\/RRiboulet\/my-agent-setup@\$\{SHARED_PACKAGE_REF\}"/);
+  // The volume outlives the pin. "already installed" must mean "installed at
+  // the wanted ref", or bumping SHARED_PACKAGE_REF silently keeps the previous
+  // release's extensions for the life of the volume.
+  assert.match(script, /grep -F "my-agent-setup@\$\{SHARED_PACKAGE_REF\}"/);
+  assert.match(script, /CURRENT_REF=/);
+  assert.match(script, /switching to \$\{SHARED_PACKAGE_REF\}/);
   assert.doesNotMatch(script, /pi install[^\n]*--local/);
   assert.doesNotMatch(script, />>?\s*\.pi\/settings\.json/);
 });
