@@ -110,6 +110,20 @@ expect and the rest of the host tooling. Open the repo with the Dev Containers
 extension; `postCreate.sh` runs `npm ci`, `npm run typecheck` and `npm test`, and
 seeds `.env` only when it is absent.
 
+On a host with no editor — the phone-hosted or headless case — use `devc` from
+`my-agent-setup` instead, which is the same `devcontainer up` plus an interactive
+login shell in tmux:
+
+```bash
+devc pupkeep            # build if needed, then attach a shell in the container
+devc pupkeep -- npm test
+devc rebuild pupkeep    # recreate the container; named volumes are kept
+devc doctor pupkeep     # docker, CLI, disk, uid and arch preflight
+```
+
+It publishes 8787 on the host's loopback, so `ssh -L 8787:127.0.0.1:8787 <host>`
+from a phone reaches the dev server without opening a port to the internet.
+
 - pi settings, sessions, model/provider auth and the gh token persist in the
   `pupkeep-pi-config` volume at `/home/vscode/.pi`; run `gh auth login` and pi's
   own login once per volume. gh is pinned to `2.103.2`.
