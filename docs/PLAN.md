@@ -2220,7 +2220,7 @@ that the partner is reached out-of-app is gated on P0-10.
       `appointments`, `showers`) so an empty result cannot be read as "nothing
       happened"; (7) the shared-thread prompt loses its "get_context is not
       available yet" parenthesis, which P1-09 had left in place.
-      **Verified:** 27 new tests in `test/profile.test.ts` (local date vs UTC,
+      **Verified:** 28 new tests in `test/profile.test.ts` (local date vs UTC,
       age boundaries, month clamping, the v1→v2 migration, rev bump + one
       activity entry, exact-request replay, key conflict, stale refusal with
       the current profile, future birthday, retired document, the HTTP auth/
@@ -2231,7 +2231,8 @@ that the partner is reached out-of-app is gated on P0-10.
       registry wiring and Alex's activity attribution, and a pin that a profile
       write is not thread news: the long-poll fallback must not wake and the
       thread counter must not move, and a commit that lands while a publish is
-      in flight still gets its own frame); 292 tests total, typecheck clean. The
+      in flight still gets its own frame, and a replay is not re-judged
+      against a clock that moved); 293 tests total, typecheck clean. The
       P1-09 seam was repaired in place: the invite-joiner label assertion now
       expects `Sam`, and the stale `ThreadUnavailableError`/prompt notes are
       gone. **Reviewed and repaired:** the client minted a fresh idempotency
@@ -2254,7 +2255,12 @@ that the partner is reached out-of-app is gated on P0-10.
       (`pupkeep-shell-v2`) is exercised only through the worker harness in
       `test/pwa.test.ts`.
 - [ ] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake
-      provider, busy reject, restart, SSE, log scrub.
+      provider, busy reject, restart, SSE, log scrub. **Carry-over:** the
+      adversarial review of P1-11 found a narrow duplicate-delivery window in the
+      P1-09 SSE attach (a commit whose broadcast drains after the `seq` capture
+      is both inside the snapshot and replayed as a batch); the flush guard's
+      seq invariant is not strict. No impact while the PWA ignores `batch`, so
+      it is this task's to fix with an SSE test, not P1-11's.
 - [ ] **P1-13** Phone runbook draft: Termux install, wake lock, boot script,
       no-domain access, ntfy onboarding, PWA/push test, **sshd bound to the
       Tailscale address and started on demand**, and the `termux-chroot` +

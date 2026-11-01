@@ -229,6 +229,33 @@ test("the same action replayed is success; the same key with another request is 
   });
 });
 
+test("a replay is not re-judged against a clock that moved since the first commit", async () => {
+  await withProfileHarness(async ({ harness }) => {
+    const store: DocStore = harness;
+    const first = await updatePuppyProfile(store, context, {
+      actor,
+      actionId: "clock-1",
+      rev: 0,
+      patch: { name: "Biscuit", birthday: "2026-10-29" },
+      now: new Date("2026-10-29T12:00:00.000Z"),
+    });
+    assert.equal(first.kind, "updated");
+
+    // The same unacknowledged request is retried after a clock correction (or a
+    // household timezone change) makes the birthday look like the future —
+    // Paris is one day ahead of UTC at this instant.
+    const replay = await updatePuppyProfile(store, context, {
+      actor,
+      actionId: "clock-1",
+      rev: 0,
+      patch: { name: "Biscuit", birthday: "2026-10-29" },
+      now: new Date("2026-10-28T22:00:00.000Z"),
+    });
+    assert.equal(replay.kind, "replayed", "the recorded success wins over a re-derivation");
+    assert.equal(replay.profile.puppy.birthday, "2026-10-29");
+  });
+});
+
 test("a stale revision is refused with the current profile, not overwritten", async () => {
   await withProfileHarness(async ({ harness }) => {
     const store: DocStore = harness;

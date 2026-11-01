@@ -23,8 +23,13 @@ import { UnavailableError } from "./errors.ts";
 export const COMMAND_TTL_MS = 24 * 60 * 60 * 1000;
 /** PLAN §8.1: the commands document keeps at most 1000 records. */
 export const COMMAND_LIMIT = 1000;
-/** Longest client key; long enough for a UUID, short enough to bound a document. */
-export const COMMAND_KEY_LIMIT = 100;
+/**
+ * Longest stored key. A client key is at most 100 characters and the callers
+ * namespace it (`http:`/`tool:`), so the stored form allows a little more.
+ */
+export const COMMAND_KEY_LIMIT = 120;
+/** A client-supplied key stays shorter; the namespace prefix is not the client's. */
+export const CLIENT_KEY_LIMIT = 100;
 
 export type CommandOutcome<T extends JsonValue> =
   | { kind: "committed"; value: T }
@@ -61,8 +66,8 @@ class KeyCollisionError extends Error {
   }
 }
 
-export function isCommandKey(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= COMMAND_KEY_LIMIT && KEY_PATTERN.test(value);
+export function isCommandKey(value: unknown, limit = COMMAND_KEY_LIMIT): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= limit && KEY_PATTERN.test(value);
 }
 
 /**
@@ -106,6 +111,9 @@ export async function runIdempotent<T extends JsonValue>(
   request: CommandRequest,
   change: (tx: Tx) => Promise<T>,
 ): Promise<CommandOutcome<T>> {
+  // The one place that writes a key. A caller that builds one outside the
+  // pattern fails here loudly instead of storing an unsearchable record.
+  if (!isCommandKey(request.key)) throw new Error("the idempotency key is not storable");
   // A cheap pre-read keeps the common replay off the mutation line; the commit
   // below re-checks, because two replays can pass this point together.
   const before = await readCommands(ref);

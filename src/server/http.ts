@@ -51,7 +51,7 @@ import {
   type Session,
 } from "./auth.ts";
 import type { Logger } from "./log.ts";
-import { isCommandKey } from "./domain/commands.ts";
+import { CLIENT_KEY_LIMIT, isCommandKey } from "./domain/commands.ts";
 import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
 import { readPuppy, profileView, updatePuppyProfile } from "./domain/profile.ts";
 import {
@@ -600,7 +600,9 @@ async function handleProfileUpdate(
   requireMutationHeaders(req);
 
   const key = headerValue(req, "idempotency-key");
-  if (!isCommandKey(key)) throw new ConflictError("a profile change needs an Idempotency-Key header");
+  if (!isCommandKey(key, CLIENT_KEY_LIMIT)) {
+    throw new ConflictError("a profile change needs an Idempotency-Key header");
+  }
 
   const body = await readJsonBody(req);
   if (typeof body !== "object" || body === null || Array.isArray(body)) {

@@ -152,10 +152,6 @@ export async function updatePuppyProfile(
   const household = await readHouseholdDoc(store, context);
   const today = localDateAt(now, household.timezone);
 
-  if (input.patch.birthday !== null && input.patch.birthday !== undefined && input.patch.birthday > today) {
-    throw new DomainConflictError("a birthday cannot be in the future");
-  }
-
   const request = { rev: input.rev, patch: input.patch } as JsonObject;
   let outcome: CommandOutcome<{ rev: number }>;
   try {
@@ -163,6 +159,12 @@ export async function updatePuppyProfile(
       { store, context },
       { key: input.actionId, requestHash: requestHashOf(request), now },
       async (tx) => {
+        // Inside the callback, so a replay (which never runs this) is not
+        // re-judged against a `today` that has since moved: the module's
+        // "same action is success" rule outranks a re-derivation.
+        if (input.patch.birthday != null && input.patch.birthday > today) {
+          throw new DomainConflictError("a birthday cannot be in the future");
+        }
         const actor = await input.actor(tx, household);
         const draft = await tx.doc(PuppyDoc);
         if (draft.rev !== input.rev) throw new StaleRevisionError();

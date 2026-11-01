@@ -81,11 +81,16 @@ async function speakerIn(
   }
 }
 
+/**
+ * The name and breed are caregiver free text, so they are rendered as JSON
+ * strings: a stored value that reads like an instruction stays visibly *data*
+ * in the model's context (§9.5), instead of blending into the sentence.
+ */
 function profileText(fields: PuppyFields, age: string | null, today: string): string {
-  const parts = [`name "${fields.name}"`];
+  const parts = [`name ${JSON.stringify(fields.name)}`];
   if (fields.birthday) parts.push(`born ${fields.birthday}`);
   if (age) parts.push(age);
-  if (fields.breed) parts.push(`breed ${fields.breed}`);
+  if (fields.breed) parts.push(`breed ${JSON.stringify(fields.breed)}`);
   if (fields.sex) parts.push(fields.sex);
   if (fields.targetWeightKg !== null) parts.push(`target ${fields.targetWeightKg} kg`);
   return `${parts.join(", ")} (today is ${today})`;
@@ -93,7 +98,9 @@ function profileText(fields: PuppyFields, age: string | null, today: string): st
 
 function activityText(entries: readonly ActivityEntry[]): string {
   if (entries.length === 0) return "nothing yet";
-  return entries.map((entry) => `${entry.at} ${entry.summary}`).join("\n");
+  // Domain-built summaries still carry caregiver free text; JSON-quote them so
+  // one line cannot masquerade as a second instruction.
+  return entries.map((entry) => `${entry.at} ${JSON.stringify(entry.summary)}`).join("\n");
 }
 
 function text(value: string): { output: { type: "text"; text: string }[] } {
