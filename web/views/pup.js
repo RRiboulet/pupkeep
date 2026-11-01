@@ -116,7 +116,9 @@ export class Pup extends Component {
   onStore(state) {
     const incoming = state.profile;
     if (!incoming) return;
-    if (this.state.profile && incoming.rev === this.state.profile.rev) return;
+    // Never go backwards: a frame that was already in flight when a save
+    // returned carries an older revision, and the newest revision wins.
+    if (this.state.profile && incoming.rev <= this.state.profile.rev) return;
     if (this.state.dirty) {
       this.setState({ profile: incoming, conflict: CONFLICT_MESSAGE });
       return;
