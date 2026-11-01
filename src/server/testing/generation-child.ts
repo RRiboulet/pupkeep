@@ -4,7 +4,7 @@
 // resumes the generation there. A child that failed before the provider call
 // would not prove that the *running* task state survived.
 
-import { writeFile } from "node:fs/promises";
+import { rename, writeFile } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxProvider } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -17,10 +17,22 @@ if (databasePath === undefined || submissionMarker === undefined || calledMarker
   process.exit(2);
 }
 
+/**
+ * Write-then-rename. The parent polls for these markers with `stat().isFile()`,
+ * so a plain `writeFile` is a race: it creates the path with O_TRUNC before the
+ * bytes land, the poller sees an empty file, and it reads "" instead of an id.
+ * Renaming into place means a marker is either absent or complete.
+ */
+async function writeMarker(path: string, text: string): Promise<void> {
+  const staged = `${path}.partial`;
+  await writeFile(staged, text, { mode: 0o600 });
+  await rename(staged, path);
+}
+
 const faux = fauxProvider();
 faux.setResponses([
   () => {
-    void writeFile(calledMarker, "called\n", { mode: 0o600 });
+    void writeMarker(calledMarker, "called\n");
     // The generation phase is already committed; staying here is what makes it
     // an interrupted generation rather than a completed one.
     return new Promise(() => undefined);
@@ -42,7 +54,7 @@ const submission = await root.submit(
   { type: "input", content: "a question that was still running", requestId: "generation-restore-1" },
   BACKGROUND_CONTEXT,
 );
-await writeFile(submissionMarker, `${submission.id}\n`, { mode: 0o600 });
+await writeMarker(submissionMarker, `${submission.id}\n`);
 
 // Hold the process open with the Harness still owning the database, so SIGKILL
 // lands on a live generation.
