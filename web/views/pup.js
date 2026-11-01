@@ -24,6 +24,19 @@ const html = htm.bind(h);
 const CONFLICT_MESSAGE =
   "Someone else changed this profile. Your edits are kept below; saving again replaces their change.";
 
+function sameHousehold(a, b) {
+  return (
+    a.today === b.today &&
+    a.household.timezone === b.household.timezone &&
+    a.household.name === b.household.name &&
+    a.household.members.length === b.household.members.length &&
+    a.household.members.every((member, index) => {
+      const other = b.household.members[index];
+      return other !== undefined && other.id === member.id && other.name === member.name;
+    })
+  );
+}
+
 function emptyDraft() {
   return { name: "", birthday: "", breed: "", sex: "", targetWeightKg: "" };
 }
@@ -110,20 +123,39 @@ export class Pup extends Component {
 
   /**
    * A frame from `live.js`. The shell re-renders the tree on every store change,
-   * so this only has to keep the draft in step: an undirtied form takes the new
-   * values, a dirty one keeps its edits and says why.
+   * so this only has to keep the draft in step.
+   *
+   * Two kinds of change arrive on this one frame: a profile edit (the revision
+   * moves) and a household change (a partner joined, the timezone changed, the
+   * local day rolled over — the revision does not move). Only the first may
+   * touch the draft or claim a conflict; the second replaces what is displayed
+   * and leaves an in-progress edit alone.
    */
   onStore(state) {
     const incoming = state.profile;
     if (!incoming) return;
-    // Never go backwards: a frame that was already in flight when a save
-    // returned carries an older revision, and the newest revision wins.
-    if (this.state.profile && incoming.rev <= this.state.profile.rev) return;
-    if (this.state.dirty) {
-      this.setState({ profile: incoming, conflict: CONFLICT_MESSAGE });
+    const current = this.state.profile;
+
+    if (current === null) {
+      this.setState({ profile: incoming, draft: draftOf(incoming), conflict: null, message: null });
       return;
     }
-    this.setState({ profile: incoming, draft: draftOf(incoming), conflict: null, message: null });
+    // Never go backwards: a frame that was already in flight when a save
+    // returned carries an older revision, and the newest revision wins.
+    if (incoming.rev < current.rev) return;
+
+    if (incoming.rev > current.rev) {
+      if (this.state.dirty) {
+        this.setState({ profile: incoming, conflict: CONFLICT_MESSAGE });
+        return;
+      }
+      this.setState({ profile: incoming, draft: draftOf(incoming), conflict: null, message: null });
+      return;
+    }
+
+    // Same revision: the roster, the timezone or the household-local day moved.
+    if (sameHousehold(current, incoming)) return;
+    this.setState({ profile: incoming });
   }
 
   async save(event) {

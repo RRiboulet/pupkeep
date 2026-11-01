@@ -34,7 +34,7 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import type { AgentEvent } from "@earendil-works/pi-durable";
 import { HOUSEHOLD_FALLBACK_LABEL, THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
-import { parsePuppyPatch } from "../shared/profile.ts";
+import { parsePuppyPatch, type PuppyProfile } from "../shared/profile.ts";
 import {
   Auth,
   AuthError,
@@ -57,12 +57,12 @@ import { readPuppy, profileView, updatePuppyProfile } from "./domain/profile.ts"
 import {
   ThreadUnavailableError,
   labelFor,
-  readHousehold,
   readThreadSnapshot,
   submitChatMessage,
   type ThreadRef,
 } from "./agent/thread.ts";
-import type { StateFrame, ThreadBus } from "./agent/bus.ts";
+import { readHousehold, syncHouseholdMembers } from "./domain/household.ts";
+import type { ThreadBus } from "./agent/bus.ts";
 import { applySecurityHeaders, serveStaticRequest } from "./static.ts";
 
 /** Generous click-submit cadence; a double-send dedupes before this counts. */
@@ -441,7 +441,7 @@ async function handleMessage(
 
   // Actor attribution (§9.2): the author is the session member; the label is
   // resolved through the household profiles, never the auth displayName.
-  const household = await readHousehold(deps.thread);
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
   const outcome = await submitChatMessage(deps.thread, {
     authorId: session.memberId,
     authorName: labelFor(household, session.memberId),
@@ -501,6 +501,17 @@ async function handleInvite(
   const code = url.searchParams.get("code") ?? "";
   if (code === "") throw new AuthError("invite is not valid");
   const accepted = await deps.auth.acceptInvite(code);
+  // §7.1: mirror the new member into `app.household` now, so their label is
+  // right on this first request instead of waiting for the next boot. A failure
+  // must not cost the partner their session — boot repairs it.
+  try {
+    const mirrored = await syncHouseholdMembers(deps.thread.harness, deps.thread.context, accepted.config);
+    if (mirrored.skipped !== undefined) {
+      deps.logger.warn("the new member could not be mirrored into the household", { reason: mirrored.skipped });
+    }
+  } catch (error) {
+    deps.logger.warn("the new member could not be mirrored into the household", { error });
+  }
   res.setHeader("Set-Cookie", sessionCookie(accepted.token, cookieOptionsFor(req)));
   redirect(res, "/");
 }
@@ -525,7 +536,7 @@ async function handleLogout(
 
 /** Who is asking — role from auth, but the label from the household profiles. */
 async function handleSession(deps: HttpDeps, res: ServerResponse, session: Session): Promise<void> {
-  const household = await readHousehold(deps.thread);
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
   const profile = household.members.find((member) => member.id === session.memberId);
   const label = profile?.name ?? HOUSEHOLD_FALLBACK_LABEL;
   sendJson(res, 200, {
@@ -576,7 +587,7 @@ async function handleInvites(
 async function handleProfileRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
   // The household read reconciles a member who joined after boot; the profile
   // view is then built from that same value rather than reading it twice.
-  const household = await readHousehold(deps.thread);
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
   const puppy = await readPuppy(deps.thread.harness, deps.thread.context);
   sendJson(res, 200, profileView(household, puppy, new Date()));
 }
@@ -615,10 +626,6 @@ async function handleProfileUpdate(
   const patch = parsePuppyPatch(fields);
   if (!patch) throw new ConflictError("a profile change needs at least one valid field");
 
-  // The read repairs a household that predates a member joining; the label
-  // itself resolves through the household the domain service reads inside the
-  // commit (§7.1), not through a snapshot taken here.
-  await readHousehold(deps.thread);
   const outcome = await updatePuppyProfile(deps.thread.harness, deps.thread.context, {
     actor: async (_tx, household) => ({ id: session.memberId, label: labelFor(household, session.memberId) }),
     // Namespaced: a client-chosen key can never collide with a tool's task id.
@@ -679,7 +686,7 @@ async function handleEvents(
   // attach and hide a gap from a client that watches for one (§9.4).
   type QueueItem =
     | { type: "batch"; seq: number; events?: readonly AgentEvent[] }
-    | { type: "profile"; profile: StateFrame["profile"] }
+    | { type: "profile"; profile: PuppyProfile }
     | { type: "reconnect" };
   const queue: QueueItem[] = [];
 
@@ -719,9 +726,9 @@ async function handleEvents(
     // Committed care state (the puppy profile today). It is not a thread delta:
     // it never touches `seq`, so a long-poll client is not woken by it, and it
     // queues behind the initial snapshot like every other frame.
-    state: (frame: StateFrame) => {
+    state: (profile: PuppyProfile) => {
       if (!live) return;
-      const item: QueueItem = { type: "profile", profile: frame.profile };
+      const item: QueueItem = { type: "profile", profile };
       if (!opened) {
         queue.push(item);
         return;

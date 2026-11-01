@@ -31,22 +31,12 @@ import {
   type ThreadSnapshot,
   type TranscriptEntry,
 } from "../../shared/chat.ts";
-import type { AppConfig } from "../config.ts";
-import { activeMembers } from "../config.ts";
-import { MAX_MEMBERS } from "../auth.ts";
-import { HouseholdDoc } from "../domain/docs.ts";
+import { readHousehold } from "../domain/household.ts";
 import { UnavailableError } from "../domain/errors.ts";
-import { readHouseholdDoc } from "../domain/profile.ts";
 
 export type ThreadRef = {
   readonly harness: Harness;
   readonly context: Context;
-  /**
-   * The auth authority, when the caller has it: `readHousehold` mirrors a member
-   * who joined after boot into the document (§7.1). Absent in harness-level
-   * tests, which seed the document themselves.
-   */
-  readonly config?: () => Promise<AppConfig>;
 };
 
 /** The thread routes cannot run without the bootstrapped household document. */
@@ -86,46 +76,8 @@ export function labelFor(household: Household, authorId: string | null | undefin
   return household.members.find((member) => member.id === authorId)?.name ?? HOUSEHOLD_FALLBACK_LABEL;
 }
 
-/**
- * Does the household document exist and parse? Boot keeps it true.
- *
- * This is also where a member who joined after boot acquires a profile. The
- * invite path writes `config.json`; the document is only reconciled at boot, so
- * without this a brand-new partner would be labelled `Household` in every
- * transcript echo until the next restart (the seam P1-09 recorded). Only
- * *creates* happen here: removing a profile stays a boot decision, because a
- * stale read of `config.json` must never delete a caregiver who just joined.
- */
-export async function readHousehold(thread: ThreadRef): Promise<Household> {
-  const household = await readHouseholdDoc(thread.harness, thread.context);
-  // The steady state is a full roster; skip the file read on the hot path.
-  if (!thread.config || household.members.length >= MAX_MEMBERS) return household;
-
-  const known = new Set(household.members.map((member) => member.id));
-  const taken = new Set(household.members.map((member) => member.name.trim().toLowerCase()));
-  const additions: MemberProfile[] = [];
-  for (const member of activeMembers(await thread.config())) {
-    if (known.has(member.id)) continue;
-    const key = member.displayName.trim().toLowerCase();
-    // A duplicate display name would make the document fail its own parser (and
-    // boot would then refuse to start); leave that one to the boot-time error,
-    // which names the member to rename.
-    if (key === "" || taken.has(key)) continue;
-    taken.add(key);
-    additions.push({ id: member.id, name: member.displayName });
-  }
-  if (additions.length === 0) return household;
-
-  // Re-read inside the commit: two requests can notice the same missing member,
-  // and the second must not append a duplicate.
-  await thread.harness.commit(async (tx) => {
-    const draft = await tx.doc(HouseholdDoc);
-    const present = new Set(draft.members.map((member) => member.id));
-    const fresh = additions.filter((member) => !present.has(member.id));
-    if (fresh.length > 0) draft.members = [...draft.members, ...fresh];
-  }, thread.context);
-  return readHouseholdDoc(thread.harness, thread.context);
-}
+/** Does the household document exist and parse? Boot keeps it true. */
+export { readHousehold } from "../domain/household.ts";
 
 async function sharedConversation(thread: ThreadRef, household: Household, what: string) {
   const id = household.conversationId as ConversationId;
@@ -147,7 +99,7 @@ export async function submitChatMessage(
   thread: ThreadRef,
   request: SubmitRequest,
 ): Promise<SubmitOutcome> {
-  const household = await readHousehold(thread);
+  const household = await readHousehold(thread.harness, thread.context);
   const conversation = await sharedConversation(thread, household, request.clientMessageId);
   // The model content names the speaker; the custom `data` carries the record.
   const content = `${request.authorName}: ${request.text}`;
@@ -216,7 +168,7 @@ function actorFrom(chat: Actor | undefined): Actor {
  * here, which is also the "no cross-conversation leak" guarantee.
  */
 export async function readThreadSnapshot(thread: ThreadRef, seq: number): Promise<ThreadSnapshot> {
-  const household = await readHousehold(thread);
+  const household = await readHousehold(thread.harness, thread.context);
   const conversation = await sharedConversation(thread, household, "snapshot");
 
   // Newest first, then reversed, so the response body is the newest
@@ -361,7 +313,7 @@ export async function configureSharedThread(
   thread: ThreadRef,
   config: ThreadAgentConfig,
 ): Promise<{ changed: boolean; model: string | undefined }> {
-  const household = await readHousehold(thread);
+  const household = await readHousehold(thread.harness, thread.context);
   const conversation = await sharedConversation(thread, household, "configure");
   const agent = await conversation.agent(thread.context);
 

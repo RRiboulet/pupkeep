@@ -63,7 +63,7 @@ export function watchProfileState(options: ProfileStateOptions): ProfileStateWat
     // instead of being published out of order.
     const profile = await (options.read ?? (() => readProfile(options.harness, options.context, now())))();
     if (stopped) return;
-    options.bus.publishState({ kind: "profile", profile });
+    options.bus.publishState(profile);
   };
 
   const run = async (): Promise<void> => {

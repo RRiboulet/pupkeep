@@ -17,10 +17,11 @@ import type { Context } from "@earendil-works/chord";
 import type { JsonObject, SessionDocToken, Tx } from "@earendil-works/pi-durable";
 import type { Household, Puppy } from "../../shared/domain.ts";
 import type { PuppyFields, PuppyPatch, PuppyProfile } from "../../shared/profile.ts";
-import { ActivityDoc, HouseholdDoc, PuppyDoc, parseHousehold, parsePuppy, type DocStore } from "./docs.ts";
+import { ActivityDoc, HouseholdDoc, PuppyDoc, parsePuppy, type DocStore } from "./docs.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import { type CommandOutcome, requestHashOf, runIdempotent } from "./commands.ts";
 import { DomainConflictError, UnavailableError } from "./errors.ts";
+import { readHousehold } from "./household.ts";
 import { ageOf, localDateAt } from "./time.ts";
 
 
@@ -84,10 +85,6 @@ function readDoc<T extends JsonObject>(
   });
 }
 
-export function readHouseholdDoc(store: DocStore, context: Context): Promise<Household> {
-  return readDoc(store, HouseholdDoc, context, (value) => parseHousehold(value), "app.household");
-}
-
 export function readPuppy(store: DocStore, context: Context): Promise<Puppy> {
   return readDoc(store, PuppyDoc, context, (value) => parsePuppy(value), "app.puppy");
 }
@@ -116,7 +113,7 @@ export function profileView(household: Household, puppy: Puppy, now: Date): Pupp
 
 /** Read both documents and build the current view. */
 export async function readProfile(store: DocStore, context: Context, now: Date): Promise<PuppyProfile> {
-  const [household, puppy] = await Promise.all([readHouseholdDoc(store, context), readPuppy(store, context)]);
+  const [household, puppy] = await Promise.all([readHousehold(store, context), readPuppy(store, context)]);
   return profileView(household, puppy, now);
 }
 
@@ -149,7 +146,7 @@ export async function updatePuppyProfile(
   input: ProfileUpdate,
 ): Promise<ProfileUpdateOutcome> {
   const now = input.now ?? new Date();
-  const household = await readHouseholdDoc(store, context);
+  const household = await readHousehold(store, context);
   const today = localDateAt(now, household.timezone);
 
   const request = { rev: input.rev, patch: input.patch } as JsonObject;
@@ -165,7 +162,10 @@ export async function updatePuppyProfile(
         if (input.patch.birthday != null && input.patch.birthday > today) {
           throw new DomainConflictError("a birthday cannot be in the future");
         }
-        const actor = await input.actor(tx, household);
+        // §7.1: the label resolves through the document *inside* the commit, so
+        // a rename that landed since the caller's read cannot label the write
+        // with a name the household no longer has.
+        const actor = await input.actor(tx, await tx.doc(HouseholdDoc));
         const draft = await tx.doc(PuppyDoc);
         if (draft.rev !== input.rev) throw new StaleRevisionError();
 

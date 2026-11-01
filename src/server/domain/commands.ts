@@ -48,8 +48,6 @@ export interface CommandRequest {
   /** Hash of the normalised request; one key, one request. */
   readonly requestHash: string;
   readonly now: Date;
-  readonly ttlMs?: number;
-  readonly limit?: number;
 }
 
 const KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
@@ -137,13 +135,12 @@ export async function runIdempotent<T extends JsonValue>(
       }
 
       const value = await change(tx);
-      const expiresAt = new Date(request.now.getTime() + (request.ttlMs ?? COMMAND_TTL_MS)).toISOString();
-      const limit = request.limit ?? COMMAND_LIMIT;
+      const expiresAt = new Date(request.now.getTime() + COMMAND_TTL_MS).toISOString();
       // Drop expired records here, not on a timer: the document is small and one
       // write path is easier to reason about than a background sweep.
       const kept = commands.entries.filter((entry) => isLive(entry, request.now));
       commands.entries = [...kept, { key: request.key, requestHash: request.requestHash, result: value, expiresAt }].slice(
-        -limit,
+        -COMMAND_LIMIT,
       );
       committed = value;
     }, ref.context);

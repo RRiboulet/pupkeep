@@ -10,24 +10,51 @@
 // without a listener is simply not delivered, and a malformed payload must not
 // take the page down.
 
+import { requestJson } from "./client.js";
 import { setState } from "./store.js";
 
 const RECONNECT_DELAY_MS = 1000;
 
 /**
+ * Read the profile once. Called on every (re)connect, because a commit that
+ * lands while the stream is down is not replayed: the next connection starts
+ * from the thread's snapshot, which carries no care state. One GET is cheaper
+ * than either a stale caregiver list or a full page reload.
+ */
+export async function refreshProfile() {
+  try {
+    const result = await requestJson("/api/puppy");
+    if (!result.ok || result.status === 401) return;
+    if (result.body && typeof result.body.rev === "number") setState({ profile: result.body });
+  } catch {
+    // Offline: the next connect or a reload catches up.
+  }
+}
+
+/**
  * Open the stream and keep it open. Returns a handle with `close()` for tests
  * and for a future sign-out; the caller normally ignores it.
+ *
+ * `deps` is a test seam, not a configuration: production passes nothing.
  */
-export function startLive() {
-  if (typeof EventSource !== "function") return { close() {} };
-
+export function startLive(deps = {}) {
+  // A browser without EventSource keeps working: the views fetch on mount.
+  const makeSource =
+    deps.createSource ?? (typeof EventSource === "function" ? (url) => new EventSource(url) : undefined);
+  if (!makeSource) return { close() {} };
+  const refresh = deps.refresh ?? refreshProfile;
   let source = null;
   let retry = null;
   let closed = false;
 
   const open = () => {
     if (closed) return;
-    source = new EventSource("/api/agent/events");
+    source = makeSource("/api/agent/events");
+
+    // Fires on the first connection and on every automatic reconnect.
+    source.addEventListener("open", () => {
+      void refresh();
+    });
 
     // A full view, not a delta: applying it is a replacement, so a missed frame
     // cannot leave half-old state on screen.

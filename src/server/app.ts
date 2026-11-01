@@ -259,7 +259,7 @@ async function attachThreadBus(
   thread: ThreadRef,
   logger: Logger,
 ): Promise<ThreadBus> {
-  const household = await readHousehold(thread);
+  const household = await readHousehold(thread.harness, thread.context);
   const bus = new ThreadBus({
     harness: thread.harness,
     conversationId: household.conversationId,
@@ -519,13 +519,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   // P1-07 scaffold listener for the harness-level contract tests.
   if (!stopping && deps.thread !== "scaffold") {
     const auth = new Auth({ config: stores.config });
-    const thread: ThreadRef = {
-      harness: opened.harness,
-      context,
-      // The household document is mirrored from auth at boot; a partner who
-      // joins later is mirrored by this getter on the next read (§7.1).
-      config: () => stores.config.read(),
-    };
+    const thread: ThreadRef = { harness: opened.harness, context };
 
     try {
       bus = await attachThreadBus(thread, logger);
@@ -543,7 +537,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     profileState = watchProfileState({ harness: opened.harness, context, bus, logger });
 
     try {
-      const household = await readHousehold(thread);
+      const household = await readHousehold(thread.harness, thread.context);
       const model = pickInitialModel(await stores.models.read(), options.models);
       const configured = await configureSharedThread(thread, {
         instructions: SHARED_THREAD_INSTRUCTIONS,
@@ -556,6 +550,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     } catch (error) {
       const message = `could not configure the shared thread: ${(error as Error).message}`;
       logger.error("refusing to start", { error: message });
+      profileState?.stop();
       bus.stop();
       bus = undefined;
       const closed = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);
@@ -582,6 +577,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       logger.info("listening", { url: listener.url });
     } catch (error) {
       logger.error("could not bind the HTTP listener", { error });
+      profileState?.stop();
       bus.stop();
       bus = undefined;
       const closeResult = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);

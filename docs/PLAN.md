@@ -2211,16 +2211,19 @@ that the partner is reached out-of-app is gated on P0-10.
       (written after the domain commit, never inside it, because a memo write
       is its own Session write); a nested call fails closed to the household
       fallback, and the actor is never taken from model arguments;
-      (5) `readHousehold`
-      now mirrors a member who joined after boot into `app.household`
-      (creates only, never removes — removal stays a boot decision), which
-      closes the P1-09 `Household`-label seam without weakening the
-      "auth is the authority" rule; (6) `get_context` names the §10.1 sections
+      (5) the household mirror happens where a member is created, not on
+      every read: `src/server/domain/household.ts` reconciles `app.household`
+      against `config.json` when an invite is accepted (and boot still does
+      the full pass), which closes the P1-09 `Household`-label seam without
+      making GET routes write and without the agent transport importing the
+      auth authority; the sync compares member **ids**, because "the roster is
+      shorter than the cap" is false for remove-then-invite-before-restart; (6) `get_context` names the §10.1 sections
       this build does not track yet (`meals`, `walks`, `growth`, `milestones`,
       `appointments`, `showers`) so an empty result cannot be read as "nothing
       happened"; (7) the shared-thread prompt loses its "get_context is not
       available yet" parenthesis, which P1-09 had left in place.
-      **Verified:** 28 new tests in `test/profile.test.ts` (local date vs UTC,
+      **Verified:** 26 new tests — 20 in `test/profile.test.ts` and 6 in
+      `test/client.test.js` (local date vs UTC,
       age boundaries, month clamping, the v1→v2 migration, rev bump + one
       activity entry, exact-request replay, key conflict, stale refusal with
       the current profile, future birthday, retired document, the HTTP auth/
@@ -2232,7 +2235,11 @@ that the partner is reached out-of-app is gated on P0-10.
       write is not thread news: the long-poll fallback must not wake and the
       thread counter must not move, and a commit that lands while a publish is
       in flight still gets its own frame, and a replay is not re-judged
-      against a clock that moved); 293 tests total, typecheck clean. The
+      against a clock that moved; the household mirror following a removal plus
+      a replacement and refusing an unparsable roster; and, in the client
+      suite, the frame guard — a household change is applied, a profile edit
+      may claim a conflict, an older revision never wins — and the reconnect
+      refetch); 301 tests total, typecheck clean. The
       P1-09 seam was repaired in place: the invite-joiner label assertion now
       expects `Sam`, and the stale `ThreadUnavailableError`/prompt notes are
       gone. **Reviewed and repaired:** the client minted a fresh idempotency
@@ -2264,6 +2271,26 @@ that the partner is reached out-of-app is gated on P0-10.
       inside the snapshot and replayed as a batch); that is a P1-12 carry-over
       because it is P1-09's delivery ordering, has no impact while the PWA
       ignores `batch`, and needs its own SSE test.
+      **Second review round (a fresher pair of eyes, after the first repairs):**
+      a frame whose profile revision is unchanged but whose household changed
+      (a partner joined, the timezone moved, the household-local day rolled
+      over) was dropped as "not newer", so a connected client kept a stale
+      roster; the form now distinguishes a profile edit (which may touch the
+      draft or claim a conflict) from a household change (which replaces what
+      is displayed and leaves an edit alone). A stream that reconnects now
+      re-reads `/api/puppy`, because the thread's SSE snapshot carries no care
+      state and a commit during a disconnect is not replayed. The activity
+      label is resolved through `tx.doc(HouseholdDoc)` inside the commit
+      (§7.1's letter, not only its spirit). The household-name and caregiver
+      names in `get_context` are JSON-quoted like the puppy's fields, and a
+      display name now refuses control characters at both ends: `createInvite`
+      and `parseMemberProfiles`, so the feed and the model context cannot be
+      handed a line break. Cleanup from the design pass: `runIdempotent`'s
+      unused `ttlMs`/`limit` knobs are gone (the plan fixes 24 h/1000), the
+      unused `ProfileStateFrame` and the never-read `StateFrame.kind` envelope
+      collapse to the profile itself, and the profile watcher is stopped on the
+      two late startup-failure paths instead of left attached to a closing
+      harness.
       **Not verified:** a real browser render of the Pup form, a real provider,
       and the partner's iPhone; the service-worker shell bump
       (`pupkeep-shell-v2`) is exercised only through the worker harness in

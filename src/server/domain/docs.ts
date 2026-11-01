@@ -35,7 +35,7 @@ import {
   type Puppy,
   type PuppySex,
 } from "../../shared/domain.ts";
-import { isLocalDate } from "../../shared/profile.ts";
+import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
 
 /**
  * What a domain function needs from its caller: committed reads plus one
@@ -211,6 +211,9 @@ export function parseMemberProfiles(value: unknown): MemberProfile[] | undefined
     if (!record) return undefined;
     const { id, name } = record;
     if (!isNonEmptyString(id) || !isNonEmptyString(name)) return undefined;
+    // A display name lands in the activity feed and the agent's context; a
+    // control character there would forge a line. Fail closed, as boot does.
+    if (hasControlCharacter(name.trim()) || hasControlCharacter(id.trim())) return undefined;
     if (ids.has(id.trim()) || names.has(name.trim().toLowerCase())) return undefined;
     ids.add(id.trim());
     names.add(name.trim().toLowerCase());

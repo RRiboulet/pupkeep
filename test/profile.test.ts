@@ -24,6 +24,7 @@ import { startApp, type AppHandle } from "../src/server/app.ts";
 import { dataStores } from "../src/server/config.ts";
 import { emptyConfig, type AppConfig, type MemberRecord } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
+import { readHousehold, syncHouseholdMembers } from "../src/server/domain/household.ts";
 import { ActivityDoc, CommandsDoc, HouseholdDoc, PuppyDoc, parsePuppy } from "../src/server/domain/docs.ts";
 import { DomainConflictError } from "../src/server/domain/errors.ts";
 import { ProfileUnavailableError, readProfile, updatePuppyProfile } from "../src/server/domain/profile.ts";
@@ -318,6 +319,47 @@ test("a birthday in the household's future is refused, and clearing a field work
   });
 });
 
+test("the household mirror follows a removal and a replacement, not the roster length", async () => {
+  await withProfileHarness(async ({ harness }) => {
+    const before = await readHousehold(harness, context);
+    assert.deepEqual(before.members.map((member) => member.name), ["Alex", "Sam"]);
+
+    // Sam is removed and Noa is invited before the next restart. The document
+    // still holds two profiles, so "fewer than the cap" is the wrong test for
+    // "someone is missing" — it must compare ids.
+    const replacement: AppConfig = {
+      ...emptyConfig(),
+      members: [
+        owner,
+        { ...partner, removedAt: "2026-10-29T13:00:00.000Z" },
+        member({ id: "partner-2", role: "member", displayName: "Noa" }),
+      ],
+    };
+    const synced = await syncHouseholdMembers(harness, context, replacement);
+    assert.deepEqual(synced.created, ["partner-2"]);
+    assert.deepEqual(synced.removed, ["partner"]);
+    const after = await readHousehold(harness, context);
+    assert.deepEqual(after.members.map((member) => member.name), ["Alex", "Noa"]);
+
+    // Idempotent: a second sync writes nothing.
+    const again = await syncHouseholdMembers(harness, context, replacement);
+    assert.deepEqual(again, { created: [], removed: [] });
+  });
+});
+
+test("the household mirror refuses a roster it could not parse instead of writing it", async () => {
+  await withProfileHarness(async ({ harness }) => {
+    const duplicate: AppConfig = {
+      ...emptyConfig(),
+      members: [owner, member({ id: "partner-2", role: "member", displayName: "Alex" })],
+    };
+    const synced = await syncHouseholdMembers(harness, context, duplicate);
+    assert.equal(synced.skipped !== undefined, true, "a duplicate display name is reported, not written");
+    const after = await readHousehold(harness, context);
+    assert.deepEqual(after.members.map((member) => member.name), ["Alex", "Sam"], "the document is untouched");
+  });
+});
+
 test("the profile is unavailable, not empty, when the puppy document is gone", async () => {
   await withProfileHarness(async ({ harness }) => {
     await harness.commit((tx: Tx) => tx.retireDoc(PuppyDoc), context);
@@ -335,7 +377,7 @@ test("a commit that lands during an in-flight publish still gets its own frame",
     const watch = watchProfileState({
       harness,
       context,
-      bus: { publishState: (frame) => frames.push(frame.profile) },
+      bus: { publishState: (profile) => frames.push(profile) },
       logger: createLogger({ scope: "test", sink: () => undefined }),
       now: () => NOON,
       read: async () => {
@@ -680,7 +722,7 @@ test("the tools read the profile, report what is not tracked, and attribute the 
 
     const empty = await getContext!.execute({}, api, context);
     const emptyText = (empty.output as { text: string }[])[0]!.text;
-    assert.match(emptyText, /caregivers: Alex, Sam/);
+    assert.match(emptyText, /caregivers: "Alex", "Sam"/, "names are data, JSON-quoted in model context");
     assert.match(emptyText, /Not tracked by this build yet: meals/);
 
     const saved = await update!.execute({ rev: 0, name: "Biscuit", breed: "Beagle" }, api, context);

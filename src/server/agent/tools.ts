@@ -135,11 +135,15 @@ export function createProfileTools(): Extension<ToolRegistration> {
       const profile = await readProfile(api, context, now);
       const activity = await api.snapshot(ActivityDoc, context);
       const parsed = activity === undefined ? undefined : parseActivity(activity);
-      const caregivers = profile.household.members.map((member) => member.name).join(", ");
+      // Names are free text too (an invite's display name), so they get the
+      // same inert JSON framing as the puppy's fields.
+      const caregivers = profile.household.members
+        .map((member) => JSON.stringify(member.name))
+        .join(", ");
       return text(
         [
           `Now: ${now.toISOString()} — ${profile.today} ${localTimeAt(now, profile.household.timezone)} (${profile.household.timezone})`,
-          `Household: "${profile.household.name}", caregivers: ${caregivers || "none yet"}`,
+          `Household: ${JSON.stringify(profile.household.name)}, caregivers: ${caregivers || "none yet"}`,
           `Puppy: ${profileText(profile.puppy, profile.age?.label ?? null, profile.today)}`,
           `Revision: ${profile.rev}`,
           `Recent activity:\n${activityText(parsed ? recentActivity(parsed, 10) : [])}`,

@@ -54,11 +54,6 @@ export type PuppyProfile = {
   today: string;
 };
 
-/** The `event: profile` payload on the shared SSE stream. */
-export type ProfileStateFrame = {
-  readonly profile: PuppyProfile;
-};
-
 const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** A syntactically valid `YYYY-MM-DD` that names a real day. */
@@ -70,6 +65,11 @@ export function isLocalDate(value: unknown): value is string {
 
 /** No control characters: a name is one line of text, not a second feed entry. */
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+/** True when `text` carries a control character (a newline, a NUL, a DEL). */
+export function hasControlCharacter(text: string): boolean {
+  return CONTROL_CHARACTERS.test(text);
+}
 
 function textOrNull(value: unknown, limit: number): string | null | undefined {
   if (value === null) return null;
