@@ -119,3 +119,101 @@ body {
     padding-top: 2rem;
   }
 }
+
+/* --- Pup profile (P1-11) ------------------------------------------------- */
+
+.lead {
+  margin: 0 0 1rem;
+  font-weight: 600;
+}
+
+.lead__meta {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid #e4e0ec;
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.card__title {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+
+.field {
+  margin-bottom: 0.9rem;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-weight: 600;
+}
+
+.field input,
+.field select {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.65rem;
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid #cfc7dd;
+  border-radius: var(--radius);
+}
+
+.field__hint {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.form__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+
+.button {
+  min-height: 2.75rem;
+  padding: 0.5rem 1.25rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.button[disabled] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.form__status {
+  color: var(--muted);
+}
+
+.notice {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+.notice--warn {
+  color: #5a3c00;
+  background: #fdf1d6;
+}
+
+.notice--error {
+  color: #7a1f1f;
+  background: #fbe4e4;
+}

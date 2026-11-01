@@ -1,7 +1,7 @@
 // The client state store: a tiny observable for the shell, deliberately no
-// framework and no build step. P1-09 replaces the slice of state that comes
-// from the server (shared thread, SSE) but keeps this shape, and the plan's
-// "online-only, no offline writes" rule lives here too: there is no
+// framework and no build step. P1-09/P1-11 fill the slice of state that comes
+// from the server (shared thread, live profile) but keep this shape, and the
+// plan's "online-only, no offline writes" rule lives here too: there is no
 // persistence layer to replay anything from, and the connection flag is the
 // only piece of local state the UI trusts.
 
@@ -23,6 +23,11 @@ export function hashRoute(hash) {
 const state = {
   route: hashRoute(),
   online: navigator.onLine,
+  /**
+   * The last committed puppy profile (P1-11). `null` until the first read or
+   * frame; a view fetches it itself and live updates arrive from `live.js`.
+   */
+  profile: null,
 };
 
 const listeners = new Set();
