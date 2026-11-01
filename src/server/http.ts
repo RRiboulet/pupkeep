@@ -619,7 +619,8 @@ async function handleProfileUpdate(
   await readHousehold(deps.thread);
   const outcome = await updatePuppyProfile(deps.thread.harness, deps.thread.context, {
     actor: async (_tx, household) => ({ id: session.memberId, label: labelFor(household, session.memberId) }),
-    actionId: key,
+    // Namespaced: a client-chosen key can never collide with a tool's task id.
+    actionId: `http:${key}`,
     rev,
     patch,
   });

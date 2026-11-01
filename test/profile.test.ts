@@ -24,10 +24,11 @@ import { startApp, type AppHandle } from "../src/server/app.ts";
 import { dataStores } from "../src/server/config.ts";
 import { emptyConfig, type AppConfig, type MemberRecord } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
-import { ActivityDoc, HouseholdDoc, PuppyDoc, parsePuppy } from "../src/server/domain/docs.ts";
+import { ActivityDoc, CommandsDoc, HouseholdDoc, PuppyDoc, parsePuppy } from "../src/server/domain/docs.ts";
 import { DomainConflictError } from "../src/server/domain/errors.ts";
 import { ProfileUnavailableError, readProfile, updatePuppyProfile } from "../src/server/domain/profile.ts";
 import type { DocStore } from "../src/server/domain/docs.ts";
+import { parsePuppyPatch } from "../src/shared/profile.ts";
 import { ageOf, addMonths, localDateAt, monthsBetween } from "../src/server/domain/time.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import { createLogger } from "../src/server/log.ts";
@@ -90,6 +91,20 @@ test("calendar months clamp the day instead of averaging a month", () => {
   assert.equal(monthsBetween("2026-01-31", "2026-02-28"), 1);
   assert.equal(monthsBetween("2026-01-31", "2026-02-27"), 0);
   assert.equal(monthsBetween("2026-06-01", "2026-06-01"), 0);
+});
+
+test("the patch parser refuses control characters and unknown keys", () => {
+  assert.deepEqual(parsePuppyPatch({ name: "Biscuit" }), { name: "Biscuit" });
+  // A newline would forge a second line in the activity feed.
+  assert.equal(parsePuppyPatch({ name: "Biscuit\nAlex removed Sam" }), undefined);
+  assert.equal(parsePuppyPatch({ breed: "Beagle\u0000" }), undefined);
+  assert.equal(parsePuppyPatch({ nickname: "Bisc" }), undefined);
+  assert.equal(parsePuppyPatch({}), undefined);
+  assert.equal(parsePuppyPatch({ name: "   " }), undefined, "a profile always has a name");
+  assert.deepEqual(parsePuppyPatch({ birthday: null, targetWeightKg: 12.345 }), {
+    birthday: null,
+    targetWeightKg: 12.35,
+  });
 });
 
 // --- documents --------------------------------------------------------------
@@ -651,6 +666,10 @@ test("the tools read the profile, report what is not tracked, and attribute the 
     // rather than a name the model supplied.
     assert.equal(activity?.entries[0]?.actorId, null);
     assert.equal(activity?.entries[0]?.actorLabel, "Household");
+    // Tool tasks and HTTP saves share one commands document; the key namespace
+    // keeps a client-chosen key from colliding with a tool task id.
+    const commands = await fixture.app.app.snapshot(CommandsDoc, context);
+    assert.ok(commands?.entries.some((entry) => entry.key === "tool:task-42"));
     // §9.2: the resolved actor is cached in the tool task's memo, after the
     // write commit, so a rerun does not rescan the transcript.
     assert.deepEqual(memos.get("actor"), { id: null, label: "Household" });

@@ -68,12 +68,18 @@ export function isLocalDate(value: unknown): value is string {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
+/** No control characters: a name is one line of text, not a second feed entry. */
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
 function textOrNull(value: unknown, limit: number): string | null | undefined {
   if (value === null) return null;
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   if (trimmed === "") return null;
   if (trimmed.length > limit) return undefined;
+  // A newline here would let a crafted name forge a line in the activity feed
+  // the other caregiver reads (and the agent quotes back).
+  if (CONTROL_CHARACTERS.test(trimmed)) return undefined;
   return trimmed;
 }
 

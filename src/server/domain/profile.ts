@@ -130,6 +130,9 @@ function applyPatch(draft: Puppy, patch: PuppyPatch): void {
 
 function summaryOf(before: Puppy, after: Puppy, actorLabel: string): string {
   if (before.name === "" && after.name !== "") return `${actorLabel} added ${after.name} to the household`;
+  // A profile can still be nameless (P1-14's wizard fills it): say "the puppy's
+  // profile" rather than quoting an empty name.
+  if (after.name === "") return `${actorLabel} updated the puppy's profile`;
   // The document's names are free text; they are quoted in the feed so a name
   // that reads like a sentence cannot pass itself off as one.
   return `${actorLabel} updated the profile of "${after.name}"`;

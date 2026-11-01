@@ -182,8 +182,10 @@ export function createProfileTools(): Extension<ToolRegistration> {
             return actor;
           });
         },
-        // The task id is the durable identity of this call: one call, one action.
-        actionId: String(api.taskId),
+        // The task id is the durable identity of this call: one call, one
+        // action. Namespaced so an HTTP client cannot plant a record under a
+        // predictable task id and hijack (or wedge) a later tool call.
+        actionId: `tool:${api.taskId}`,
         rev,
         patch,
         now: new Date(api.now()),
