@@ -99,7 +99,8 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
 
     assert.deepEqual(await opened.harness.snapshot(HouseholdDoc, context), result.household);
     const puppy = await opened.harness.snapshot(PuppyDoc, context);
-    assert.equal(puppy?.schemaVersion, 1);
+    assert.equal(puppy?.schemaVersion, 2);
+    assert.equal(puppy?.rev, 0);
     assert.equal(puppy?.name, "");
     assert.equal(puppy?.createdAt, NOW.toISOString());
     const activity = await opened.harness.snapshot(ActivityDoc, context);
