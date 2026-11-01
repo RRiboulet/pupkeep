@@ -114,7 +114,7 @@ echo "sqlite3 $(sqlite3 --version | cut -d' ' -f1) · $(rclone version | sed -n 
 # wants the package, so install it into the *personal* pi settings, which the
 # volume persists. `--local` would write the repo's settings file and is the one
 # thing this must never do.
-SHARED_PACKAGE_REF="${PUPKEEP_SHARED_PACKAGE_REF:-v1.9.0}"
+SHARED_PACKAGE_REF="${PUPKEEP_SHARED_PACKAGE_REF:-v1.10.0}"
 if pi list 2>/dev/null | grep 'my-agent-setup' >/dev/null; then
   echo "shared pi package already installed; leaving it alone"
 elif [ -f .pi/settings.json ] && grep -q 'my-agent-setup' .pi/settings.json; then

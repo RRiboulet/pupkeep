@@ -29,7 +29,7 @@ Durable is explicitly experimental; every dependency is pinned.
 | Cloudflare Tunnel | public pricing/docs, 2026-10-28 | Free tunnel; named tunnel needs a hostname on Cloudflare DNS; quick tunnels are ephemeral. No domain: quick tunnel for testing, named deferred |
 | Tailscale | free personal plan, 2026-10-28 | Stable private tailnet access; HTTP. No Serve/Funnel control **found** in the Android app 1.104.2 (P0-03: feature-label scan of the installed APK plus an exit-node/`ExitNodeOption` cross-check, not a protocol-level test), so Tailscale stays HTTP. |
 | Termux | current F-Droid packages | Node 24/26, `cloudflared`, `termux-api`, `termux-wake-lock`, Termux:Boot, `termux-services` |
-| `my-agent-setup` | tag `v1.9.0` | Shared pi coding-agent extensions and skills for development |
+| `my-agent-setup` | tag `v1.10.0` | Shared pi coding-agent extensions and skills for development |
 | pi coding agent | `1.4.0` | Development environment only |
 | `RRiboulet/pidabl` | — | **Not used.** The embedded-rootfs Android route was rejected. |
 
@@ -413,7 +413,7 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
   `.pi/settings.json`: when pupkeep sits inside a workspace that already loads
   those extensions, a second declaration loads every extension twice and
   subagents fail at startup on a duplicate flag. The P1-02 devcontainer installs
-  it at **`v1.9.0`** into the *personal* pi settings in the `pupkeep-pi-config`
+  it at **`v1.10.0`** into the *personal* pi settings in the `pupkeep-pi-config`
   volume (`pi install` without `--local`), and skips it when the project already
   declares it. Bump pi and that package together when either moves.
 - Persistent `pi-config` volume at `/home/vscode/.pi`.
@@ -1840,7 +1840,7 @@ that the partner is reached out-of-app is gated on P0-10.
       named `pupkeep-pi-config` volume at `/home/vscode/.pi`; `postCreate.sh`
       seeds `.env` only when absent, runs `npm ci`, `npm run typecheck` and
       `npm test`, checks the pinned versions/tools, installs the shared
-      `my-agent-setup` at `v1.9.0` into the **personal** pi settings (never this
+      `my-agent-setup` at `v1.10.0` into the **personal** pi settings (never this
       repo's `.pi/settings.json`, and skipped when the project declares it),
       pins gh to `2.103.2`, sets the owner's public noreply git identity, and
       prints the start command. Port 8787 is forwarded; the dev database is
