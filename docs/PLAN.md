@@ -392,16 +392,21 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
 - uid/gid 1000 is `vscode`. The base image ships that uid as `node`, so the
   Dockerfile renames the user (asserting uid, gid and `/home/vscode`'s owner at
   build time) instead of letting common-utils create a second one on 1001. A
-  second user would leave the bind-mounted repo, owned by the host user's 1000,
-  unwritable; and because `useradd -m` does not adopt a home directory that
+  second user would leave the bind-mounted repo, owned by the *host* user's uid,
+  unwritable (1000 on most Linux hosts, not on all); the Dev Containers CLI's
+  default `updateRemoteUserUID` remaps the remote user to that host uid, which
+  is what keeps the mount writable, and CI disables it only to pin the image's
+  own uid. Because `useradd -m` does not adopt a home directory that
   already exists, a `/home/vscode` this Dockerfile had created as root would
   stay root-owned, which stops VS Code creating `~/.vscode-server` — it does
   that as the remote user *before* `postCreate` can chown anything.
 - apt: `tmux`, `jq`, `sqlite3`, `curl`, `ripgrep`, `rclone`, `openssl`,
   `ca-certificates`, `unzip`, `git`, `age`, `expect`, `tar`, `sudo`.
-- `cloudflared` installed in the image: amd64 `2026.10.5`, pinned by version
-  **and** SHA-256. The phone uses the arm64 release through the Termux wrapper
-  (§6.7); this is the devcontainer's copy.
+- `cloudflared` installed in the image: `2026.10.5` for **amd64 and arm64**,
+  pinned by version **and** a SHA-256 *per architecture* — Cloudflare publishes a
+  separate `.deb` for each and no shared manifest. The phone uses the arm64
+  release through the Termux wrapper (§6.7); this is the devcontainer's copy,
+  and it has to build on a laptop and on an arm64 host alike.
 - **pi coding agent `1.4.0`**, pin exact. The Dockerfile installs it globally
   and asserts `pi --version` at build time.
 - The shared package (`my-agent-setup`) is **not** declared in this repo's
@@ -1810,8 +1815,9 @@ that the partner is reached out-of-app is gated on P0-10.
       `mcr.microsoft.com/devcontainers/javascript-node:24-bookworm` (the
       Dockerfile asserts Node 24), with common-utils/zsh and github-cli
       features and apt `age expect ca-certificates curl git jq openssl ripgrep
-      rclone sqlite3 tar tmux unzip`; cloudflared amd64 `2026.10.5` is installed
-      from Cloudflare's `.deb` with a pinned SHA-256; pi `1.4.0` is installed
+      rclone sqlite3 tar tmux unzip`; cloudflared `2026.10.5` is installed
+      from Cloudflare's per-architecture `.deb` (amd64 and arm64) with a pinned
+      SHA-256 for each; pi `1.4.0` is installed
       globally and asserted. Compose mounts the repo at `/workspace` and the
       named `pupkeep-pi-config` volume at `/home/vscode/.pi`; `postCreate.sh`
       seeds `.env` only when absent, runs `npm ci`, `npm run typecheck` and

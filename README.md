@@ -114,8 +114,9 @@ seeds `.env` only when it is absent.
   `pupkeep-pi-config` volume at `/home/vscode/.pi`; run `gh auth login` and pi's
   own login once per volume. gh is pinned to `2.103.2`.
 - `npm start` reads `.env` with `--env-file-if-exists`; a real environment
-  variable wins over the file. The container installs the amd64 cloudflared
-  build; the phone uses the arm64 release.
+  variable wins over the file. The container installs the cloudflared build for
+  its own architecture (amd64 or arm64), each pinned by SHA-256; the phone uses
+  the arm64 release.
 - The development database is `/tmp/pupkeep-dev`, never the workspace mount.
 - The shared `my-agent-setup` package is installed at `v1.9.0` into the
   container's personal pi settings; it is deliberately not declared in

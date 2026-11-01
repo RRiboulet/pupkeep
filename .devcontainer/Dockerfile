@@ -9,19 +9,23 @@ FROM mcr.microsoft.com/devcontainers/javascript-node:24-bookworm
 
 # cloudflared is pinned by version *and* checksum: the quick tunnel is part of
 # the access story (PLAN §6.7), and a moving `latest` download would make a
-# rebuild a different binary. This is the amd64 build for the devcontainer; the
-# phone uses the arm64 binary through its Termux wrapper.
+# rebuild a different binary. Cloudflare publishes the `.deb` per architecture
+# with no shared manifest, so each one carries its own SHA-256 (PLAN §5.1).
+# The phone uses the arm64 release through its Termux wrapper; this is the
+# devcontainer's copy and has to build on both a laptop and an arm64 host.
 ARG CLOUDFLARED_VERSION=2026.10.5
-ARG CLOUDFLARED_SHA256=149d1ec4ac8e58bdbf08a41cc42347da9184d9fb4ef0df6528d75c90a85ac0ed
+ARG CLOUDFLARED_SHA256_AMD64=149d1ec4ac8e58bdbf08a41cc42347da9184d9fb4ef0df6528d75c90a85ac0ed
+ARG CLOUDFLARED_SHA256_ARM64=361584f9c6a1af6f9c553011291494b72fb6c887841ce6735dc6df8b6e727e72
 
-# The release .deb is amd64. Fail with a clear message on another architecture
-# instead of letting dpkg produce a confusing one (PLAN §5.1).
+# Both `.deb`s exist; anything else fails here rather than at dpkg with a
+# confusing message (PLAN §5.1). `dpkg --print-architecture` is the fallback so
+# a direct `docker build` without BuildKit's TARGETARCH cannot silently pass.
 ARG TARGETARCH
 RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    if [ "$arch" != "amd64" ]; then \
-        echo "Pupkeep's devcontainer is amd64 (PLAN §5.1); found ${arch}" >&2; \
-        exit 1; \
-    fi
+    case "$arch" in \
+        amd64|arm64) echo "cloudflared: ${arch}" ;; \
+        *) echo "Pupkeep's devcontainer supports amd64 and arm64; found ${arch}" >&2; exit 1 ;; \
+    esac
 
 # gh's token lives on the pi-config volume (see docker-compose.yml), not in this
 # image and not on the container-local home, which is discarded on rebuild.
@@ -65,9 +69,15 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
         age ca-certificates curl expect git jq openssl ripgrep rclone sqlite3 sudo tar tmux unzip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL -o /tmp/cloudflared.deb \
-        "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64.deb" \
-    && echo "${CLOUDFLARED_SHA256}  /tmp/cloudflared.deb" | sha256sum -c - \
+RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+        amd64) sha="${CLOUDFLARED_SHA256_AMD64}" ;; \
+        arm64) sha="${CLOUDFLARED_SHA256_ARM64}" ;; \
+        *) echo "Pupkeep's devcontainer supports amd64 and arm64; found ${arch}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/cloudflared.deb \
+        "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${arch}.deb" \
+    && echo "${sha}  /tmp/cloudflared.deb" | sha256sum -c - \
     && dpkg -i /tmp/cloudflared.deb \
     && rm -f /tmp/cloudflared.deb \
     && cloudflared --version
