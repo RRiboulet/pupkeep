@@ -1,0 +1,49 @@
+# The general application CI (P1-12). `devcontainer.yml` is deliberately a
+# narrow image-build proof that only fires on `.devcontainer/**` and the lock;
+# this is the gate every pull request passes: typecheck and the full `node:test`
+# suite, on the Node major the devcontainer pins (PLAN §5.1, §15).
+#
+# No `paths` filter on `pull_request`: a change to a route, a document schema or
+# a plan-only doc must not be able to skip the tests that cover it.
+#
+# Node 24 is the devcontainer's Node line and what local work runs. The phone
+# measured Node 26 in Phase 0 and `engines.node` records `>=24` rather than a
+# pin (P1-03); a second matrix leg joins when P5-01 re-measures the phone.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Typecheck (erasable syntax only)
+        run: npm run typecheck
+
+      - name: Test (node --test, real SQLite on a temp directory)
+        run: npm test

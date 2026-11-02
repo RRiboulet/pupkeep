@@ -3,13 +3,15 @@
 A shared, agent-operated puppy care app for two caregivers, built on
 [Pi Durable](https://github.com/earendil-works/pi).
 
-> **Status: Phase 1 — the skeleton is being built.** Phase 0's spikes are
+> **Status: Phase 1 — the vertical slice is in place.** Phase 0's spikes are
 > complete and their go/no-go is recorded in
 > [`docs/PLAN.md`](docs/PLAN.md) §2.3. The launcher, auth, data files, harness,
-> storage, encrypted backup job and reproducible devcontainer are in place; the
-> HTTP/UI layer and the first domain documents are still P1-08/P1-09/P1-10. The
-> source of truth is [`docs/PLAN.md`](docs/PLAN.md);
-> [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says how to pick the next task.
+> storage, encrypted backup, devcontainer, shared household thread and puppy
+> profile are in place, and every pull request typechecks and runs the full test
+> suite (`.github/workflows/ci.yml`). The phone runbook (P1-13) and the
+> first-run wizard (P1-14) are the remaining Phase-1 tasks. The source of truth
+> is [`docs/PLAN.md`](docs/PLAN.md); [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md)
+> says how to pick the next task.
 >
 > Three Phase 0 checks stay open because they need the partner's iPhone: the
 > partner reach, PWA/Web Push and ntfy receipts carried by **P0-10**

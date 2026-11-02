@@ -16,7 +16,7 @@ import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ConversationId, ToolExecutionApi, Tx } from "@earendil-works/pi-durable";
+import { ToolResultEntry, type ConversationId, type ToolExecutionApi, type Tx } from "@earendil-works/pi-durable";
 import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
 import { createProfileTools } from "../src/server/agent/tools.ts";
 import { watchProfileState } from "../src/server/agent/state.ts";
@@ -682,7 +682,7 @@ test("a profile change does not wake the long-poll fallback, which is thread-onl
 function toolApi(
   fixture: Fixture,
   conversationId: number,
-  taskId = "task-1",
+  taskId: string | number = "task-1",
   memos = new Map<string, unknown>(),
 ): ToolExecutionApi {
   const api = {
@@ -753,6 +753,130 @@ test("the tools read the profile, report what is not tracked, and attribute the 
     const stale = await update!.execute({ rev: 0, name: "Other" }, toolApi(fixture, conversationId, "task-43"), context);
     assert.equal(stale.isError, true);
     assert.match((stale.output as { text: string }[])[0]!.text, /Call get_puppy/);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("a rerun whose memo survived is attributed from the memo, not the fallback", async () => {
+  const fixture = await startProfileApp();
+  try {
+    const conversationId = await sharedConversationId(fixture);
+    const update = createProfileTools().tools?.find((tool) => tool.name === "update_puppy_profile");
+    assert.ok(update);
+    // §9.2 rule 1: the memo is read first, so a crash-rerun that kept its memo
+    // does not rescan. This fixture has no `app.chat` entry, so a scan would
+    // answer the household fallback; Alex can only come from the memo.
+    const memos = new Map<string, unknown>([["actor", { id: "owner", label: OWNER_LABEL }]]);
+    const saved = await update.execute(
+      { rev: 0, name: "Biscuit" },
+      toolApi(fixture, conversationId, "task-memo", memos),
+      context,
+    );
+    assert.match((saved.output as { text: string }[])[0]!.text, /^Saved:/);
+    const activity = await fixture.app.app.snapshot(ActivityDoc, context);
+    assert.equal(activity?.entries[0]?.actorId, "owner");
+    assert.equal(activity?.entries[0]?.actorLabel, OWNER_LABEL);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+/** Post one caregiver message; the faux provider answers it. */
+async function postAsAlex(fixture: Fixture, text: string, clientMessageId: string): Promise<Response> {
+  return fetch(`${fixture.url}/api/agent/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+      Cookie: cookieFor(fixture.alexCookie),
+      Origin: fixture.url,
+    },
+    body: JSON.stringify({ text, clientMessageId }),
+  });
+}
+
+test("the speaker scan pages past more than 50 intervening entries and still finds the app.chat", async () => {
+  let fixture: Fixture | undefined;
+  const fillers = 120;
+  try {
+    fixture = await startProfileApp([
+      async () => {
+        // 120 entries between the caregiver's message and the assistant call:
+        // the backwards scan crosses its 100-entry page boundary.
+        const household = await fixture!.app.app.snapshot(HouseholdDoc, context);
+        assert.ok(household, "the app bootstrapped the household document");
+        await fixture!.app.app.commit(async (tx) => {
+          for (let index = 0; index < fillers; index += 1) {
+            await tx.appendEntry(household.conversationId as ConversationId, { kind: "app.filler" });
+          }
+        }, context);
+        return fauxAssistantMessage(
+          [fauxToolCall("update_puppy_profile", { rev: 0, name: "Biscuit" })],
+          { stopReason: "toolUse" },
+        );
+      },
+      () => fauxAssistantMessage("Named the pup Biscuit."),
+    ]);
+
+    const posted = await postAsAlex(fixture, "The pup is Biscuit", "m-pagination");
+    assert.equal(posted.status, 202);
+    const activity = await until(async () => {
+      const snapshot = await fixture!.app.app.snapshot(ActivityDoc, context);
+      return snapshot?.entries[0];
+    });
+    assert.match(activity.summary, /Alex added Biscuit/);
+    assert.equal(activity.actorLabel, OWNER_LABEL, "the paged scan found the caregiver, not the fallback");
+  } finally {
+    if (fixture) await stop(fixture);
+  }
+});
+
+test("a crash-rerun replays one care write and keeps the actor the domain record persisted", async () => {
+  const fixture = await startProfileApp([
+    () =>
+      fauxAssistantMessage([fauxToolCall("update_puppy_profile", { rev: 0, name: "Biscuit" })], {
+        stopReason: "toolUse",
+      }),
+    () => fauxAssistantMessage("Named the pup Biscuit."),
+  ]);
+  try {
+    const posted = await postAsAlex(fixture, "The pup is Biscuit", "m-crash-rerun");
+    assert.equal(posted.status, 202);
+    await until(async () => {
+      const puppy = await fixture.app.app.snapshot(PuppyDoc, context);
+      return puppy?.rev === 1 ? true : undefined;
+    });
+
+    const conversationId = await sharedConversationId(fixture);
+    const conversation = await fixture.app.app.conversation(conversationId as ConversationId, context);
+    assert.ok(conversation);
+    const page = await conversation.entries({ order: "descending" }, 50, undefined, context);
+    const toolEntry = page.items.find((entry) => ToolResultEntry.is(entry));
+    assert.ok(toolEntry?.byTaskId, "the tool card names its durable task");
+    const record = await fixture.app.app.getTask(toolEntry.byTaskId, context);
+    assert.ok(record, "a terminal task keeps its record; the memo is what is dropped");
+    assert.equal(record.memos, undefined, "a terminal task has no memo for the rerun");
+    assert.equal((record.input as { kind?: string }).kind, "model", "the record still names its assistant entry");
+
+    // The crash happened after the commit and before the memo write: the rerun
+    // has no memo, finds the recorded command, and replays it without a second
+    // care write. Attribution is on the domain record, not in the memo.
+    const memos = new Map<string, unknown>();
+    const update = createProfileTools().tools?.find((tool) => tool.name === "update_puppy_profile");
+    assert.ok(update);
+    const rerun = await update.execute(
+      { rev: 0, name: "Biscuit" },
+      toolApi(fixture, conversationId, record.id, memos),
+      context,
+    );
+    assert.match((rerun.output as { text: string }[])[0]!.text, /^Already saved:/);
+    assert.equal(memos.size, 0, "a replay needs no actor, so it writes no memo");
+
+    const activity = await fixture.app.app.snapshot(ActivityDoc, context);
+    assert.equal(activity?.entries.length, 1, "one crash-rerun is still one care write");
+    assert.equal(activity?.entries[0]?.actorId, "owner");
+    assert.equal(activity?.entries[0]?.actorLabel, OWNER_LABEL);
   } finally {
     await stop(fixture);
   }

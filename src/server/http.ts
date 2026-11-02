@@ -658,6 +658,35 @@ async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {
   return readThreadSnapshot(deps.thread, deps.bus.seq);
 }
 
+/**
+ * The newest entry id the attach snapshot shows. The snapshot's `seq` is sampled
+ * before its durable read, so a commit whose broadcast drains after that sample
+ * can be inside the snapshot *and* queued as a delta — the narrow duplicate the
+ * P1-11 review found. Entry ids are the durable commit order itself, so this is
+ * the strict half of the attach guard: any delta entry at or below this id is
+ * already in the snapshot (PLAN §9.4).
+ */
+function snapshotEntryFloor(snapshot: ThreadSnapshot): number {
+  let newest = 0;
+  for (const entry of snapshot.entries) {
+    if (entry.entryId > newest) newest = entry.entryId;
+  }
+  return newest;
+}
+
+/** The transcript entry a delta would append, when it carries one. */
+function eventEntryId(event: AgentEvent): number | undefined {
+  switch (event.type) {
+    case "entry_appended":
+    case "message_end":
+      return event.entry.id;
+    case "tool_execution_end":
+      return event.entry?.id;
+    default:
+      return undefined;
+  }
+}
+
 /** One SSE frame; `Notice` types are part of the wire contract with the PWA. */
 function writeEvent(
   res: ServerResponse,
@@ -681,6 +710,12 @@ async function handleEvents(
 ): Promise<void> {
   let live = true;
   let opened = false;
+  // Set once the snapshot is read: a delta entry at or below this id is already
+  // on screen. Filtering is per-event, not per-batch: a covered commit's
+  // id-less events (`message_start`, `usage`, …) still pass, and so does an
+  // entry whose kind the transcript does not show — neither is a visible
+  // duplicate. Only the entries the snapshot already displays are dropped.
+  let coveredThrough = 0;
   // A batch remembers the counter value it was broadcast at. Reporting
   // `bus.seq` at delivery time instead would blur the counter across the
   // attach and hide a gap from a client that watches for one (§9.4).
@@ -692,6 +727,18 @@ async function handleEvents(
 
   const deliver = (item: QueueItem): void => {
     if (item.type === "batch") {
+      if (item.events !== undefined && item.events.length > 0) {
+        const fresh = item.events.filter((event) => {
+          const id = eventEntryId(event);
+          return id === undefined || id > coveredThrough;
+        });
+        // A covered commit keeps its counter but loses the entries the
+        // snapshot already shows; with nothing left the frame is empty. The
+        // seq stays continuous, so a client watching for a gap (§9.4) does not
+        // mistake a deduplicated commit for lost state.
+        writeEvent(res, "batch", { seq: item.seq, events: fresh });
+        return;
+      }
       writeEvent(res, "batch", { seq: item.seq, ...(item.events ? { events: item.events } : {}) });
       return;
     }
@@ -761,6 +808,7 @@ async function handleEvents(
     unsubscribe();
     return;
   }
+  coveredThrough = snapshotEntryFloor(initial);
 
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
@@ -774,7 +822,9 @@ async function handleEvents(
     if (!live) break;
     // A batch at or below the snapshot's counter was broadcast before the
     // snapshot was read, so the snapshot already carries it: replaying it
-    // would duplicate entries. Anything later is a genuine delta.
+    // would duplicate entries. A later batch is checked against the snapshot's
+    // entry floor in `deliver()`: its broadcast may have drained after the
+    // seq was sampled while its entry was already durable in the snapshot.
     if (item.type === "batch" && item.seq <= initial.seq) continue;
     deliver(item);
   }
