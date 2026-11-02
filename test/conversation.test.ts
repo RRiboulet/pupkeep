@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ConversationId, Tx } from "@earendil-works/pi-durable";
+import type { AgentEvent, ConversationId, Tx } from "@earendil-works/pi-durable";
 import { SESSION_COOKIE, Auth, RateLimiter, hashToken, newToken } from "../src/server/auth.ts";
 import {
   REQUEST_HEADER,
@@ -28,7 +28,7 @@ import { createLogger } from "../src/server/log.ts";
 import { listenHttp, startApp, type AppHandle } from "../src/server/app.ts";
 import { PROBE_CACHE_VERSION } from "../src/server/models/cache.ts";
 import { HouseholdDoc } from "../src/server/domain/docs.ts";
-import type { TranscriptEntry, ThreadSnapshot } from "../src/shared/chat.ts";
+import { CHAT_ENTRY_KIND, type ThreadSnapshot, type TranscriptEntry } from "../src/shared/chat.ts";
 import { CONTENT_SECURITY_POLICY } from "../src/server/static.ts";
 
 // The configured default model of PLAN §11.2, as the P1-03 probe would cache it.
@@ -285,7 +285,7 @@ async function longPoll(
  * A minimal fanout for ordering tests: `commit()` bumps the seq and notifies
  * whoever is subscribed *now*, so a test can prove when the SSE handler attached.
  */
-function fakeBus(): { bus: ThreadBus; commit: () => number } {
+function fakeBus(): { bus: ThreadBus; commit: (events?: readonly AgentEvent[]) => number } {
   let seq = 0;
   const subscribers = new Set<Subscriber>();
   const bus = {
@@ -304,11 +304,31 @@ function fakeBus(): { bus: ThreadBus; commit: () => number } {
   } as unknown as ThreadBus;
   return {
     bus,
-    commit: () => {
+    commit: (events: readonly AgentEvent[] = []) => {
       seq += 1;
-      for (const subscriber of [...subscribers]) subscriber.notice("batch", []);
+      for (const subscriber of [...subscribers]) subscriber.notice("batch", events);
       return seq;
     },
+  };
+}
+
+/** An `entry_appended` delta for the attach-ordering tests. */
+function entryAppended(id: number): AgentEvent {
+  return {
+    type: "entry_appended",
+    entry: { id, conversationId: 1, kind: CHAT_ENTRY_KIND },
+  } as unknown as AgentEvent;
+}
+
+/** The transcript row a snapshot would show for that entry. */
+function chatRow(id: number): TranscriptEntry {
+  return {
+    kind: "chat",
+    entryId: id,
+    authorId: "owner",
+    authorName: "Alex",
+    text: "already in the snapshot",
+    clientMessageId: "m-covered",
   };
 }
 
@@ -397,9 +417,13 @@ test("a busy thread rejects with a friendly 409 and no transcript entry", async 
         ? true
         : undefined;
     });
-    const after = (await threadOf(fixture, fixture.alexCookie)).entries.length;
+    const snapshot = await threadOf(fixture, fixture.alexCookie);
+    const after = snapshot.entries.length;
     assert.equal(after, before + 1, "only the answer lands");
-    const texts = (await threadOf(fixture, fixture.alexCookie)).entries
+    const reply = snapshot.entries.find((entry) => entry.kind === "assistant");
+    assert.ok(reply, "the held run produced its answer");
+    assert.equal(reply.authorName, "Alex", "the run answers the accepted speaker, not the rejected one");
+    const texts = snapshot.entries
       .filter((entry): entry is Extract<TranscriptEntry, { kind: "chat" }> => entry.kind === "chat")
       .map((entry) => entry.text);
     assert.equal(texts.includes("Also add a groomer note"), false, "a rejected input never enters the transcript");
@@ -607,6 +631,65 @@ test("a delta the snapshot's counter already covers is not replayed", async () =
     // Nothing follows: the recovered batch is inside the snapshot, so a client
     // applying deltas idempotently never sees the entry twice.
     await assert.rejects(nextFrame(frames, 400), /no SSE frame in time/);
+  } finally {
+    await gate.close();
+    await stop(fixture);
+  }
+});
+
+test("a commit the snapshot already contains is not replayed when its broadcast drains late", async () => {
+  const fixture = await startThread();
+  const { bus, commit } = fakeBus();
+  let origin = "";
+  const deps = {
+    auth: fixture.auth,
+    thread: { harness: fixture.app.app, context: BACKGROUND_CONTEXT },
+    bus,
+    submitLimiter: new RateLimiter(SUBMIT_LIMIT, 60_000),
+    signInLimiter: new RateLimiter(SIGNIN_LIMIT, 60_000),
+    allowedOrigins: () => (origin === "" ? [] : [origin]),
+    logger: createLogger({ scope: "test", sink: () => undefined }),
+    // The realistic race (`readThreadSnapshot` samples `bus.seq` *before* its
+    // durable read): the commit lands during the read and its broadcast is
+    // queued, while the snapshot already carries the new entry. The queued
+    // batch's seq is the snapshot's seq + 1, so the seq guard alone cannot see
+    // that the entry is already on screen; the entry floor can.
+    readSnapshot: async (): Promise<ThreadSnapshot> => {
+      const seq = bus.seq;
+      commit([entryAppended(42)]);
+      return { conversationId: 1, seq, status: { busy: false, queued: 0 }, entries: [chatRow(42)] };
+    },
+  };
+  const gate = await listenHttp("127.0.0.1", 0, createAppHandler(deps));
+  origin = gate.url;
+  try {
+    const response = await fetch(`${gate.url}/api/agent/events`, {
+      headers: { Cookie: cookieFor(fixture.alexCookie) },
+    });
+    assert.equal(response.status, 200);
+    const frames = framesOf(response);
+    const snapshotFrame = await nextFrame(frames);
+    assert.equal(snapshotFrame.event, "snapshot");
+    const attached = snapshotFrame.data as ThreadSnapshot;
+    assert.equal(attached.seq, 0);
+    assert.equal(attached.entries[0]?.entryId, 42);
+
+    // The queued batch carried entry 42, which the snapshot already shows. It
+    // is acknowledged as an empty frame (no duplicate entry, counter still
+    // faithful); the next frame is the genuinely new commit. (Without the entry
+    // floor the seq-1 frame repeats entry 42.)
+    const ack = await nextFrame(frames, 3000);
+    assert.equal(ack.event, "batch");
+    const ackBody = ack.data as { seq: number; events: unknown[] };
+    assert.equal(ackBody.seq, 1);
+    assert.deepEqual(ackBody.events, [], "a commit already in the snapshot is not replayed");
+
+    commit([entryAppended(43)]);
+    const delta = await nextFrame(frames, 3000);
+    assert.equal(delta.event, "batch");
+    const body = delta.data as { seq: number; events: { entry: { id: number } }[] };
+    assert.equal(body.seq, 2);
+    assert.deepEqual(body.events.map((event) => event.entry.id), [43]);
   } finally {
     await gate.close();
     await stop(fixture);
