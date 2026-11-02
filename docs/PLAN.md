@@ -2295,13 +2295,50 @@ that the partner is reached out-of-app is gated on P0-10.
       and the partner's iPhone; the service-worker shell bump
       (`pupkeep-shell-v2`) is exercised only through the worker harness in
       `test/pwa.test.ts`.
-- [ ] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake
+- [x] **P1-12** Tests + CI: auth, authz, profile, shared thread with fake
       provider, busy reject, restart, SSE, log scrub. **Carry-over:** the
       adversarial review of P1-11 found a narrow duplicate-delivery window in the
       P1-09 SSE attach (a commit whose broadcast drains after the `seq` capture
       is both inside the snapshot and replayed as a batch); the flush guard's
       seq invariant is not strict. No impact while the PWA ignores `batch`, so
       it is this task's to fix with an SSE test, not P1-11's.
+      **Landed:** the attach guard is now two-layered. The `seq` fast path still
+      drops a batch broadcast before the snapshot read; a batch broadcast later
+      (the narrow window) is checked against the snapshot's **entry floor** —
+      any delta whose entries are all at or below the newest entry the snapshot
+      shows is already on screen and is not replayed (a covered commit is
+      acknowledged as an empty frame, so the counter stays continuous and a
+      client watching for a gap does not mistake it for lost state). Entry ids
+      are the durable commit order, so the check is strict where the broadcast
+      counter is not; `test/conversation.test.ts` fails without it (the first
+      frame after the snapshot repeats entry 42 instead of acknowledging it and
+      leaving the next frame for the new commit).
+      §15.3 is covered too: the tool's backwards speaker scan pages past 120
+      intervening entries and still finds the `app.chat`; a busy-rejected input
+      leaves no entry and the run is attributed to the accepted speaker; a
+      memo-first rerun and a crash-rerun with the memo dropped (a terminal task
+      keeps its record but no memos) both keep the actor the domain record
+      persisted, with exactly one idempotent care write.
+      `test/e2e.test.ts` is the Phase-1 slice end to end: the owner link, the
+      invite, both caregivers reading and editing the profile, the member's 403
+      on the owner-only route, a faux-provider thread answer and the live
+      `profile` frame; a close/reopen of the same data directory keeps both
+      sessions, the transcript and the profile, and the reopened server answers
+      a new message. The same run writes a real file-backed `server.log` that
+      carries none of the redaction shapes, including a provider key in a URL and
+      a bearer token in a header. The quick-tunnel path is pinned as well:
+      `X-Forwarded-Proto` from loopback sets a Secure, host-only cookie and an
+      `https` invite link, while a spoofed `X-Forwarded-Host` cannot pass the
+      origin check; no response carries a CORS header. `.github/workflows/ci.yml`
+      is the general application CI P1-02 deliberately left out: every pull
+      request (no path filter), Node 24, `npm ci`, typecheck and `npm test`, with
+      `test/ci.test.ts` guarding the trigger and commands.
+      **Not done here (advisory in the task body):** the ESLint/Biome, secret-
+      scanning and coverage-threshold proposals stay review notes, not gates, so
+      CI adds no dependencies and stays fast. A Node 26 matrix leg waits for
+      P5-01's phone re-measurement. **Verified:** typecheck clean, 310/310 tests.
+      **Not verified:** a real provider, a browser render and the partner's
+      iPhone remain the P0-10/P5-03 gaps.
 - [ ] **P1-13** Phone runbook draft: Termux install, wake lock, boot script,
       no-domain access, ntfy onboarding, PWA/push test, **sshd bound to the
       Tailscale address and started on demand**, and the `termux-chroot` +
