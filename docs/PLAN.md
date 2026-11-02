@@ -30,7 +30,7 @@ Durable is explicitly experimental; every dependency is pinned.
 | Tailscale | free personal plan, 2026-10-28 | Stable private tailnet access; HTTP. No Serve/Funnel control **found** in the Android app 1.104.2 (P0-03: feature-label scan of the installed APK plus an exit-node/`ExitNodeOption` cross-check, not a protocol-level test), so Tailscale stays HTTP. |
 | Termux | current F-Droid packages | Node 24/26, `cloudflared`, `termux-api`, `termux-wake-lock`, Termux:Boot, `termux-services` |
 | `my-agent-setup` | tag `v1.10.0` | Shared pi coding-agent extensions and skills for development |
-| pi coding agent | `1.4.0` | Development environment only |
+| pi coding agent | `1.5.0` | Development environment only |
 | `RRiboulet/pidabl` | — | **Not used.** The embedded-rootfs Android route was rejected. |
 
 Sources that conflict or need confirmation are called out as **spike** or
@@ -363,8 +363,9 @@ pupkeep/
 │   ├── vendor/                # Preact/htm browser builds
 │   └── style.css
 ├── scripts/
-│   ├── termux-install.sh
-│   ├── termux-boot.sh
+│   ├── termux-install.sh     # pkg + pinned cloudflared + npm ci + boot wrapper
+│   ├── termux-boot.sh       # Termux:Boot entry: wake lock, sshd, exec launcher
+│   ├── termux-sshd.sh       # on-demand sshd, tailnet address re-resolved
 │   ├── backup.ts
 │   └── restore.ts
 ├── test/
@@ -409,7 +410,7 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
   separate `.deb` for each and no shared manifest. The phone uses the arm64
   release through the Termux wrapper (§6.7); this is the devcontainer's copy,
   and it has to build on a laptop and on an arm64 host alike.
-- **pi coding agent `1.4.0`**, pin exact. The Dockerfile installs it globally
+- **pi coding agent `1.5.0`**, pin exact. The Dockerfile installs it globally
   and asserts `pi --version` at build time.
 - The shared package (`my-agent-setup`) is **not** declared in this repo's
   `.pi/settings.json`: when pupkeep sits inside a workspace that already loads
@@ -432,7 +433,7 @@ No Android SDK, JDK, Gradle or NDK.
 - `npm ci`.
 - `tsc --noEmit`.
 - `node --test` (empty or smoke at first).
-- Check Node major 24, pi `1.4.0`, cloudflared `2026.10.5`, and
+- Check Node major 24, pi `1.5.0`, cloudflared `2026.10.5`, and
   `sqlite3`/`rclone`/`tmux`/`gh`/`jq`/`openssl`/`age`/`expect`/`tar`.
 - Print: `npm start -- --access local --data /tmp/pupkeep-dev`.
 - Do not clobber pi settings, `.env`, `~/.pupkeep`.
@@ -541,20 +542,39 @@ restarting the launcher; the app’s pid lock prevents a second server.
 
 ### 6.3 Boot and supervision
 
-`~/.termux/boot/pupkeep.sh`:
+The boot script is tracked as `scripts/termux-boot.sh`; Termux:Boot runs a file
+in `~/.termux/boot/`, so `scripts/termux-install.sh` writes a one-line
+`~/.termux/boot/pupkeep.sh` that execs it and the repo stays the source of truth:
 
 ```bash
 #!/data/data/com.termux/files/usr/bin/bash
-termux-wake-lock
-cd ~/pupkeep
-# `--boot` is belt and braces: the launcher treats a non-TTY stdout as
-# non-interactive anyway, so a redirected boot never prints the owner token.
-exec "$PREFIX/bin/npm" start -- --access tailscale --boot --data ~/.pupkeep >> ~/.pupkeep/server.log 2>&1
+exec "$HOME/pupkeep/scripts/termux-boot.sh"
 ```
+
+`scripts/termux-boot.sh` writes a boot line with the kernel `boot_id`, takes the
+wake lock, starts the on-demand `sshd` below, then `exec`s the launcher. `--boot`
+is belt and braces: the launcher treats a non-TTY stdout as non-interactive
+anyway, so a redirected boot never prints the owner token. Everything goes to
+`~/.pupkeep/server.log`.
+
+```bash
+exec "$PREFIX/bin/node" --env-file-if-exists=.env bin/pupkeep.js \
+  --access tailscale --boot --data ~/.pupkeep >> ~/.pupkeep/server.log 2>&1
+```
+
+`exec` targets the launcher's entry point rather than `npm start`, because npm
+and its `sh -c` would sit between a supervisor and the launcher: `sv down` would
+signal npm and leave the launcher alive, still holding `launcher.pid`, and the
+restart runit performs next would be refused as a second instance (§3.2). The
+flags mirror `npm start`, so there is one entry point and one environment file.
 
 - Install **Termux:Boot**.
 - Operator SSH is not the product path. Do not start `sshd` on all interfaces;
-  bind it to the Tailscale address and loopback, or start it on demand (P0-06).
+  bind it to the Tailscale address and loopback, and start it on demand (P0-06).
+  `scripts/termux-sshd.sh` **re-resolves the tailnet address on every start**,
+  writes a config with exactly two `ListenAddress` lines (that address and
+  `127.0.0.1`), refuses to start when Tailscale has no address, and restarts
+  itself when the address moved. A pinned address is the failure P0-06 found.
 - Battery optimization: unrestricted for Termux.
 - **Tailscale does not reconnect by itself after a reboot** (P0-06). Set
   Android’s “Always-on VPN” for Tailscale, or start it manually before expecting
@@ -1831,7 +1851,7 @@ that the partner is reached out-of-app is gated on P0-10.
 
 - [ ] **P1-01** Repo scaffold: directories, `README`, `AGENTS`, `LICENSE`,
       `NOTICE`, `.gitignore`, `.env.example`.
-- [x] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.4.0`, shared package pin (installed **locally** in the image or `postCreate` — never declared in this repo's `.pi/settings.json`, which duplicates the enclosing workspace's extensions and breaks subagent startup), persistent
+- [x] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.5.0`, shared package pin (installed **locally** in the image or `postCreate` — never declared in this repo's `.pi/settings.json`, which duplicates the enclosing workspace's extensions and breaks subagent startup), persistent
       pi volume, `cloudflared`, `sqlite3`, `tmux`, `gh`, `jq`, `rclone`, port
       8787, `postCreate`, `tsc --noEmit`. Verify the
       `javascript-node:24-bookworm` tag and the shared package/pi compatibility
@@ -1841,7 +1861,7 @@ that the partner is reached out-of-app is gated on P0-10.
       features and apt `age expect ca-certificates curl git jq openssl ripgrep
       rclone sqlite3 tar tmux unzip`; cloudflared `2026.10.5` is installed
       from Cloudflare's per-architecture `.deb` (amd64 and arm64) with a pinned
-      SHA-256 for each; pi `1.4.0` is installed
+      SHA-256 for each; pi `1.5.0` is installed
       globally and asserted. Compose mounts the repo at `/workspace` and the
       named `pupkeep-pi-config` volume at `/home/vscode/.pi`; `postCreate.sh`
       seeds `.env` only when absent, runs `npm ci`, `npm run typecheck` and
@@ -1855,7 +1875,7 @@ that the partner is reached out-of-app is gated on P0-10.
       with `--env-file-if-exists`, so the seed is not inert. **Verified by
       CI:** `.github/workflows/devcontainer.yml` builds the image on
       `ubuntu-latest` with `devcontainers/ci`, runs `postCreate.sh`, and
-      reported Node `24.22.1`, pi `1.4.0`, gh `2.103.2`, cloudflared
+      reported Node `24.22.1`, pi `1.5.0`, gh `2.103.2`, cloudflared
       `2026.10.5`, sqlite3 `3.40.1`, rclone `1.60.1`, the shared package
       `v1.9.0`, and **201/201 tests** (run `40947860932`). **Follow-up:** the
       `~/.vscode-server` fix (§5.1) renames the base image's uid-1000 `node`
@@ -1894,8 +1914,9 @@ that the partner is reached out-of-app is gated on P0-10.
       the **QR** moves to P1-06, because the launcher cannot mint the link (the
       token is auth's) and a QR needs an encoder the phone runtime should not
       carry for a terminal convenience — it belongs in Settings. The **boot
-      script and on-demand `sshd`** are still to come with P1-13's runbook; the
-      launcher itself is what the script will exec. Reviewed and repaired before
+      script and on-demand `sshd`** landed with **P1-13** as
+      `scripts/termux-boot.sh` and `scripts/termux-sshd.sh`; the launcher itself
+      is what the boot script execs. Reviewed and repaired before
       merge: a failed spawn now restarts instead of hanging silently, `stop()`
       waits for children (TERM → grace → KILL on the process group) before the
       data-directory lock is released, Termux is detected rather than opted into,
@@ -2340,10 +2361,58 @@ that the partner is reached out-of-app is gated on P0-10.
       P5-01's phone re-measurement. **Verified:** typecheck clean, 310/310 tests.
       **Not verified:** a real provider, a browser render and the partner's
       iPhone remain the P0-10/P5-03 gaps.
-- [ ] **P1-13** Phone runbook draft: Termux install, wake lock, boot script,
+- [x] **P1-13** Phone runbook draft: Termux install, wake lock, boot script,
       no-domain access, ntfy onboarding, PWA/push test, **sshd bound to the
       Tailscale address and started on demand**, and the `termux-chroot` +
-      `SSL_CERT_FILE` cloudflared wrapper from §6.7.
+      `SSL_CERT_FILE` cloudflared wrapper from §6.7. **Landed:**
+      `docs/PHONE-RUNBOOK.md` — the operator path from a blank phone to a
+      running host: install, the data directory and what is secret, first run
+      and the owner link, the access modes, boot/wake lock/supervision with the
+      `sv` option, on-demand SSH, Tailscale limits (HTTP: no PWA, no Web Push),
+      the quick tunnel for HTTPS/PWA/push testing, the notification paths and
+      the category-only rule, backup and restore, upgrade, and a troubleshooting
+      table. Three tracked scripts replace the plan's inline snippets:
+      `scripts/termux-install.sh` (packages, **pinned** arm64 cloudflared
+      `2026.10.5` with a SHA-256, `npm ci --omit=dev`, the Termux:Boot wrapper),
+      `scripts/termux-boot.sh` (boot line with the kernel `boot_id`, wake lock,
+      best-effort `sshd`, then `exec` the launcher's entry point — `node
+      bin/pupkeep.js`, not `npm start`, so a supervisor's pid is the lock holder
+      and `sv down` cannot leave a live launcher behind — with `--boot` and
+      everything appended to `server.log`) and `scripts/termux-sshd.sh` (P1-04's
+      carry-over).
+      The SSH script **re-resolves the tailnet address on every start** from
+      `ip`/`ifconfig`, writes a config with exactly the tailnet address and
+      `127.0.0.1` as `ListenAddress` lines, refuses to start (exit 2) when
+      Tailscale has no address, reuses a running instance while the address and
+      port are current and restarts it when either moved; `0.0.0.0` is not
+      reachable from any branch. A pid file is believed only while that pid is a
+      live `sshd` (`/proc/<pid>/cmdline`), so a recycled pid cannot make the
+      script report a listener that is not there or terminate a stranger. `pkg install cloudflared` is explicitly **not** used —
+      P0-03 found no such package. The plan's §4 layout and §6.3 boot/sshd text
+      now point at the scripts, and `test/runbook.test.ts` guards them: `bash -n`
+      on each script, executable bit, the wrapper command, the two-listeners rule
+      and the absent wildcard bind, the cloudflared pin, the runbook's required
+      commands and its no-token/placeholder-address rules, and §4 listing every
+      script.
+      **Verified:** `scripts/termux-sshd.sh` is driven end to end against stubs
+      (`ip`, `ifconfig`, `ssh-keygen`, `sshd`, `pgrep`): the refusal with no
+      address and at the 100.64.0.0/10 boundary — cross-checked against
+      `tailscaleAddress()`'s rule in `src/launcher/access.ts`, so the two cannot
+      drift silently — the two-listener config, the reuse path, the restart when
+      the address moved, the `ifconfig` fallback when `ip` finds nothing, and a
+      recycled pid being ignored. The pinned SHA-256 was taken from the real
+      `2026.10.5` arm64 release binary; typecheck and the suite (319 tests).
+      **Not verified:** the runbook has not been walked on a phone in one
+      sitting, and nothing in the three scripts has run on a phone — P5-01's
+      kill/restart matrix and P5-04's polish are where that happens. The
+      `sv` unit, the Termux:Boot companion app, the tunnel wrapper in anger and
+      the ntfy onboarding all rest on the Phase 0 spikes.
+      **Carried out:** the quick tunnel has no owner link of its own — the
+      launcher mints before the tunnel prints its URL, so a `cloudflare` start
+      reports `no-origin`, and nothing re-mints when `onTunnelUrl` fires. The
+      runbook documents the route that works today (sign in on the tunnel origin
+      with the token from `owner-link.txt`); minting on the tunnel URL belongs to
+      the Web Push task, **P4-05**, which is the first thing that needs it.
 - [ ] **P1-14** First-run setup: puppy profile and meal-slot wizard before both
       caregivers land on Today. Confirm or change the household timezone captured
       at bootstrap; a wrong zone corrupts every future `localDate`.
