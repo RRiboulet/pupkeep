@@ -422,7 +422,7 @@ test("a busy thread rejects with a friendly 409 and no transcript entry", async 
     assert.equal(after, before + 1, "only the answer lands");
     const reply = snapshot.entries.find((entry) => entry.kind === "assistant");
     assert.ok(reply, "the held run produced its answer");
-    assert.equal(reply.authorName, "Alex", "the run answers the accepted speaker, not the rejected one");
+    assert.equal(reply.authorName, "Alex", "the reply belongs to the accepted speaker");
     const texts = snapshot.entries
       .filter((entry): entry is Extract<TranscriptEntry, { kind: "chat" }> => entry.kind === "chat")
       .map((entry) => entry.text);

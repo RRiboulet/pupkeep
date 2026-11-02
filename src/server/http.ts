@@ -710,11 +710,11 @@ async function handleEvents(
 ): Promise<void> {
   let live = true;
   let opened = false;
-  // Set once the snapshot is read: a delta entry at or below this id is already
-  // on screen. Filtering is per-event, not per-batch: a covered commit's
-  // id-less events (`message_start`, `usage`, …) still pass, and so does an
-  // entry whose kind the transcript does not show — neither is a visible
-  // duplicate. Only the entries the snapshot already displays are dropped.
+  // Set once the snapshot is read: a delta entry at or below this id is not
+  // new — it was committed before the snapshot's page. Filtering is per-event,
+  // not per-batch: id-less events (`message_start`, `usage`, …) always pass, and
+  // an entry above the floor passes even when the transcript does not display
+  // its kind. Anything at or below the floor is dropped, displayed or not.
   let coveredThrough = 0;
   // A batch remembers the counter value it was broadcast at. Reporting
   // `bus.seq` at delivery time instead would blur the counter across the

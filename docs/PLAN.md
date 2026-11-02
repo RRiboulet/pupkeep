@@ -2305,14 +2305,15 @@ that the partner is reached out-of-app is gated on P0-10.
       **Landed:** the attach guard is now two-layered. The `seq` fast path still
       drops a batch broadcast before the snapshot read; a batch broadcast later
       (the narrow window) is checked against the snapshot's **entry floor** —
-      any delta whose entries are all at or below the newest entry the snapshot
-      shows is already on screen and is not replayed (a covered commit is
-      acknowledged as an empty frame, so the counter stays continuous and a
-      client watching for a gap does not mistake it for lost state). Entry ids
-      are the durable commit order, so the check is strict where the broadcast
-      counter is not; `test/conversation.test.ts` fails without it (the first
-      frame after the snapshot repeats entry 42 instead of acknowledging it and
-      leaving the next frame for the new commit).
+      an entry at or below the newest entry the snapshot shows was committed
+      before its page and is not replayed. Filtering is per event, not per
+      commit: the covered commit keeps its broadcast seq, its non-entry events
+      still pass, and with nothing left the frame is empty, so the counter stays
+      continuous and a client watching for a gap does not mistake it for lost
+      state. Entry ids are the durable commit order, so the check is strict
+      where the broadcast counter is not; `test/conversation.test.ts` fails
+      without it (the first frame after the snapshot repeats entry 42 instead of
+      acknowledging it and leaving the next frame for the new commit).
       §15.3 is covered too: the tool's backwards speaker scan pages past 120
       intervening entries and still finds the `app.chat`; a busy-rejected input
       leaves no entry and the run is attributed to the accepted speaker; a
