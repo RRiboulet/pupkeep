@@ -4,9 +4,10 @@
 and G1 is covered by the suite (`test/e2e.test.ts` is the slice end to end,
 `test/setup.test.ts` the first-run setup). P2-01 (`app.feeding` events) and
 P2-02 (the feed domain service and the notification intents), P2-03 (the feed
-HTTP routes) and P2-04 (the feed agent tools) are on `main`; P2-05 (the Today
-meals UI) is on `feat/today-meals`. P2-06 (`app.walks`) is next. P0-03/P0-08/P0-10
-remain device-gated partner checks and do not block the host-side work.
+HTTP routes), P2-04 (the feed agent tools) and P2-05 (the Today meals UI) are on
+`main`; P2-06 (`app.walks` and its service) is on `feat/walks`. P2-07 (walk HTTP,
+tools and UI) is next. P0-03/P0-08/P0-10 remain device-gated partner checks and do
+not block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The

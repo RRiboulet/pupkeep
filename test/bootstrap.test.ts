@@ -99,6 +99,7 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
       "app.household",
       "app.notifications",
       "app.puppy",
+      "app.walks",
     ]);
 
     assert.deepEqual(await opened.harness.snapshot(HouseholdDoc, context), result.household);
