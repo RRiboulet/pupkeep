@@ -2,10 +2,11 @@
 
 **Status:** Phase 2 in progress. Phase 1 is complete on `main` through P1-14,
 and G1 is covered by the suite (`test/e2e.test.ts` is the slice end to end,
-`test/setup.test.ts` the first-run setup). P2-01 (`app.feeding` events) is on
-`main`; P2-02 (the feed domain service and the notification intents) is on
-`feat/feed-service`. P2-03 (the feed HTTP routes) is next. P0-03/P0-08/P0-10 remain
-device-gated partner checks and do not block the host-side work.
+`test/setup.test.ts` the first-run setup). P2-01 (`app.feeding` events) and
+P2-02 (the feed domain service and the notification intents) are on `main`;
+P2-03 (the feed HTTP routes) is on `feat/feed-routes`. P2-04 (the feed agent
+tools) is next. P0-03/P0-08/P0-10 remain device-gated partner checks and do not
+block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The

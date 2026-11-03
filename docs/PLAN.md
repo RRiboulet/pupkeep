@@ -2691,8 +2691,70 @@ the shared thread answers via a fake provider; a restart loses nothing.
       and the Today UI (P2-05) are not part of this task.
       **Not verified:** no request has logged a meal through the route/tool yet;
       delivery of an intent is P4-05/P4-06, and nothing reads `readAt` yet.
-- [ ] **P2-03** Feed HTTP routes: mark fed, extra feed, day view; 409 shape;
-      idempotency key.
+- [x] **P2-03** Feed HTTP routes: mark fed, extra feed, day view; 409 shape;
+      idempotency key. **Landed:** `GET /api/feeding/day`, `POST /api/feeding/fed`
+      and `POST /api/feeding/extra` in `src/server/http.ts`, over P2-02's
+      `logFeed` and the shared `feedingDay`. All three take the `care` action;
+      the writes go through P1-11/P1-14's `requireCareMutation` (origin,
+      `X-Pupkeep-Request`, JSON, `Idempotency-Key`) with the `http:` namespace
+      and `source: "ui"`. Decisions: (1) **the day view is `feedingDay`**
+      (`src/shared/feeding.ts`), the same pure builder P2-04's tool and P2-05's
+      screen use, so a route and the agent cannot disagree about a day; the GET
+      reads the household once, for the zone the date derives from. (2) **the
+      write routes read the household zero times**: the committed event carries
+      its own `localDate`, so the answer is the day the meal landed on — a feed
+      accepted at 23:59:59 answers that date, not tomorrow's. (3) **the 409 is
+      one shape**, `feedConflictView` in the same module: `{error:
+      "already_fed", message, feed, day}` with who/when and the current day, so
+      the client renders the conflict in place instead of a dead end; the
+      success shape `feedWriteView` likewise carries the committed day and a
+      `replayed` flag. P2-04 returns the same two shapes. (4) **the day view
+      does not compute "overdue"**: §12.1's `feed_overdue` needs
+      `feedReminderDelayMin` and a slot-time instant, which is P2-05's display
+      rule and P4-04's reminder; here a slot with no feed is simply unfed. (5)
+      **only the body's shape is checked at the route** — unknown keys and
+      non-text `amount`/`note` are refused there, while trimming, the caps and
+      the control-character rule stay the document parser's, re-checked inside
+      the commit so no caller can store a meal a reader would refuse (§8.1).
+      An unknown or inactive slot is P2-02's 409 with its sentence; a reused
+      key with another body is `idempotency_conflict`; both keep the one mapper.
+      (6) **the request clock is a seam** (`HttpDeps.now`, default `Date.now`,
+      wired from `AppOptions.now`): one instant per write, so a test can pin
+      23:30Z and prove the Paris household answers 30 October, not the UTC date
+      the module docs forbid. (7) **the response carries no zone**: `at` and
+      `timeLocal` are rendered in `household.timezone` from the profile the
+      client already holds, and the write path keeps its zero household reads.
+      (8) The one `idempotency_conflict` sentence (`sendKeyConflict`) is
+      neutral, because the `http:` key space is shared by the profile, timezone,
+      schedule and meal routes — a key reused on another route is still a
+      conflict, not a replay.
+      **Verified:** 10 tests in `test/feeding-routes.test.ts` over a real SQLite
+      harness and the real listener — the day view (active slots only, time
+      order, the feed that claimed a slot, extras, roster label, `ui` source,
+      `http:` action id, `no-store` on read and write, the partner seeing the
+      same day), the household-local date on a pinned 23:30Z clock in
+      `Europe/Paris` (day view, event and conflict all say 30 October; a
+      UTC-slice mutation fails this test), the second-caregiver 409 with
+      who/when and the current day, the replay and same-key/different-body
+      conflict, the same key across `/fed` and `/extra`, a feed not bumping
+      `meals.rev`, unknown/inactive slot and malformed-body refusals writing
+      nothing, `null` optionals and a whitespace-trimmed slot id, an over-long
+      note refused by the domain rather than truncated, and the shared guards
+      (401 anonymous, 403 without Origin or the request header, 415 for a
+      non-JSON body, 409 without a key, no credential in a refusal). The suite
+      is 386/386.
+      **Not verified:** no browser has driven these routes yet (P2-05's screen
+      is the first caller); the concurrent two-client feed race over HTTP is
+      P2-08's, and intent **delivery** remains P4-05/P4-06.
+      **Carried out:** extra feedings are not rate-limited and `app.feeding` is
+      never pruned (§8.5), so the per-commit full re-parse grows with the log —
+      P2-08 should measure it and add a care limiter if needed. A wrong method
+      on a served path still answers P1-09's 503 inventory sentence (now longer),
+      not a 405. A client key replayed by the *other* caregiver with an
+      identical body replays the first action (§7.3 hashes no actor), so P2-05
+      must mint a fresh key per action; the route cannot tell whose key it is.
+      `feed.actionId` (`http:<key>`) is echoed inside `day.events` for the
+      household's audit trail and is not display copy.
 - [ ] **P2-04** Feed agent tools: `log_feeding`, `log_extra_feeding`,
       `get_feeding_day`; actor/idempotency.
 - [ ] **P2-05** Today meals UI: fed/pending/overdue, who/when, disabled state,
