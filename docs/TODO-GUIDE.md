@@ -1,6 +1,6 @@
 # Todo guide — how to work the Pupkeep plan
 
-**Status:** Phase 1 in progress. P1-01..P1-12 are on `main` (P1-13..P1-14 open);
+**Status:** Phase 1 in progress. P1-01..P1-13 are on `main` (P1-14 open);
 P0-03/P0-08/P0-10 remain device-gated partner checks and do not block the
 host-side work.
 
@@ -142,7 +142,7 @@ Next: <task IDs>
 | `P1-10` | PWA shell and security headers | P1-04 | phase-1, web, security |
 | `P1-11` | Puppy profile: domain, tools, UI | P1-08, P1-09, P1-10 | phase-1, domain, agent, web |
 | `P1-12` | Phase 1 tests and CI | P1-06, P1-09, P1-11 | phase-1, tests |
-| `P1-13` | Phone runbook draft | P1-04, P1-06 | phase-1, docs, host |
+| `P1-13` | Phone runbook, Termux install/boot and on-demand sshd | P1-04, P1-06 | phase-1, docs, host |
 | `P1-14` | First-run puppy and meal-slot wizard | P1-11 | phase-1, web, domain |
 | `P2-01` | Feeding document and invariants | G1 | phase-2, domain |
 | `P2-02` | Feed domain service and idempotency | P2-01 | phase-2, domain, durability |

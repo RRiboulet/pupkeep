@@ -8,10 +8,11 @@ A shared, agent-operated puppy care app for two caregivers, built on
 > [`docs/PLAN.md`](docs/PLAN.md) §2.3. The launcher, auth, data files, harness,
 > storage, encrypted backup, devcontainer, shared household thread and puppy
 > profile are in place, and every pull request typechecks and runs the full test
-> suite (`.github/workflows/ci.yml`). The phone runbook (P1-13) and the
-> first-run wizard (P1-14) are the remaining Phase-1 tasks. The source of truth
-> is [`docs/PLAN.md`](docs/PLAN.md); [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md)
-> says how to pick the next task.
+> suite (`.github/workflows/ci.yml`). The first-run wizard (P1-14) is the
+> remaining Phase-1 task; the phone runbook and its Termux scripts (P1-13) are
+> in place, but stay a **draft** until P5-01/P5-04 walk them on a phone. The
+> source of truth is [`docs/PLAN.md`](docs/PLAN.md);
+> [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says how to pick the next task.
 >
 > Three Phase 0 checks stay open because they need the partner's iPhone: the
 > partner reach, PWA/Web Push and ntfy receipts carried by **P0-10**
@@ -64,6 +65,8 @@ No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
 - [`docs/PLAN.md`](docs/PLAN.md) — product, architecture, data model, shared
   thread, models and budget, host runbook, phases, task breakdown, risks. §4 is
   the repository layout, §2.3 the Phase 0 go/no-go.
+- [`docs/PHONE-RUNBOOK.md`](docs/PHONE-RUNBOOK.md) — the host phone: install,
+  boot and supervision, on-demand SSH, access modes, notifications, backup.
 - [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) — how to pick a task, branch/PR
   rules, definition of done, and the 59-task index.
 - [`docs/partner-ios-checklist.md`](docs/partner-ios-checklist.md) — the Phase 0
@@ -87,7 +90,7 @@ declaring the same package again makes every extension load twice — the first
 version of this repo did, and subagents launched in this directory failed at
 startup with `Flag "--attach-subagent" conflicts with …`. A standalone clone can
 add the package to its own local settings; the repo does not force it. The pi
-runtime the plan pins is `1.4.0`, enforced by the devcontainer (P1-02) rather
+runtime the plan pins is `1.5.0`, enforced by the devcontainer (P1-02) rather
 than by a file here.
 
 **The development agent is not the product agent, and they must never be
@@ -107,7 +110,7 @@ single major that would make one of the two environments non-conforming.
 
 `.devcontainer/` builds from
 `mcr.microsoft.com/devcontainers/javascript-node:24-bookworm` and installs Node
-24, pi coding agent `1.4.0`, sqlite3, cloudflared, rclone, tmux, gh, jq, age,
+24, pi coding agent `1.5.0`, sqlite3, cloudflared, rclone, tmux, gh, jq, age,
 expect and the rest of the host tooling. Open the repo with the Dev Containers
 extension; `postCreate.sh` runs `npm ci`, `npm run typecheck` and `npm test`, and
 seeds `.env` only when it is absent.
