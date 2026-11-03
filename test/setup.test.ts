@@ -800,6 +800,7 @@ test("a database from before P1-14 boots through the household migration and get
       "app.feeding",
       "app.notifications",
       "app.puppy",
+      "app.walks",
     ]);
 
     const household = await readHousehold(harness, context);

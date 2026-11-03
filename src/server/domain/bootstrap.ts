@@ -24,6 +24,7 @@ import type {
   MemberProfile,
   Notifications,
   Puppy,
+  Walks,
 } from "../../shared/domain.ts";
 import { activeMembers, reconcileMembers, type AppConfig, type Reconciliation } from "../config.ts";
 import {
@@ -33,12 +34,14 @@ import {
   HouseholdDoc,
   NotificationsDoc,
   PuppyDoc,
+  WalksDoc,
   emptyActivity,
   emptyCommands,
   emptyFeeding,
   emptyHousehold,
   emptyNotifications,
   emptyPuppy,
+  emptyWalks,
   isIanaZone,
   parseActivity,
   parseCommands,
@@ -47,6 +50,7 @@ import {
   parseMemberProfiles,
   parseNotifications,
   parsePuppy,
+  parseWalks,
 } from "./docs.ts";
 
 export class BootstrapError extends Error {
@@ -144,6 +148,10 @@ function initialNotifications(createdAt: string): Notifications {
   return { ...emptyNotifications(), createdAt };
 }
 
+function initialWalks(createdAt: string): Walks {
+  return { ...emptyWalks(), createdAt };
+}
+
 async function clearSystemModel(harness: Harness, id: ConversationId, context: Context): Promise<boolean> {
   const conversation = await harness.conversation(id, context);
   if (!conversation) {
@@ -184,6 +192,9 @@ export async function bootstrapSession(
     if ((await harness.snapshot(NotificationsDoc, context)) !== undefined) {
       throw new BootstrapError("app.household is missing but app.notifications exists; refusing to reset it");
     }
+    if ((await harness.snapshot(WalksDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.walks exists; refusing to reset it");
+    }
 
     const createdAt = now().toISOString();
     const timezone = options.timezone ?? defaultTimezone();
@@ -202,6 +213,7 @@ export async function bootstrapSession(
       Object.assign(await tx.doc(CommandsDoc), initialCommands(createdAt));
       Object.assign(await tx.doc(FeedingDoc), initialFeeding(createdAt));
       Object.assign(await tx.doc(NotificationsDoc), initialNotifications(createdAt));
+      Object.assign(await tx.doc(WalksDoc), initialWalks(createdAt));
 
       return { shared: shared.id, system: system.id };
     }, context);
@@ -220,6 +232,7 @@ export async function bootstrapSession(
         "app.commands",
         "app.feeding",
         "app.notifications",
+        "app.walks",
       ],
       clearedSystemModel,
     };
@@ -293,6 +306,12 @@ export async function bootstrapSession(
   if (notificationsSnapshot !== undefined && !notifications) {
     throw new BootstrapError("app.notifications is not a shape this build understands; refusing to reset it");
   }
+  const walksSnapshot = await harness.snapshot(WalksDoc, context);
+  const walks = walksSnapshot === undefined ? undefined : parseWalks(walksSnapshot);
+  if (walksSnapshot !== undefined && !walks) {
+    throw new BootstrapError("app.walks is not a shape this build understands; refusing to reset it");
+  }
+  const walksDoc: Walks | undefined = walks;
 
   const docsCreated: string[] = [];
   if (!puppy) docsCreated.push("app.puppy");
@@ -300,6 +319,7 @@ export async function bootstrapSession(
   if (!commands) docsCreated.push("app.commands");
   if (!feeding) docsCreated.push("app.feeding");
   if (!notifications) docsCreated.push("app.notifications");
+  if (!walksDoc) docsCreated.push("app.walks");
 
   if (membersChanged || docsCreated.length > 0) {
     const createdAt = now().toISOString();
@@ -313,6 +333,7 @@ export async function bootstrapSession(
       if (!commands) Object.assign(await tx.doc(CommandsDoc), initialCommands(createdAt));
       if (!feeding) Object.assign(await tx.doc(FeedingDoc), initialFeeding(createdAt));
       if (!notifications) Object.assign(await tx.doc(NotificationsDoc), initialNotifications(createdAt));
+      if (!walksDoc) Object.assign(await tx.doc(WalksDoc), initialWalks(createdAt));
     }, context);
   }
 

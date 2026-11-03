@@ -35,6 +35,7 @@ import {
   HOUSEHOLD_SCHEMA_VERSION,
   NOTIFICATIONS_SCHEMA_VERSION,
   PUPPY_SCHEMA_VERSION,
+  WALKS_SCHEMA_VERSION,
   type Activity,
   type ActivityEntry,
   type CommandRecord,
@@ -47,9 +48,11 @@ import {
   type Notifications,
   type Puppy,
   type PuppySex,
+  type Walks,
 } from "../../shared/domain.ts";
 import { parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
 import { parseNotificationIntents } from "../../shared/notifications.ts";
+import { parseWalks as parseWalkList } from "../../shared/walks.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
 
 /**
@@ -114,6 +117,10 @@ export function emptyFeeding(): Feeding {
 /** No committed notification intents yet. */
 export function emptyNotifications(): Notifications {
   return { schemaVersion: NOTIFICATIONS_SCHEMA_VERSION, items: [], createdAt: "" };
+}
+
+export function emptyWalks(): Walks {
+  return { schemaVersion: WALKS_SCHEMA_VERSION, walks: [], createdAt: "" };
 }
 
 export const HouseholdDoc = defineDoc<Household>({
@@ -211,6 +218,15 @@ export const NotificationsDoc = defineDoc<Notifications>({
   version: 1,
   scope: "session",
   initial: emptyNotifications,
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/** The open walk and the walk history (P2-06). */
+export const WalksDoc = defineDoc<Walks>({
+  kind: "app.walks",
+  version: 1,
+  scope: "session",
+  initial: emptyWalks,
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -404,6 +420,20 @@ export function parseCommands(value: unknown): Commands | undefined {
     entries.push(entry);
   }
   return { schemaVersion: COMMANDS_SCHEMA_VERSION, createdAt: record.createdAt, entries };
+}
+
+/**
+ * `app.walks`: the open walk and the history. The list invariants live in
+ * `shared/walks.ts` (unique ids, one open walk, the §9.2 pairing), so the
+ * service validates a draft with the same rules the document uses.
+ */
+export function parseWalks(value: unknown): Walks | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== WALKS_SCHEMA_VERSION) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  const walks = parseWalkList(record.walks);
+  if (!walks) return undefined;
+  return { schemaVersion: WALKS_SCHEMA_VERSION, walks, createdAt: record.createdAt };
 }
 
 /** `app.feeding`: the schedule plus the meals logged against it. */

@@ -28,6 +28,7 @@ export const COMMANDS_SCHEMA_VERSION = 1 as const;
  */
 export const FEEDING_SCHEMA_VERSION = 2 as const;
 export const NOTIFICATIONS_SCHEMA_VERSION = 1 as const;
+export const WALKS_SCHEMA_VERSION = 1 as const;
 
 export type MemberProfile = { id: string; name: string };
 
@@ -128,6 +129,56 @@ export type Feeding = {
    * unreadable — the service answers it (see `shared/feeding.ts`).
    */
   events: FeedEvent[];
+  createdAt: string;
+};
+
+/**
+ * One walk (PLAN §8.3). A walk is a single record whose duration is derived
+ * from two **server** timestamps: a phone's clock skew must not reorder two
+ * caregivers' walks, and the timer a browser shows uses the server offset
+ * (§8.4), never the device clock.
+ *
+ * `endedAt` absent means the walk is open. There is at most one open walk per
+ * household (a document invariant), and after eight hours an open walk is
+ * **stale** (§8.5): the banner offers end/discard and a new start is refused
+ * until it is resolved — never auto-closed, because the record keeps the real
+ * timestamps.
+ *
+ * The two action ids are the idempotency keys of the two commits that create the
+ * record; the fields the caregiver fills in at the end are observations, not
+ * corrections of the start.
+ */
+export type Walk = {
+  id: string;
+  /** UTC instant, ISO with a trailing `Z`; the server's clock. */
+  startedAt: string;
+  /** Absent while the walk is open. */
+  endedAt?: string;
+  /** HTTP idempotency key or the agent tool's task id (§7.3). */
+  startedActionId: string;
+  endActionId?: string;
+  /** Config member id, or `null` for the household fallback (§9.2). */
+  startedBy: string | null;
+  startedByLabel: string;
+  endedBy?: string | null;
+  endedByLabel?: string;
+  /** Counts, not booleans: a long walk can have more than one. */
+  pee?: number;
+  poop?: number;
+  /** Free text, JSON-quoted wherever it is displayed. */
+  dogsMet?: string;
+  mood?: string;
+  notes?: string;
+};
+
+/**
+ * `app.walks`: the open walk and the history (P2-06). History is never pruned
+ * in v1 (§8.5); the write service appends and ends records, one commit each.
+ */
+export type Walks = {
+  schemaVersion: typeof WALKS_SCHEMA_VERSION;
+  /** Append order; a reader sorts by `startedAt` where it needs chronology. */
+  walks: Walk[];
   createdAt: string;
 };
 

@@ -2876,8 +2876,46 @@ the shared thread answers via a fake provider; a restart loses nothing.
       the midnight rollover and the focus move need a device check on the
       localhost/Tailscale origins; the partner leg is P0-10; walks (P2-07) are
       the next card and will need the same write-state rules.
-- [ ] **P2-06** `app.walks` doc + domain service: start, end, details, one open
+- [x] **P2-06** `app.walks` doc + domain service: start, end, details, one open
       walk, server timestamps, `startActionId`/`endActionId`, stale rule.
+      **Landed:** `Walk`/`Walks` in `src/shared/domain.ts`, the parser and
+      invariants in `src/shared/walks.ts`, `WalksDoc` in
+      `src/server/domain/docs.ts` (bootstrap creates and repairs it; a malformed
+      one refuses boot), and `startWalk`/`endWalk`/`readWalks` in
+      `src/server/domain/walks.ts`. Decisions: (1) **one open walk is a document
+      invariant** — the parser refuses a second open record and a repeated id,
+      and the service answers a start with a typed `WalkOpenError` carrying the
+      blocking walk (409 in P2-07), flagged `stale` once §8.5's eight hours have
+      passed; a stale walk stays blocking, so no auto-close ever rewrites a real
+      timestamp. (2) **timestamps are the server's** (`now` injected by tests),
+      `endedAt` must not precede `startedAt`, and the activity summary's duration
+      is derived from the two stored instants at end time. (3) **two action ids
+      per record**: a repeated start replays (returning the *current* record if
+      the other caregiver ended it meanwhile, not a stale open copy), a different
+      action on an ended walk returns `ended-already` with the record, and
+      ending with no open walk is `no-open` — all 409s for P2-07. (4) **the
+      service validates the list before storing** (the same `parseWalks` boot
+      uses) and trims observations; counts above 20 or text past its cap are
+      refused by the parser rather than truncated. (5) **discard is P2-07's
+      decision**, not silently added here: the walk record has no discard field,
+      and ending is the only resolution this task offers. (6) The §9.2 fence is
+      the feed document's: a null actor id always travels with the household
+      label; the writer never pairs a real id with it.
+      **Verified:** 10 tests in `test/walks.test.ts` — the shape (server
+      timestamps, an end never before a start, one open walk, repeated ids,
+      observation bounds, the household pairing), the eight-hour stale predicate
+      (and that an ended walk is never stale), a start as one commit (record,
+      activity, command key), a second start refused with the open walk and a
+      stale start flagged, an end recording observations and a 35-minute
+      duration for the other caregiver, replay/key-conflict/ended-already/no-open,
+      the household fallback with a null id, an unreadable document refused,
+      **a walk opened before a process restart still open after it** and ended by
+      the other caregiver, and boot creating `app.walks` for an older database
+      while refusing a malformed one. The suite is 423/423.
+      **Not verified:** nothing outside the domain exists yet — the HTTP routes,
+      the agent tools and the walk UI are P2-07; no browser or phone has shown an
+      open walk; the activity wording ("ended a walk (35 minutes)") is this
+      build's copy.
 - [ ] **P2-07** Walk HTTP + agent tools + UI: start, live timer, end form,
       stale-walk banner with end/discard; new start blocked until resolved.
 - [ ] **P2-08** Tests: same/different actionId, concurrent feed, feed race with
