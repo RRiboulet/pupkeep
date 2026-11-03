@@ -2495,10 +2495,15 @@ that the partner is reached out-of-app is gated on P0-10.
       `outcomeOf()`, the two dead type aliases were dropped, and a caregiver the
       household does not carry yet now writes as the household fallback with a
       null id rather than a real id paired with "Household".
-      **Not verified:** no real browser render of the wizard, no phone, and the
-      partner has not seen it (P0-10). The stored wall-clock slots are not yet
-      exercised across a DST transition — §8.5's planner (P4-04) is where that
-      happens.
+      **Device check (2026-11-03):** first-run setup was completed on a phone
+      browser through a Cloudflare quick tunnel — timezone confirmed as
+      `Europe/Paris`, puppy saved (name, birthday, breed, sex, target weight) and
+      three meal slots stored — and the care view then reported
+      `setup.complete`. That is a real render of the wizard and a real save of
+      each of the three documents, which the suite cannot show.
+      **Not verified:** the PWA install / service-worker path on that origin, the
+      partner's device (P0-10), and the stored wall-clock slots across a DST
+      transition — §8.5's planner (P4-04) is where that happens.
       **Carried out:** an unsaved wizard draft is lost when the caregiver
       navigates away (the component remounts); it is not persisted and nothing
       warns, which matters only if someone uses Today and Settings as two
