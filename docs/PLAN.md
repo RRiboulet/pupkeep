@@ -356,8 +356,9 @@ pupkeep/
 │   ├── app.js
 │   ├── client.js             # fetch + mutation headers (P1-11)
 │   ├── live.js               # the one event stream (P1-11)
+│   ├── profile-form.js       # shared form helpers (P1-11, P1-14)
 │   ├── store.js
-│   ├── views/                 # Today, Calendar, Pup, Agent, Settings
+│   ├── views/                 # Today, Calendar, Pup, Agent, Settings, Setup
 │   ├── sw.js
 │   ├── manifest.webmanifest
 │   ├── vendor/                # Preact/htm browser builds
@@ -912,9 +913,9 @@ defines `checkpointWhen` (do not use `() => false` forever).
 
 | Document | Contents | Invariants |
 |---|---|---|
-| `app.household` | Name, timezone, display-member profiles, settings, shared conversation ID, hidden system conversation ID, reminder task IDs | Max two members; auth/roles live in `config.json`; the system conversation never calls a model |
+| `app.household` | Name, timezone and when a caregiver confirmed it, display-member profiles, settings, shared conversation ID, hidden system conversation ID, reminder task IDs, revision | Max two members; auth/roles live in `config.json`; the system conversation never calls a model; the roster is reconciled without bumping the revision |
 | `app.puppy` | Name, birthday, breed, sex, target weight, revision | One puppy; birthday is a local date; age computed; the shower interval is `app.household.settings.showerIntervalDays` (one source) |
-| `app.feeding` | Meal slots, feed events | One normal feed per slot per local date; extra feeds have no slot |
+| `app.feeding` | Meal slots (P1-14), feed events (P2-01) | One normal feed per slot per local date; extra feeds have no slot; at least one active slot once a schedule exists |
 | `app.walks` | One open walk + history | One open walk at a time; duration from server timestamps |
 | `app.growth` | Measurements (weight, height, note, who, when) | Ascending history; optional target weight |
 | `app.training` | Milestones + status | Starter catalog + custom; `not_started`/`practicing`/`mastered` |
@@ -926,9 +927,10 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.usage` | Derived monthly spend snapshot | `harness.usage()` is authoritative; this is a cache, never a second ledger |
 | `app.commands` | HTTP idempotency keys/results | Key + request hash + result + 24h expiry; committed with the action |
 
-P1-08 defines the first four documents. Each value carries `schemaVersion: 1`
-and its Pi Durable document version is 1; a future change increments both and
-adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
+P1-08 defines the first four documents; P1-14 adds `app.feeding` with the meal
+slots (P2-01 adds the feed events and moves that document to version 2). Each
+value carries `schemaVersion: 1` and its Pi Durable document version is 1; a
+future change increments both and adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
 members, settings or pending idempotency records. `checkpointWhen` stores a
 base every 100 deltas. Activity keeps its last 200 entries and commands keep
@@ -937,7 +939,10 @@ base every 100 deltas. Activity keeps its last 200 entries and commands keep
 
 The first shape change is P1-11's `app.puppy.rev`: the value is schema 2 and
 the document version 2, and `migrate` fills `rev: 0` for a version-1 document so
-a phone that ran P1-08 keeps its puppy instead of failing boot.
+a phone that ran P1-08 keeps its puppy instead of failing boot. The second is
+P1-14's `app.household` revision and timezone confirmation: schema 2, document
+version 2, and `migrate` fills `rev: 0` and `timezoneConfirmedAt: null` — the
+captured zone is kept but stays unconfirmed, because nobody has checked it.
 
 ### 8.2 Host-side data
 
@@ -2409,13 +2414,104 @@ that the partner is reached out-of-app is gated on P0-10.
       the ntfy onboarding all rest on the Phase 0 spikes.
       **Carried out:** the quick tunnel has no owner link of its own — the
       launcher mints before the tunnel prints its URL, so a `cloudflare` start
-      reports `no-origin`, and nothing re-mints when `onTunnelUrl` fires. The
+      reports `no-origin`, and nothing re-mints when `onTunnelUrl` fires. (The
+      launcher now *prints* that URL from `bin/pupkeep.js`; it previously
+      swallowed the line, so §9's "open the tunnel URL" had no way to learn it.) The
       runbook documents the route that works today (sign in on the tunnel origin
       with the token from `owner-link.txt`); minting on the tunnel URL belongs to
       the Web Push task, **P4-05**, which is the first thing that needs it.
-- [ ] **P1-14** First-run setup: puppy profile and meal-slot wizard before both
+- [x] **P1-14** First-run setup: puppy profile and meal-slot wizard before both
       caregivers land on Today. Confirm or change the household timezone captured
       at bootstrap; a wrong zone corrupts every future `localDate`.
+      **Landed:** `src/shared/feeding.ts` (the slot shape and the one parser both
+      the route and the document use), `src/shared/domain.ts`
+      (`HOUSEHOLD_SCHEMA_VERSION` 2 with `rev`/`timezoneConfirmedAt`, `MealSlot`,
+      `Feeding`), `src/server/domain/docs.ts` (the household v1→v2 `migrate`,
+      `FeedingDoc` v1, `parseFeeding`), `src/server/domain/actor.ts` (the actor
+      shape extracted from P1-11's profile module so the two new writers resolve
+      their own actor inside the commit), `src/server/domain/household.ts`
+      (`updateHouseholdTimezone`), `src/server/domain/feeding.ts`
+      (`readFeeding`, `updateMealSlots` — P2-02 adds `logFeed` beside it),
+      `src/server/domain/profile.ts` (the shared care view plus `setupState`),
+      `PATCH /api/household` and `PATCH /api/feeding/slots` with one
+      care-mutation preamble and one stale/replay answer in
+      `src/server/http.ts`, `app.feeding` joined to the `profile` frame kinds in
+      `src/server/agent/state.ts`, and the client: `web/views/setup.js`,
+      `web/profile-form.js` (P1-11's draft/idempotency helpers extracted so the
+      two forms cannot drift), Today's setup gate, Settings' household card and
+      embedded wizard, and the shell cache at `pupkeep-shell-v3`.
+      Bootstrap creates `app.feeding` on a fresh boot, repairs it on a database
+      that predates it, and refuses a household-less database that has one.
+      Decisions: (1) **no second stream** — the existing `profile` frame carries
+      the household revision/confirmation and the meal schedule, exactly as
+      P1-11 decided for P2's meals; (2) `app.household` gains `rev` and
+      `timezoneConfirmedAt` at schema/document version 2; roster mirroring (boot,
+      an accepted invite) deliberately does **not** bump `rev`, so a partner
+      joining cannot invalidate the other caregiver's draft; (3) setup completion
+      is **derived** (a confirmed zone, a named puppy, at least one active slot)
+      rather than a stored flag, so the checklist cannot claim a state the
+      documents do not have; (4) confirming the captured zone unchanged is still
+      one real save — revision, confirmation instant and activity entry — because
+      signing off on the zone is the point; (5) `app.feeding` starts at version 1
+      with slots only, and P2-01 adds feed events as version 2 with a `migrate`
+      that keeps them: Phase 1 invents no feed-event shape; (6) the wizard's
+      save is the human tap, so it may set the schedule directly, while the
+      agent's schedule change stays the approval-gated
+      `request_feeding_schedule_change` (P4-07) — no tool was added here;
+      (7) the wizard is not a route: Today gates on the derived checklist and
+      Settings embeds the same component, so a partner who joins mid-wizard sees
+      the same three steps and no `#setup` URL can be deep-linked into half a
+      setup; (8) changing the zone does not rewrite historical `localDate`
+      values — there are none before Phase 2, and §8.5 derives each event's
+      `localDate` from its instant, which is P2-01/P2-02's rule to keep.
+      **Verified:** 25 new tests — 18 in `test/setup.test.ts` and 7 in
+      `test/client.test.js` (the v1→v2 migration directly **and** through a
+      stored version-1 document; the household and slot parsers including
+      `HH:MM`, control characters, duplicate ids/times, the one-active and
+      12-slot rules; the checklist order; both domain writers — one commit, one
+      activity entry, replay as success, key conflict, stale refusal, and a bad
+      zone/schedule writing nothing; the HTTP auth/origin/request-header/
+      content-type/idempotency-key/revision/unknown-field matrix on both routes;
+      the 409 `stale` body carrying the current care view; a two-caregiver
+      timezone race; both saves arriving on the other caregiver's stream as whole
+      `profile` frames; the bootstrap repair of a pre-P1-14 database and its
+      refusal to reset a household-less one that already has feeding; and, in
+      the client suite, the key-held-with-its-body rule, the shared form
+      helpers, the Today gate, a response read before a newer frame not moving
+      the screen backwards, a browser without EventSource still reading the care
+      state once, and a frame for the caregiver's own in-flight save not
+      accusing someone else), plus the updated bootstrap and PWA pins (the shell
+      is 19 files). Typecheck clean, 344/344 tests.
+      **Reviewed and repaired** (adversarial + design passes): a reconnect's
+      `GET /api/puppy` and the stream could be applied to the store in arrival
+      order rather than freshness order, so `web/live.js` now applies a care view
+      through one `applyCareView`/`isNewer` guard — otherwise a flapping tunnel
+      could flip a finished household back to the wizard. The Pup screen's frame
+      guard now uses the same three-revision rule, and the wizard no longer warns
+      "someone else changed this" for the frame its own save produced (a real
+      concurrent edit still answers 409). The 415 content-type row is asserted
+      for both new routes, the refusal sentence is one shared constant instead of
+      two copies, the duplicated stale/conflict tail collapsed into
+      `outcomeOf()`, the two dead type aliases were dropped, and a caregiver the
+      household does not carry yet now writes as the household fallback with a
+      null id rather than a real id paired with "Household".
+      **Device check (2026-11-03):** first-run setup was completed on a phone
+      browser through a Cloudflare quick tunnel — timezone confirmed as
+      `Europe/Paris`, puppy saved (name, birthday, breed, sex, target weight) and
+      three meal slots stored — and the care view then reported
+      `setup.complete`. That is a real render of the wizard and a real save of
+      each of the three documents, which the suite cannot show.
+      **Not verified:** the PWA install / service-worker path on that origin, the
+      partner's device (P0-10), and the stored wall-clock slots across a DST
+      transition — §8.5's planner (P4-04) is where that happens.
+      **Carried out:** an unsaved wizard draft is lost when the caregiver
+      navigates away (the component remounts); it is not persisted and nothing
+      warns, which matters only if someone uses Today and Settings as two
+      editors at once. The agent cannot read or write the schedule yet;
+      `get_context` still lists meals as untracked, and the meal read/write tools
+      are **P2-04**/**P2-05** while the schedule change stays **P4-07**'s
+      approval. **P2-01** inherits `app.feeding` version 1 (slots, revision) and
+      adds the feed events as version 2.
 
 **Gate G1:** two caregivers sign in, edit the puppy profile, see each other live;
 the shared thread answers via a fake provider; a restart loses nothing.
@@ -2423,6 +2519,9 @@ the shared thread answers via a fake provider; a restart loses nothing.
 ### Phase 2 — Feeding and walks
 
 - [ ] **P2-01** `app.feeding` doc: slots, events, invariants, localDate/timezone.
+      Inherits P1-14's version-1 document (slots, `rev`, the shared slot parser)
+      and adds the feed events as version 2 with a `migrate` that keeps the
+      slots; the detail/decision-of-record is in P1-14's entry above.
 - [ ] **P2-02** Feed domain service: log normal feed, extra feed, conflict,
       activity, partner notification intent, `actionId`, `app.commands`
       idempotency, partial unique index. Same actionId is success; different

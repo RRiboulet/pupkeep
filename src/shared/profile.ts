@@ -1,16 +1,21 @@
-// The puppy profile as both sides see it (PLAN §8.1, §13.1).
+// The household's care state as the browser and the agent see it (PLAN §8.1,
+// §13.1). It started as the puppy profile (P1-11) and now also carries the
+// household's settings revision and its meal schedule (P1-14), because one SSE
+// frame has to carry every bit of committed state both caregivers watch
+// (§9.4): a second stream would mean a second connection cap, a second
+// reconnect story and a second way to be half-stale.
 //
 // `app.puppy` stores only facts a human typed: name, birthday (a *local* date),
-// breed, sex and a target weight. Age, the household roster and the revision
-// are derived or held elsewhere, so the browser never has to mask a timezone
-// itself and the agent cannot invent an age.
+// breed, sex and a target weight. Age, the household roster, first-run setup
+// and the revision are derived or held elsewhere, so the browser never has to
+// mask a timezone itself and the agent cannot invent an age.
 //
 // The patch parser is shared on purpose: the HTTP route and the agent tool are
 // two thin wrappers over one domain function, so they must accept exactly the
 // same shape. It validates shape only; "a birthday cannot be in the future" is
 // a clock question and the domain service answers it.
 
-import type { MemberProfile, PuppySex } from "./domain.ts";
+import type { MealSlot, MemberProfile, PuppySex } from "./domain.ts";
 
 /** Longest name/breed a profile accepts, in characters. */
 export const PROFILE_TEXT_LIMIT = 60;
@@ -37,9 +42,26 @@ export type PuppyAge = {
   label: string;
 };
 
+/** The three facts first-run setup must collect (P1-14, §13.1). */
+export type SetupStep = "timezone" | "puppy" | "meals";
+
 /**
- * What `GET /api/puppy`, `PATCH /api/puppy`, the `profile` SSE frame and the
- * `get_puppy` tool all return. `rev` is what the client echoes back on save.
+ * What first-run setup still needs. Derived by the server from the committed
+ * documents — never from a separate completion flag, which could say "done"
+ * about state a caregiver does not actually have.
+ */
+export type SetupState = {
+  complete: boolean;
+  /** In the order the wizard shows them; empty when complete. */
+  missing: SetupStep[];
+};
+
+/**
+ * What `GET /api/puppy` (the care-state read), the `PATCH` routes, the
+ * `profile` SSE frame and the `get_puppy`/`get_context` tools all share.
+ * `rev` is the puppy revision and what the profile form echoes back on save;
+ * `household.rev` and `meals.rev` are the revisions of the two other documents
+ * the wizard writes.
  */
 export type PuppyProfile = {
   rev: number;
@@ -48,8 +70,18 @@ export type PuppyProfile = {
   household: {
     name: string;
     timezone: string;
+    /** null until a caregiver confirmed the zone boot captured (P1-14). */
+    timezoneConfirmedAt: string | null;
+    /** The `app.household` revision, echoed by a timezone save. */
+    rev: number;
     members: MemberProfile[];
   };
+  meals: {
+    /** The `app.feeding` revision, echoed by a meal-schedule save. */
+    rev: number;
+    slots: MealSlot[];
+  };
+  setup: SetupState;
   /** The household-local date the age was computed for (`YYYY-MM-DD`). */
   today: string;
 };

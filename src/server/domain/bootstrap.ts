@@ -1,9 +1,11 @@
-// Bootstrapping the first four session documents (P1-08) and keeping them true.
+// Bootstrapping the session documents (P1-08) and keeping them true.
 //
 // The first boot is one commit: two ownerless conversations (the human-facing
-// thread and the hidden system thread) and the household, puppy, activity and
-// commands documents. A crash therefore leaves either all of it or none of it;
-// a second boot reads the household and only repairs what is missing.
+// thread and the hidden system thread) and the household, puppy, activity,
+// commands and feeding documents. A crash therefore leaves either all of it or
+// none of it; a second boot reads the household and only repairs what is
+// missing — including `app.feeding` for a database that predates P1-14, so an
+// upgraded phone gets the meal-slot wizard instead of a 503 on the care view.
 //
 // The household is the authority for display names after a profile exists.
 // `config.json` is the authority for auth identities and roles: it seeds a
@@ -12,20 +14,23 @@
 
 import type { Context } from "@earendil-works/chord";
 import type { ConversationId, Harness } from "@earendil-works/pi-durable";
-import type { Activity, Commands, Household, MemberProfile, Puppy } from "../../shared/domain.ts";
+import type { Activity, Commands, Feeding, Household, MemberProfile, Puppy } from "../../shared/domain.ts";
 import { activeMembers, reconcileMembers, type AppConfig, type Reconciliation } from "../config.ts";
 import {
   ActivityDoc,
   CommandsDoc,
+  FeedingDoc,
   HouseholdDoc,
   PuppyDoc,
   emptyActivity,
   emptyCommands,
+  emptyFeeding,
   emptyHousehold,
   emptyPuppy,
   isIanaZone,
   parseActivity,
   parseCommands,
+  parseFeeding,
   parseHousehold,
   parseMemberProfiles,
   parsePuppy,
@@ -118,6 +123,10 @@ function initialCommands(createdAt: string): Commands {
   return { ...emptyCommands(), createdAt };
 }
 
+function initialFeeding(createdAt: string): Feeding {
+  return { ...emptyFeeding(), createdAt };
+}
+
 async function clearSystemModel(harness: Harness, id: ConversationId, context: Context): Promise<boolean> {
   const conversation = await harness.conversation(id, context);
   if (!conversation) {
@@ -152,6 +161,9 @@ export async function bootstrapSession(
     if ((await harness.snapshot(CommandsDoc, context)) !== undefined) {
       throw new BootstrapError("app.household is missing but app.commands exists; refusing to reset it");
     }
+    if ((await harness.snapshot(FeedingDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.feeding exists; refusing to reset it");
+    }
 
     const createdAt = now().toISOString();
     const timezone = options.timezone ?? defaultTimezone();
@@ -168,6 +180,7 @@ export async function bootstrapSession(
       Object.assign(await tx.doc(PuppyDoc), initialPuppy(createdAt));
       Object.assign(await tx.doc(ActivityDoc), initialActivity(createdAt));
       Object.assign(await tx.doc(CommandsDoc), initialCommands(createdAt));
+      Object.assign(await tx.doc(FeedingDoc), initialFeeding(createdAt));
 
       return { shared: shared.id, system: system.id };
     }, context);
@@ -179,7 +192,7 @@ export async function bootstrapSession(
       profilesCreated: members.length,
       profilesRemoved: 0,
       nameDrift: [],
-      docsCreated: ["app.household", "app.puppy", "app.activity", "app.commands"],
+      docsCreated: ["app.household", "app.puppy", "app.activity", "app.commands", "app.feeding"],
       clearedSystemModel,
     };
   }
@@ -241,11 +254,17 @@ export async function bootstrapSession(
   if (commandsSnapshot !== undefined && !commands) {
     throw new BootstrapError("app.commands is not a shape this build understands; refusing to reset it");
   }
+  const feedingSnapshot = await harness.snapshot(FeedingDoc, context);
+  const feeding = feedingSnapshot === undefined ? undefined : parseFeeding(feedingSnapshot);
+  if (feedingSnapshot !== undefined && !feeding) {
+    throw new BootstrapError("app.feeding is not a shape this build understands; refusing to reset it");
+  }
 
   const docsCreated: string[] = [];
   if (!puppy) docsCreated.push("app.puppy");
   if (!activity) docsCreated.push("app.activity");
   if (!commands) docsCreated.push("app.commands");
+  if (!feeding) docsCreated.push("app.feeding");
 
   if (membersChanged || docsCreated.length > 0) {
     const createdAt = now().toISOString();
@@ -257,6 +276,7 @@ export async function bootstrapSession(
       if (!puppy) Object.assign(await tx.doc(PuppyDoc), initialPuppy(createdAt));
       if (!activity) Object.assign(await tx.doc(ActivityDoc), initialActivity(createdAt));
       if (!commands) Object.assign(await tx.doc(CommandsDoc), initialCommands(createdAt));
+      if (!feeding) Object.assign(await tx.doc(FeedingDoc), initialFeeding(createdAt));
     }, context);
   }
 

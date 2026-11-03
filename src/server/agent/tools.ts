@@ -28,9 +28,10 @@ import {
   parsePuppyPatch,
   type PuppyFields,
 } from "../../shared/profile.ts";
+import type { ActorRef } from "../domain/actor.ts";
 import { recentActivity } from "../domain/activity.ts";
 import { ActivityDoc, parseActivity, type DocStore } from "../domain/docs.ts";
-import { readProfile, updatePuppyProfile, type ProfileActor } from "../domain/profile.ts";
+import { readProfile, updatePuppyProfile } from "../domain/profile.ts";
 import { localTimeAt } from "../domain/time.ts";
 import { chatDataOf, labelFor } from "./thread.ts";
 
@@ -57,7 +58,7 @@ async function speakerIn(
   taskId: TaskId,
   conversationId: ConversationId,
   household: Household,
-): Promise<ProfileActor> {
+): Promise<ActorRef> {
   const task = await tx.task(taskId);
   const input = task?.input as { readonly kind?: unknown; readonly assistant?: unknown } | undefined;
   if (input?.kind !== "model" || typeof input.assistant !== "number") {
@@ -183,8 +184,8 @@ export function createProfileTools(): Extension<ToolRegistration> {
       const store: DocStore = api;
       // Read the memo before the commit: the memo API is a Session write, and a
       // Session call made inside a commit callback queues on the line it holds.
-      const cached = await api.memo<ProfileActor>(ACTOR_MEMO, context);
-      let resolved: ProfileActor | undefined;
+      const cached = await api.memo<ActorRef>(ACTOR_MEMO, context);
+      let resolved: ActorRef | undefined;
       const outcome = await updatePuppyProfile(store, context, {
         actor: (tx, household) => {
           if (cached) return Promise.resolve(cached);

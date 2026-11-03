@@ -27,7 +27,7 @@
 // Web Push event handlers (push, notificationclick) arrive with the push
 // phase; the worker stays quiet about notifications until then.
 
-const VERSION = "pupkeep-shell-v2";
+const VERSION = "pupkeep-shell-v3";
 const CACHE = `pupkeep-static-${VERSION}`;
 
 // Relative to the worker's scope. Only minimum shell assets: the document,
@@ -40,11 +40,13 @@ const PRECACHE = [
   "./client.js",
   "./live.js",
   "./store.js",
+  "./profile-form.js",
   "./views/today.js",
   "./views/calendar.js",
   "./views/pup.js",
   "./views/agent.js",
   "./views/settings.js",
+  "./views/setup.js",
   // Only what the shell imports. `preact-hooks.mjs` and `htm-preact.mjs` are
   // vendored and pinned (NOTICE.md) but not precached: they contain bare
   // preact/htm specifiers that resolve only through an import map, which this

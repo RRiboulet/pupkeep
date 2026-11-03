@@ -33,6 +33,10 @@ const launcher = createLauncher(options, {
   // already stopped its children and released the lock when this runs.
   onFatal: () => process.exit(1),
   termux: process.env.PUPKEEP_TERMUX === "1",
+  // The quick tunnel's hostname only exists once cloudflared has registered, and
+  // it changes on every restart. Without this the operator is left hunting for
+  // the URL the runbook tells them to open; the URL is public, not a secret.
+  onTunnelUrl: (url) => process.stderr.write(`pupkeep: quick tunnel at ${url}\n`),
 });
 
 let stopping = false;

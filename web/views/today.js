@@ -1,14 +1,27 @@
 // Today — the care surface the two caregivers live on. In this shell it is a
-// placeholder: P1-09 lands the shared thread and live state, feeding/walking
-// arrive in Phase 2. Keeping the view behind its own module so P1-09 swaps the
-// body without touching the shell.
+// placeholder: feeding and walking arrive in Phase 2. What P1-14 owns here is
+// the gate: a household that has not finished first-run setup never lands on
+// Today, because an empty puppy and an unchecked timezone would be the first
+// thing both caregivers see.
+//
+// The gate reads the store, not a local fetch: the shell re-renders the tree on
+// every `profile` frame, so the wizard disappears (and Today appears) the
+// moment the last setup save commits — on both caregivers' screens.
 
 import { h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
+import { getState } from "../store.js";
+import { Setup } from "./setup.js";
 
 const html = htm.bind(h);
 
 export function Today() {
+  const profile = getState().profile;
+  // No profile is "not read yet": show Today rather than flashing the wizard
+  // at a household that finished setup long ago.
+  if (profile?.setup?.complete === false) {
+    return h(Setup, {});
+  }
   return html`
     <section class="view" aria-labelledby="today-heading">
       <h1 id="today-heading">Today</h1>

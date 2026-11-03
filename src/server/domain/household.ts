@@ -1,5 +1,5 @@
-// The household document: one reader, and the one place that mirrors auth into
-// it (PLAN §7.1, §8.1).
+// The household document: one reader, the one place that mirrors auth into it,
+// and (P1-14) the one human-editable write — the timezone (PLAN §7.1, §8.1).
 //
 // `config.json` is the authority for auth identities and roles; `app.household`
 // holds the display profiles. Boot reconciles the two in full. A member created
@@ -20,10 +20,21 @@
 // hand), and boot repairs whatever a crash left behind.
 
 import type { Context } from "@earendil-works/chord";
+import type { JsonObject } from "@earendil-works/pi-durable";
 import type { Household, MemberProfile } from "../../shared/domain.ts";
 import { reconcileMembers, type AppConfig } from "../config.ts";
-import { HouseholdDoc, parseHousehold, parseMemberProfiles, type DocStore } from "./docs.ts";
-import { UnavailableError } from "./errors.ts";
+import { activityEntry, appendActivity } from "./activity.ts";
+import type { ActorResolver } from "./actor.ts";
+import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type WriteOutcome } from "./commands.ts";
+import {
+  ActivityDoc,
+  HouseholdDoc,
+  isIanaZone,
+  parseHousehold,
+  parseMemberProfiles,
+  type DocStore,
+} from "./docs.ts";
+import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
 
 /** `app.household` is missing or unreadable; retry once the server has booted. */
 export class HouseholdUnavailableError extends UnavailableError {
@@ -102,4 +113,79 @@ export async function syncHouseholdMembers(
     draft.members = profiles;
   }, context);
   return { created, removed };
+}
+
+// --- the household's one human-editable write (P1-14) -----------------------
+
+export type HouseholdWrite = {
+  /** Resolved inside the commit, against the same household the write reads. */
+  readonly actor: ActorResolver;
+  /** The HTTP `Idempotency-Key`, namespaced by the caller (§7.4's `actionId`). */
+  readonly actionId: string;
+  /** The household revision the caller read. */
+  readonly rev: number;
+  /** IANA zone; `Europe/Paris`, not `+01:00`. */
+  readonly timezone: string;
+  readonly now?: Date;
+};
+
+/**
+ * Set (or re-confirm) the household timezone. One commit: the zone, the
+ * confirmation instant, the bumped revision, the activity entry and the
+ * idempotency record land together or not at all.
+ *
+ * Confirming an unchanged zone still counts: the caregiver has checked the one
+ * value every future `localDate` derives from, and first-run setup is not
+ * complete until that has happened. Only the roster is exempt from `rev` —
+ * boot and an invite mirror members without revising the household.
+ */
+export async function updateHouseholdTimezone(
+  store: DocStore,
+  context: Context,
+  input: HouseholdWrite,
+): Promise<WriteOutcome> {
+  const now = input.now ?? new Date();
+  const request = { rev: input.rev, timezone: input.timezone } as JsonObject;
+  let outcome: CommandOutcome<{ rev: number; timezone: string }>;
+  try {
+    outcome = await runIdempotent(
+      { store, context },
+      { key: input.actionId, requestHash: requestHashOf(request), now },
+      async (tx) => {
+        // Inside the callback and after the idempotency lookup: a replay must
+        // not be re-judged, and a bad zone must not reach the document.
+        if (!isIanaZone(input.timezone)) {
+          throw new DomainConflictError(`"${input.timezone}" is not an IANA timezone`);
+        }
+        const draft = await tx.doc(HouseholdDoc);
+        const actor = await input.actor(tx, draft);
+        if (draft.rev !== input.rev) throw new StaleRevisionError("the household changed since it was read");
+
+        const before = draft.timezone;
+        draft.timezone = input.timezone;
+        draft.timezoneConfirmedAt = now.toISOString();
+        draft.rev = input.rev + 1;
+
+        const changed = before !== input.timezone;
+        appendActivity(
+          await tx.doc(ActivityDoc),
+          activityEntry({
+            kind: "household.timezone",
+            summary: changed
+              ? `${actor.label} changed the household timezone from ${before} to ${input.timezone}`
+              : `${actor.label} confirmed the household timezone (${input.timezone})`,
+            actorId: actor.id,
+            actorLabel: actor.label,
+            now,
+          }),
+        );
+        return { rev: draft.rev, timezone: input.timezone };
+      },
+    );
+  } catch (error) {
+    if (error instanceof StaleRevisionError) return "stale";
+    throw error;
+  }
+
+  return outcomeOf(outcome);
 }

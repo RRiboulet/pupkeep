@@ -122,10 +122,11 @@ harness. Then:
    The link signs the owner in and sets a session cookie — the token behind it
    stays valid until it is rotated, which is why it lives in a `0600` file and
    never in a log.
-2. Complete the first-run wizard — puppy profile, meal slots, and **the household
-   timezone** (P1-14). A wrong zone corrupts every `localDate` from that point
-   on. Until P1-14 lands, set the same fields from the **Pup** screen and check
-   the zone in Settings.
+2. Complete **first-run setup** — it replaces Today until it is done. Three
+   steps: confirm the household timezone, name the puppy, and set the meal
+   times. A wrong zone corrupts every `localDate` from that point on, so check
+   it against the clock on your phone. Both caregivers see the same checklist,
+   and either can finish it; everything stays editable in **Settings**.
 3. Settings → People → create a **one-time invite** for your partner.
 4. Your partner joins the same tailnet, opens `http://100.x.y.z:8787`, and signs
    in with the invite. That URL is private to the tailnet: no DNS, no domain, no
@@ -329,6 +330,14 @@ SSL_CERT_FILE=/etc/tls/cert.pem termux-chroot ~/.pupkeep/bin/cloudflared \
 `termux-chroot` supplies `/etc/resolv.conf`; `SSL_CERT_FILE` resolves *inside*
 the chroot to `$PREFIX/etc/tls/cert.pem`. Do not set the host path.
 
+The URL is ephemeral, so the launcher prints it when cloudflared registers it:
+
+```text
+pupkeep: quick tunnel at https://<random>.trycloudflare.com
+```
+
+That line is not a secret and is safe in `server.log`; the owner link is not.
+
 Then:
 
 1. **Sign in on the tunnel origin as the owner.** The quick tunnel cannot mint its
@@ -410,7 +419,7 @@ failure, not a fresh household.
 | The app is up but your partner cannot reach it | Check the tailnet address the launcher printed, that both devices are on the tailnet, and that Tailscale is connected on the host. |
 | `owner link` lost | `npm start -- --reissue-owner --access tailscale` from physical Termux, then read `~/.pupkeep/owner-link.txt`. |
 | `termux-sshd: Tailscale is not connected` | Tailscale is down, so there is no address to bind. Open the Tailscale app and run `scripts/termux-sshd.sh` again — it re-resolves and never listens on all interfaces. |
-| Empty Today / wrong dates | The household timezone is wrong. It is confirmed in the first-run wizard (P1-14, not landed yet); meanwhile fix it in Settings and re-check the meal slots. |
+| Empty Today / wrong dates | The household timezone is wrong. First-run setup confirms it, and Settings shows the same three steps; fix the zone there and re-check the meal times. |
 | Push stopped after a tunnel restart | Expected: the origin changed. Reopen the new URL and re-subscribe. |
 | Notifications stopped arriving on the partner's phone | ntfy app backgrounded/killed, topic rotated, or the host is offline. The in-app centre is still authoritative. |
 | Everything is slow / the phone is hot | Charging 24/7 plus the server. Use the phone's charge limit/bypass mode; keep it out of the sun (P5-05 measures this). |

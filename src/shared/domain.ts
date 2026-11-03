@@ -10,11 +10,16 @@
 
 import type { JsonValue } from "@earendil-works/chord";
 
-export const HOUSEHOLD_SCHEMA_VERSION = 1 as const;
+/**
+ * Version 2 adds `rev` and `timezoneConfirmedAt` (P1-14); a version-1 document
+ * migrates on read, so a phone that ran P1-08 keeps its household.
+ */
+export const HOUSEHOLD_SCHEMA_VERSION = 2 as const;
 /** Version 2 adds `rev` (P1-11); a version-1 document migrates on read. */
 export const PUPPY_SCHEMA_VERSION = 2 as const;
 export const ACTIVITY_SCHEMA_VERSION = 1 as const;
 export const COMMANDS_SCHEMA_VERSION = 1 as const;
+export const FEEDING_SCHEMA_VERSION = 1 as const;
 
 export type MemberProfile = { id: string; name: string };
 
@@ -27,9 +32,22 @@ export type HouseholdSettings = {
 
 export type Household = {
   schemaVersion: typeof HOUSEHOLD_SCHEMA_VERSION;
+  /**
+   * Optimistic-concurrency revision for the human-editable household fields
+   * (the timezone today, PLAN §7.4). The roster is *reconciled*, not revised:
+   * boot and an accepted invite mirror members without touching this, so a
+   * partner joining cannot invalidate a caregiver's wizard draft.
+   */
+  rev: number;
   name: string;
   /** IANA zone; every local date/time is derived in this zone. */
   timezone: string;
+  /**
+   * When a caregiver confirmed the zone (P1-14); `null` means bootstrap
+   * captured a default nobody has checked yet. Every future `localDate`
+   * depends on the zone, so first-run setup is not complete until it is set.
+   */
+  timezoneConfirmedAt: string | null;
   members: MemberProfile[];
   /** One human-facing Pi Durable conversation; numeric id. */
   conversationId: number;
@@ -37,6 +55,35 @@ export type Household = {
   systemConversationId: number;
   createdAt: string;
   settings: HouseholdSettings;
+};
+
+/**
+ * One meal the household serves at a wall-clock time (PLAN §8.3). The time is
+ * local to the household zone and never an instant: the same "07:00" moves
+ * with the household through a DST change, which is what a caregiver means.
+ */
+export type MealSlot = {
+  /** Stable across edits; P2's feed events reference it. */
+  id: string;
+  label: string;
+  /** `HH:MM` on the household's clock. */
+  timeLocal: string;
+  portion?: string;
+  /** An inactive slot stays in the schedule but is not expected today. */
+  active: boolean;
+};
+
+/**
+ * `app.feeding` as P1-14 creates it: the meal slots the wizard collects. P2-01
+ * adds the feed events and the write service, which moves the document to
+ * version 2 with a `migrate` that keeps the slots.
+ */
+export type Feeding = {
+  schemaVersion: typeof FEEDING_SCHEMA_VERSION;
+  /** Optimistic-concurrency revision, as on `app.puppy` and `app.household`. */
+  rev: number;
+  slots: MealSlot[];
+  createdAt: string;
 };
 
 export type PuppySex = "male" | "female";

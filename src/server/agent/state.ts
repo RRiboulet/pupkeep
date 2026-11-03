@@ -1,11 +1,12 @@
-// Live care state over the shared SSE stream (PLAN §9.4, §8.1).
+// Live care state over the shared SSE stream (PLAN §9.4, §8.1, §13.1).
 //
 // Both caregivers must see each other's profile edit without a reload, and the
 // PWA already holds one authenticated event stream for the thread. Rather than
 // add a second endpoint (and a second connection cap, and a second reconnect
 // story), this watches the committed documents and pushes one `profile` frame
-// through the bus that already exists. P2's meals and P3's growth join the same
-// frame as their views land.
+// through the bus that already exists. P1-14's timezone and meal schedule are
+// in the frame already; P2's feed events and P3's growth join it as their views
+// land.
 //
 // Two subtleties:
 //   * `subscribeCommits` listeners run synchronously on the commit path and may
@@ -21,8 +22,13 @@ import type { Logger } from "../log.ts";
 import { readProfile } from "../domain/profile.ts";
 import type { ThreadBus } from "./bus.ts";
 
-/** Document kinds whose change makes the profile frame stale. */
-const PROFILE_KINDS = new Set(["app.puppy", "app.household"]);
+/**
+ * Document kinds whose change makes the care frame stale. The frame is the
+ * whole care view (puppy, household, meal schedule), so each document that
+ * feeds it is listed here: a timezone confirmation or a meal-schedule save
+ * reaches the other caregiver exactly like a profile edit does.
+ */
+const PROFILE_KINDS = new Set(["app.puppy", "app.household", "app.feeding"]);
 
 export interface ProfileStateOptions {
   readonly harness: Harness;
