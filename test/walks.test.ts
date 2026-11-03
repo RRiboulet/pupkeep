@@ -25,7 +25,15 @@ import { ActivityDoc, CommandsDoc, WalksDoc, parseWalks } from "../src/server/do
 import { DomainConflictError } from "../src/server/domain/errors.ts";
 import { WalksUnavailableError, endWalk, readWalks, startWalk } from "../src/server/domain/walks.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
-import { WALK_STALE_AFTER_MS, openWalk, parseWalk, parseWalks as parseWalkList, walkIsStale } from "../src/shared/walks.ts";
+import {
+  WALK_OBSERVATION_RULE,
+  WALK_STALE_AFTER_MS,
+  openWalk,
+  parseWalk,
+  parseWalkList,
+  parseWalkObservations,
+  walkIsStale,
+} from "../src/shared/walks.ts";
 import type { Walk } from "../src/shared/domain.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -119,6 +127,16 @@ test("a walk is a server-timestamped record, and only one walk can be open", () 
   assert.equal(parseWalk({ ...walk(), endActionId: "http:end-1" }), undefined, "an open walk carries no end fields");
 
   assert.deepEqual(parseWalkList([walk(), ended]), [walk(), ended]);
+  // The shared opaque-id charset is enforced, not just the length.
+  assert.equal(parseWalk({ ...walk(), id: "walk 1 with spaces" }), undefined);
+  assert.equal(parseWalk({ ...walk(), startedActionId: "http:k\n1" }), undefined);
+
+  assert.deepEqual(parseWalkObservations({ noteTypo: 1 }), undefined, "an unknown observation is refused, not dropped");
+  assert.deepEqual(parseWalkObservations({ pee: 21 }), undefined);
+  assert.deepEqual(parseWalkObservations({ notes: "two\nlines" }), undefined, "observations are one line");
+  assert.deepEqual(parseWalkObservations({ dogsMet: "  a beagle  ", pee: 0 }), { dogsMet: "a beagle", pee: 0 });
+  assert.deepEqual(parseWalkObservations(undefined), {}, "nothing noted is an empty observation, not invalid");
+
   assert.equal(parseWalkList([walk(), walk()]), undefined, "a repeated id is refused");
   assert.equal(
     parseWalkList([walk(), { ...walk({ id: "walk-2" }), endedAt: undefined }]),
@@ -251,6 +269,16 @@ test("a replay is success, and a different action cannot end an ended walk", asy
     assert.equal(again.kind, "ended-already", "someone else's end is a conflict carrying the record");
     assert.equal(again.kind === "ended-already" ? again.walk.endedBy : undefined, "owner");
 
+    // A retry of the same observations, spelled with padding and empty strings
+    // instead of omitted fields, is the same request (§7.3).
+    const normalised = await endWalk(harness, context, {
+      actor: alex,
+      actionId: "http:end-1",
+      observations: { mood: "  happy  ", dogsMet: "", notes: "   " },
+      now: new Date(NOON.getTime() + 2 * HOUR + 60_000),
+    });
+    assert.equal(normalised.kind, "replayed", "padding is not a different request");
+
     const conflict = await endWalk(harness, context, {
       actor: alex,
       actionId: "http:end-1",
@@ -259,8 +287,18 @@ test("a replay is success, and a different action cannot end an ended walk", asy
     });
     assert.equal(conflict.kind, "key-conflict", "one key, one request");
 
+    // With no id, a lost race (or a retry past the key's TTL) explains itself
+    // with the record instead of "no open walk" (§7.3: who/when).
+    // An explicit id that does not exist says so, rather than blaming the
+    // absence of an open walk.
+    const unknown = await endWalk(harness, context, { actor: sam, actionId: "http:end-9", walkId: "walk-nope", now: NOON });
+    assert.equal(unknown.kind, "no-open");
+    assert.equal(unknown.kind === "no-open" ? unknown.message : "", "there is no walk with that id");
+
     const nothing = await endWalk(harness, context, { actor: sam, actionId: "http:end-3", now: NOON });
-    assert.equal(nothing.kind, "no-open");
+    assert.equal(nothing.kind, "ended-already");
+    assert.equal(nothing.kind === "ended-already" ? nothing.walk.endedBy : undefined, "owner");
+    assert.match(nothing.kind === "ended-already" ? nothing.message : "", /"Alex" already ended this walk at/);
     assert.deepEqual(await activity(harness), ["Alex started a walk", "Alex ended a walk (60 minutes)"]);
   });
 });
@@ -284,13 +322,11 @@ test("a missing or malformed walk document is unavailable, not an empty walk", a
     }, context);
     await assert.rejects(readWalks(harness, context), WalksUnavailableError);
     // Boot is the real gate for a malformed document (asserted below); a reader
-    // refuses it instead of answering "no walks". The service's own list
-    // backstop is pinned by the shared parser test above.
-    assert.equal(parseWalkList([{ id: "walk-1" }]), undefined);
+    // refuses it instead of answering "no walks".
   });
 });
 
-test("a walk survives a process restart, and the other caregiver can end it", async () => {
+test("a walk survives a reopen of the database, and the other caregiver can end it", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pupkeep-walks-restart-"));
   const models = createModels();
   models.setProvider(fauxProvider().provider);
@@ -308,7 +344,10 @@ test("a walk survives a process restart, and the other caregiver can end it", as
       assert.equal(outcome.kind, "started");
       started = outcome.kind === "started" ? outcome.walk : (undefined as never);
     } finally {
-      // A process kill is a close without an end: the commit is already durable.
+      // A restart, not a kill drill: `close` is graceful, and the harness-level
+      // kill matrix is P5-01's. What this pins is that the open walk lives in
+      // the database rather than the process, which is the P2-06 durability
+      // claim; the SIGKILL variant was verified by hand during review.
       await first.harness.close(context);
     }
 
@@ -374,4 +413,62 @@ test("boot creates app.walks for a database that predates it and refuses a malfo
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("an invalid observation is refused with the one rule, before any write", async () => {
+  await withWalksHarness(async ({ harness }) => {
+    await startWalk(harness, context, { actor: alex, actionId: "http:start-1", now: NOON });
+    for (const observations of [{ pee: 21 }, { notes: "two\nlines" }, { dog: "a beagle" }, { mood: "x".repeat(41) }]) {
+      await assert.rejects(
+        endWalk(harness, context, { actor: sam, actionId: "http:end-bad", observations, now: NOON }),
+        (error) => error instanceof DomainConflictError && error.message === WALK_OBSERVATION_RULE,
+      );
+    }
+    assert.equal((await readWalks(harness, context)).walks[0]?.endedAt, undefined, "the walk is still open");
+    assert.equal((await activity(harness)).length, 1, "and no activity was written");
+  });
+});
+
+test("two caregivers acting at once still produce one walk and one end", async () => {
+  await withWalksHarness(async ({ harness }) => {
+    const [first, second] = await Promise.all([
+      startWalk(harness, context, { actor: alex, actionId: "http:start-a", now: NOON }),
+      startWalk(harness, context, { actor: sam, actionId: "http:start-b", now: NOON }),
+    ]);
+    const kinds = [first.kind, second.kind].sort();
+    assert.deepEqual(kinds, ["open", "started"], "exactly one start wins");
+    assert.equal((await readWalks(harness, context)).walks.length, 1, "one open walk, never two");
+
+    const [end1, end2] = await Promise.all([
+      endWalk(harness, context, {
+        actor: alex,
+        actionId: "http:end-a",
+        observations: { mood: "happy" },
+        now: new Date(NOON.getTime() + 30 * 60_000),
+      }),
+      endWalk(harness, context, {
+        actor: sam,
+        actionId: "http:end-b",
+        observations: { mood: "tired" },
+        now: new Date(NOON.getTime() + 30 * 60_000),
+      }),
+    ]);
+    assert.deepEqual([end1.kind, end2.kind].sort(), ["ended", "ended-already"], "one end wins, one learns who");
+    const loser = [end1, end2].find((outcome) => outcome.kind === "ended-already");
+    assert.ok(loser && loser.kind === "ended-already");
+    assert.match(loser.message, /already ended this walk at/, "the loser gets who/when, not silence");
+  });
+});
+
+test("a start replayed after the other caregiver ended it returns the current record", async () => {
+  await withWalksHarness(async ({ harness }) => {
+    const started = await startWalk(harness, context, { actor: alex, actionId: "http:start-1", now: NOON });
+    assert.equal(started.kind, "started");
+    await endWalk(harness, context, { actor: sam, actionId: "http:end-1", now: new Date(NOON.getTime() + HOUR) });
+
+    const replay = await startWalk(harness, context, { actor: alex, actionId: "http:start-1", now: NOON });
+    assert.equal(replay.kind, "replayed", "a lost start response replays");
+    assert.ok(replay.kind === "replayed" && replay.walk.endedAt, "and reports the walk as it is now, ended");
+    assert.equal((await readWalks(harness, context)).walks.length, 1, "no second walk was appended");
+  });
 });

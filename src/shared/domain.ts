@@ -152,7 +152,10 @@ export type Walk = {
   id: string;
   /** UTC instant, ISO with a trailing `Z`; the server's clock. */
   startedAt: string;
-  /** Absent while the walk is open. */
+  /**
+   * Absent while the walk is open. When present, `endActionId`, `endedBy` and
+   * `endedByLabel` are required with it: the parser refuses a half-ended record.
+   */
   endedAt?: string;
   /** HTTP idempotency key or the agent tool's task id (§7.3). */
   startedActionId: string;

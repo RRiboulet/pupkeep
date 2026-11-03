@@ -52,7 +52,7 @@ import {
 } from "../../shared/domain.ts";
 import { parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
 import { parseNotificationIntents } from "../../shared/notifications.ts";
-import { parseWalks as parseWalkList } from "../../shared/walks.ts";
+import { parseWalkList } from "../../shared/walks.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
 
 /**

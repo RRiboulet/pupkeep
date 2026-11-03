@@ -2884,38 +2884,61 @@ the shared thread answers via a fake provider; a restart loses nothing.
       one refuses boot), and `startWalk`/`endWalk`/`readWalks` in
       `src/server/domain/walks.ts`. Decisions: (1) **one open walk is a document
       invariant** — the parser refuses a second open record and a repeated id,
-      and the service answers a start with a typed `WalkOpenError` carrying the
-      blocking walk (409 in P2-07), flagged `stale` once §8.5's eight hours have
-      passed; a stale walk stays blocking, so no auto-close ever rewrites a real
-      timestamp. (2) **timestamps are the server's** (`now` injected by tests),
+      and the service answers a start with an `open`/`stale` outcome carrying the
+      blocking walk (409 in P2-07) and the one caregiver sentence
+      (`walkOpenMessage`), flagged `stale` once §8.5's eight hours have passed; a
+      stale walk stays blocking, so no auto-close ever rewrites a real timestamp.
+      The refusals themselves are internal sentinels, not exported errors: the
+      route and the tool read the outcome, never a class. (2) **timestamps are the server's** (`now` injected by tests),
       `endedAt` must not precede `startedAt`, and the activity summary's duration
       is derived from the two stored instants at end time. (3) **two action ids
       per record**: a repeated start replays (returning the *current* record if
       the other caregiver ended it meanwhile, not a stale open copy), a different
-      action on an ended walk returns `ended-already` with the record, and
-      ending with no open walk is `no-open` — all 409s for P2-07. (4) **the
-      service validates the list before storing** (the same `parseWalks` boot
-      uses) and trims observations; counts above 20 or text past its cap are
-      refused by the parser rather than truncated. (5) **discard is P2-07's
+      action on an ended walk returns `ended-already` with the record and
+      who/when, and a no-id end that finds the walk already closed falls back to
+      the most recently ended walk so the loser of a race is told who ended it —
+      §7.3's "same as end-walk" rule, not "no open walk". An explicit id that
+      does not exist says so. (4) **the
+      service validates the list before storing** (the same `parseWalkList` boot
+      uses) and normalises observations once — trimmed, empty as absent, unknown
+      keys refused — *before* the request hash, so a retry spelled with padding
+      or `""` replays instead of answering a terminal key conflict; counts above
+      20 or text past its cap are refused with `WALK_OBSERVATION_RULE` naming
+      the rule, not truncated, and a backward clock gets its own sentence. (5) **discard is P2-07's
       decision**, not silently added here: the walk record has no discard field,
       and ending is the only resolution this task offers. (6) The §9.2 fence is
       the feed document's: a null actor id always travels with the household
       label; the writer never pairs a real id with it.
-      **Verified:** 10 tests in `test/walks.test.ts` — the shape (server
-      timestamps, an end never before a start, one open walk, repeated ids,
-      observation bounds, the household pairing), the eight-hour stale predicate
-      (and that an ended walk is never stale), a start as one commit (record,
-      activity, command key), a second start refused with the open walk and a
-      stale start flagged, an end recording observations and a 35-minute
-      duration for the other caregiver, replay/key-conflict/ended-already/no-open,
-      the household fallback with a null id, an unreadable document refused,
-      **a walk opened before a process restart still open after it** and ended by
-      the other caregiver, and boot creating `app.walks` for an older database
-      while refusing a malformed one. The suite is 423/423.
+      **Verified:** 13 tests in `test/walks.test.ts` — the shape (server
+      timestamps, an end never before a start, one open walk, repeated ids, the
+      opaque-id charset, observation bounds and unknown keys, the household
+      pairing), the eight-hour stale predicate (and that an ended walk is never
+      stale), a start as one commit (record, activity, command key), a second
+      start refused with the open walk and a stale start flagged, an end
+      recording observations and a 35-minute duration for the other caregiver,
+      replay/key-conflict/ended-already/no-open, a normalised retry replaying
+      (padding and `""` are the same request), invalid observations refused with
+      the one rule before any write, **two caregivers acting at once producing
+      one walk and one end** (the loser learns who ended it), a start replayed
+      after the other caregiver ended it returning the current record, the
+      household fallback with a null id, an unreadable document refused, a walk
+      opened before a database reopen still open after it and ended by the other
+      caregiver, and boot creating `app.walks` for an older database while
+      refusing a malformed one. The suite is 426/426.
       **Not verified:** nothing outside the domain exists yet — the HTTP routes,
       the agent tools and the walk UI are P2-07; no browser or phone has shown an
       open walk; the activity wording ("ended a walk (35 minutes)") is this
-      build's copy.
+      build's copy; the restart test closes the harness gracefully (a hard
+      `SIGKILL` was verified by hand during review, and the kill matrix is
+      P5-01's).
+      **Carried out:** P2-07's HTTP end form must pass the `walkId` it rendered
+      (the omitted form is for the agent's "end the walk"); its 200 body should
+      carry `replayed`; the discard path is still P2-07's decision (this task
+      only ends); and history is never pruned while both writers replace the
+      whole list, so P2-08 should measure the per-commit delta and set §8.5's
+      archive threshold — the refactor that table-drives bootstrap's
+      create/repair/refuse path should also land before P3-01 adds four more
+      documents.
 - [ ] **P2-07** Walk HTTP + agent tools + UI: start, live timer, end form,
       stale-walk banner with end/discard; new start blocked until resolved.
 - [ ] **P2-08** Tests: same/different actionId, concurrent feed, feed race with

@@ -4,10 +4,11 @@
 //   * `startWalk` appends one record and returns it. At most one walk is open;
 //     starting while one is open is a conflict that carries the open walk, and
 //     once that walk is §8.5-stale the conflict says so — a new start stays
-//     blocked until the walk is ended (or P2-07 offers a discard).
-//   * `endWalk` closes the open walk with the caregiver's observations. Ending
-//     an ended walk is a conflict that carries the record, and the same action
-//     id replays as success.
+//     blocked until the walk is ended (the discard path is P2-07's decision).
+//   * `endWalk` closes the walk with the caregiver's observations. The same
+//     action id replays as success; a *different* action on an ended walk is a
+//     conflict carrying the record, so the loser of a race learns who ended it
+//     and when instead of being told "nothing is open" (§7.3, §9.1).
 //
 // Both timestamps come from the server clock (`now`), never from a client: a
 // phone's clock skew must not reorder two caregivers' walks (§8.4). A walk needs
@@ -15,12 +16,28 @@
 //
 // Each commit writes the walk, one activity entry and the idempotency record; a
 // crash at any boundary leaves either all of it or none.
+//
+// The refusals below are internal sentinels, thrown inside the commit so the key
+// and the activity entry roll back, then translated to outcomes. The sentences a
+// caregiver reads come from `shared/walks.ts`, so the route and the tool (P2-07)
+// cannot drift.
 
 import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import type { Walk, Walks } from "../../shared/domain.ts";
-import { WALK_STALE_AFTER_MS, parseWalks as parseWalkList, walkIsStale } from "../../shared/walks.ts";
+import {
+  WALK_NONE_OPEN_MESSAGE,
+  WALK_OBSERVATION_RULE,
+  lastEndedWalk,
+  openWalk,
+  parseWalkList,
+  parseWalkObservations,
+  walkEndedMessage,
+  walkIsStale,
+  walkOpenMessage,
+  type WalkObservations,
+} from "../../shared/walks.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
 import { requestHashOf, runIdempotent } from "./commands.ts";
@@ -36,39 +53,34 @@ export class WalksUnavailableError extends UnavailableError {
 }
 
 /** An open walk blocks another start; the caller answers 409 with it. */
-export class WalkOpenError extends DomainConflictError {
+class WalkOpenRefusal extends DomainConflictError {
   readonly walk: Walk;
-  /** §8.5: the blocking walk has been open past its window. */
   readonly stale: boolean;
 
   constructor(walk: Walk, stale: boolean) {
-    super(
-      stale
-        ? `${walk.startedByLabel} left a walk open over ${WALK_STALE_AFTER_MS / 3_600_000} hours ago; end it before starting another`
-        : `${walk.startedByLabel} is already walking; end that walk before starting another`,
-    );
-    this.name = "WalkOpenError";
+    super(walkOpenMessage(walk, stale));
+    this.name = "WalkOpenRefusal";
     this.walk = walk;
     this.stale = stale;
   }
 }
 
-/** There is no open walk (or no walk with the given id) to end. */
-export class WalkMissingError extends DomainConflictError {
-  constructor() {
-    super("there is no open walk to end");
-    this.name = "WalkMissingError";
-  }
-}
-
-/** A different action tried to end a walk that is already closed. */
-export class WalkEndedError extends DomainConflictError {
+/** An end found a walk that is already closed; the caller answers 409 with it. */
+class WalkEndedRefusal extends DomainConflictError {
   readonly walk: Walk;
 
   constructor(walk: Walk) {
-    super(`${walk.endedByLabel ?? walk.startedByLabel} already ended this walk`);
-    this.name = "WalkEndedError";
+    super(walkEndedMessage(walk));
+    this.name = "WalkEndedRefusal";
     this.walk = walk;
+  }
+}
+
+/** Nothing to end, and no ended walk to explain it. */
+class WalkMissingRefusal extends DomainConflictError {
+  constructor(message = WALK_NONE_OPEN_MESSAGE) {
+    super(message);
+    this.name = "WalkMissingRefusal";
   }
 }
 
@@ -81,25 +93,28 @@ export async function readWalks(store: DocStore, context: Context): Promise<Walk
 
 export type WalkStart = {
   readonly actor: ActorResolver;
-  /** HTTP `Idempotency-Key` or the agent tool's task id, namespaced (§7.3). */
+  /**
+   * HTTP `Idempotency-Key` or the agent tool's task id, namespaced (§7.3). The
+   * caller validates it (`isCommandKey` / `tool:<taskId>`): an unstorable key is
+   * a caller bug and fails `runIdempotent` loudly rather than as a 409.
+   */
   readonly actionId: string;
   readonly now?: Date;
-  /** Test seam for the record id. */
-  readonly walkId?: string;
 };
 
 export type WalkStartOutcome =
   | { kind: "started" | "replayed"; walk: Walk }
   /** An open walk exists and is not stale: the caller answers 409 with it. */
-  | { kind: "open"; walk: Walk }
+  | { kind: "open"; walk: Walk; message: string }
   /** An open walk exists past §8.5's window: 409 until it is resolved. */
-  | { kind: "stale"; walk: Walk }
+  | { kind: "stale"; walk: Walk; message: string }
   | { kind: "key-conflict" };
 
 /**
  * Start a walk. The open-walk check runs inside the callback, after the
  * idempotency lookup, so a replay is never re-judged: a start whose response was
- * lost returns the recorded walk even after the other caregiver ended it.
+ * lost returns the *current* record — ended, if the other caregiver closed it
+ * meanwhile — rather than a stale open copy.
  */
 export async function startWalk(store: DocStore, context: Context, input: WalkStart): Promise<WalkStartOutcome> {
   const now = input.now ?? new Date();
@@ -114,14 +129,14 @@ export async function startWalk(store: DocStore, context: Context, input: WalkSt
         const actor = await input.actor(tx, await tx.doc(HouseholdDoc));
         const walks = await tx.doc(WalksDoc);
 
-        const open = walks.walks.find((walk) => walk.endedAt === undefined);
+        const open = openWalk(walks.walks);
         if (open) {
-          // A draft copy: the error outlives the rolled-back commit.
-          throw new WalkOpenError({ ...open }, walkIsStale(open, now));
+          // A copy: the error outlives the rolled-back commit.
+          throw new WalkOpenRefusal({ ...open }, walkIsStale(open, now));
         }
 
         const walk: Walk = {
-          id: input.walkId ?? randomUUID(),
+          id: randomUUID(),
           startedAt: now.toISOString(),
           startedActionId: input.actionId,
           startedBy: actor.id,
@@ -158,25 +173,24 @@ export async function startWalk(store: DocStore, context: Context, input: WalkSt
     }
     return { kind: "started", walk: recorded.walk };
   } catch (error) {
-    if (error instanceof WalkOpenError) {
-      return error.stale ? { kind: "stale", walk: error.walk } : { kind: "open", walk: error.walk };
+    if (error instanceof WalkOpenRefusal) {
+      return error.stale
+        ? { kind: "stale", walk: error.walk, message: error.message }
+        : { kind: "open", walk: error.walk, message: error.message };
     }
     throw error;
   }
 }
 
-export type WalkObservations = {
-  readonly pee?: number;
-  readonly poop?: number;
-  readonly dogsMet?: string;
-  readonly mood?: string;
-  readonly notes?: string;
-};
-
 export type WalkEnd = {
   readonly actor: ActorResolver;
   readonly actionId: string;
-  /** Omit to end the open walk; a stale banner targets one explicitly. */
+  /**
+   * The walk the form saw. **P2-07's end form must pass it**: with no id the
+   * service ends whatever is open now, which is right for the agent tool
+   * ("end the walk") but would silently attach a stale form's observations to a
+   * walk started since. Omit only for the agent/tool path.
+   */
   readonly walkId?: string;
   readonly observations?: WalkObservations;
   readonly now?: Date;
@@ -184,10 +198,10 @@ export type WalkEnd = {
 
 export type WalkEndOutcome =
   | { kind: "ended" | "replayed"; walk: Walk }
-  /** A different action tried to end a walk that is already closed. */
-  | { kind: "ended-already"; walk: Walk }
-  /** There is no open walk (or no walk with the given id) to end. */
-  | { kind: "no-open" }
+  /** A different action tried to end an already-closed walk (§7.3: who/when). */
+  | { kind: "ended-already"; walk: Walk; message: string }
+  /** There is no open walk (and no ended one to explain it). */
+  | { kind: "no-open"; message: string }
   | { kind: "key-conflict" };
 
 function durationMinutes(walk: Walk): number {
@@ -195,21 +209,20 @@ function durationMinutes(walk: Walk): number {
   return Math.max(0, Math.round(ms / 60_000));
 }
 
-/** Trimmed free text; an empty observation is absent, not an empty string. */
-function observationText(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim();
-  return trimmed === "" ? undefined : trimmed;
-}
-
 /**
- * End a walk. The same action id replays as success; a *different* action on an
- * ended walk is a conflict carrying the record; a stale walk can be ended (that
- * is the resolution) but never auto-closed.
+ * End a walk. The same action id replays as success — including a retry whose
+ * observations were padded or spelled as `""` rather than omitted, because the
+ * hash is built from the normalised observations. A *different* action on an
+ * ended walk is a conflict carrying the record; with no `walkId`, the most
+ * recent ended walk explains a lost race instead of answering "nothing is open".
  */
 export async function endWalk(store: DocStore, context: Context, input: WalkEnd): Promise<WalkEndOutcome> {
+  // Normalised before hashing and before the commit, so a retry of the same
+  // observations is the same request (§7.3).
+  const observations = parseWalkObservations(input.observations);
+  if (!observations) throw new DomainConflictError(WALK_OBSERVATION_RULE);
+
   const now = input.now ?? new Date();
-  const observations = input.observations ?? {};
   const request = {
     walkId: input.walkId ?? null,
     pee: observations.pee ?? null,
@@ -229,25 +242,33 @@ export async function endWalk(store: DocStore, context: Context, input: WalkEnd)
 
         const walk =
           input.walkId === undefined
-            ? walks.walks.find((candidate) => candidate.endedAt === undefined)
+            ? openWalk(walks.walks)
             : walks.walks.find((candidate) => candidate.id === input.walkId);
-        if (!walk) throw new WalkMissingError();
-        if (walk.endedAt !== undefined) throw new WalkEndedError({ ...walk });
+        if (!walk) {
+          // A lost no-id end race: explain it with the record (§7.3), not with
+          // "no open walk" to a caregiver whose partner just ended it.
+          const recent = input.walkId === undefined ? lastEndedWalk(walks.walks) : undefined;
+          if (recent) throw new WalkEndedRefusal({ ...recent });
+          throw new WalkMissingRefusal(
+            input.walkId === undefined ? WALK_NONE_OPEN_MESSAGE : "there is no walk with that id",
+          );
+        }
+        if (walk.endedAt !== undefined) throw new WalkEndedRefusal({ ...walk });
+        if (now.getTime() < Date.parse(walk.startedAt)) {
+          throw new DomainConflictError(
+            "the server clock is behind this walk's start; end it once the clock is corrected",
+          );
+        }
 
         walk.endedAt = now.toISOString();
         walk.endActionId = input.actionId;
         walk.endedBy = actor.id;
         walk.endedByLabel = actor.label;
-        const pee = observations.pee;
-        if (pee !== undefined) walk.pee = pee;
-        const poop = observations.poop;
-        if (poop !== undefined) walk.poop = poop;
-        const dogsMet = observationText(observations.dogsMet);
-        if (dogsMet !== undefined) walk.dogsMet = dogsMet;
-        const mood = observationText(observations.mood);
-        if (mood !== undefined) walk.mood = mood;
-        const notes = observationText(observations.notes);
-        if (notes !== undefined) walk.notes = notes;
+        if (observations.pee !== undefined) walk.pee = observations.pee;
+        if (observations.poop !== undefined) walk.poop = observations.poop;
+        if (observations.dogsMet !== undefined) walk.dogsMet = observations.dogsMet;
+        if (observations.mood !== undefined) walk.mood = observations.mood;
+        if (observations.notes !== undefined) walk.notes = observations.notes;
 
         const minutes = durationMinutes(walk);
         const draft = walks.walks.map((candidate) => (candidate.id === walk.id ? { ...walk } : candidate));
@@ -273,8 +294,10 @@ export async function endWalk(store: DocStore, context: Context, input: WalkEnd)
     const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as { walk: Walk };
     return { kind: outcome.kind === "replayed" ? "replayed" : "ended", walk: recorded.walk };
   } catch (error) {
-    if (error instanceof WalkEndedError) return { kind: "ended-already", walk: error.walk };
-    if (error instanceof WalkMissingError) return { kind: "no-open" };
+    if (error instanceof WalkEndedRefusal) {
+      return { kind: "ended-already", walk: error.walk, message: error.message };
+    }
+    if (error instanceof WalkMissingRefusal) return { kind: "no-open", message: error.message };
     throw error;
   }
 }
