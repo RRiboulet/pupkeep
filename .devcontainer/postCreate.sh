@@ -50,6 +50,21 @@ sudo git config --system credential.https://gist.github.com.helper "!${GH_BIN} a
 # used by pi and its tmux-backed subagents; enables modified Enter keys.
 cp "$REPO/.devcontainer/shell/tmux.conf" /home/vscode/.tmux.conf
 
+# --- pi configuration -----------------------------------------------------
+# Use the same kokomi theme as my-agent-setup/analytics-agent so pi looks
+# identical across projects. Select it WITHOUT clobbering the rest of the
+# user's settings: the pi-config volume persists across rebuilds.
+mkdir -p /home/vscode/.pi/agent/themes
+cp "$REPO/.devcontainer/pi/themes/kokomi-theme.json" /home/vscode/.pi/agent/themes/kokomi-theme.json
+SETTINGS=/home/vscode/.pi/agent/settings.json
+if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+  jq --arg t kokomi-theme '.theme = $t' "$SETTINGS" > "$SETTINGS.tmp" \
+    && mv "$SETTINGS.tmp" "$SETTINGS" \
+    || echo '{"theme": "kokomi-theme"}' > "$SETTINGS"
+else
+  echo '{"theme": "kokomi-theme"}' > "$SETTINGS"
+fi
+
 # --- .env ------------------------------------------------------------------
 # Copy only when absent: a developer's local keys and overrides must survive a
 # rebuild. `.env` is gitignored; `.env.example` is the committed template.

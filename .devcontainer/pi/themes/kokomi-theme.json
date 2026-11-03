@@ -1,0 +1,82 @@
+{
+  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "name": "kokomi",
+  "vars": {
+    "oceanBlue": "#3d5a99",
+    "deepNavy": "#2a3a66",
+    "lavender": "#a89bd4",
+    "pearlWhite": "#e8ecf5",
+    "coral": "#e8a0a0",
+    "seafoam": "#7ec8c8",
+    "muted": 103,
+    "dim": 60
+  },
+  "colors": {
+    "accent": "oceanBlue",
+    "border": "oceanBlue",
+    "borderAccent": "seafoam",
+    "borderMuted": "muted",
+    "success": "#7ecba1",
+    "error": "coral",
+    "warning": "#e0c17a",
+    "muted": "muted",
+    "dim": "dim",
+    "text": "",
+    "thinkingText": "muted",
+
+    "selectedBg": "#20263d",
+    "scrollbarThumb": "#3a4468",
+    "searchMatchBg": "#3d4a70",
+    "searchMatchText": "pearlWhite",
+    "userMessageBg": "#1e2540",
+    "userMessageText": "pearlWhite",
+    "customMessageBg": "#242c4a",
+    "customMessageText": "pearlWhite",
+    "customMessageLabel": "seafoam",
+    "toolPendingBg": "#1a1e33",
+    "toolSuccessBg": "#1a2b28",
+    "toolErrorBg": "#2e1e26",
+    "toolTitle": "lavender",
+    "toolOutput": "",
+
+    "mdHeading": "seafoam",
+    "mdLink": "oceanBlue",
+    "mdLinkUrl": "muted",
+    "mdCode": "lavender",
+    "mdCodeBlock": "",
+    "mdCodeBlockBorder": "muted",
+    "mdQuote": "muted",
+    "mdQuoteBorder": "oceanBlue",
+    "mdHr": "muted",
+    "mdListBullet": "seafoam",
+
+    "toolDiffAdded": "#7ecba1",
+    "toolDiffRemoved": "coral",
+    "toolDiffContext": "muted",
+
+    "syntaxComment": "dim",
+    "syntaxKeyword": "oceanBlue",
+    "syntaxFunction": "seafoam",
+    "syntaxVariable": "coral",
+    "syntaxString": "#7ecba1",
+    "syntaxNumber": "lavender",
+    "syntaxType": "seafoam",
+    "syntaxOperator": "pearlWhite",
+    "syntaxPunctuation": "muted",
+
+    "thinkingOff": "muted",
+    "thinkingMinimal": "oceanBlue",
+    "thinkingLow": "seafoam",
+    "thinkingMedium": "lavender",
+    "thinkingHigh": "coral",
+    "thinkingXhigh": "#e0c17a",
+    "thinkingMax": "#ff9ec4",
+
+    "bashMode": "coral"
+  },
+  "export": {
+    "pageBg": "#161a2c",
+    "cardBg": "#1e2540",
+    "infoBg": "#242c4a"
+  }
+}
