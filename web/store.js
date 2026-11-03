@@ -31,6 +31,13 @@ const state = {
    * frame; a view fetches it itself and live updates arrive from `live.js`.
    */
   profile: null,
+  /**
+   * How many care views have been applied (P2-05). A feed does not bump any
+   * document revision, so a frame can be value-identical to the one before it:
+   * this counter, not the profile object, is what tells a view "a commit
+   * happened, re-read if you depend on one the frame does not carry".
+   */
+  careSeq: 0,
 };
 
 const listeners = new Set();

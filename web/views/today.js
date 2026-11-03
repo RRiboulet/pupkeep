@@ -1,39 +1,443 @@
-// Today — the care surface the two caregivers live on. In this shell it is a
-// placeholder: feeding and walking arrive in Phase 2. What P1-14 owns here is
-// the gate: a household that has not finished first-run setup never lands on
-// Today, because an empty puppy and an unchecked timezone would be the first
-// thing both caregivers see.
+// Today — the care surface the two caregivers live on (PLAN §13.1).
 //
-// The gate reads the store, not a local fetch: the shell re-renders the tree on
-// every `profile` frame, so the wizard disappears (and Today appears) the
-// moment the last setup save commits — on both caregivers' screens.
+// This build owns the meals card: each active slot as fed, pending or overdue,
+// who fed it and when, a "Mark fed" action that cannot fire twice, and an
+// explicit "Extra feeding" form. Walks, the agent bar and recent activity arrive
+// with their phases; the first-run setup gate already lives here (P1-14).
+//
+// Three rules shape the screen:
+//   * **never optimistic.** Nothing is marked fed until the server's commit
+//     returns; a 409 `already_fed` shows the other caregiver's feed and re-reads
+//     the day instead of pretending the tap worked (P2-03's shape carries who
+//     and when for exactly this);
+//   * **one idempotency key per intended action**, held with the body it belongs
+//     to (`pendingSave`, P1-11's rule): a double-tap or a lost response replays
+//     instead of logging a second meal or reporting a false conflict;
+//   * **the day comes from the server**, including the household-local date and
+//     the reminder delay, and `live.js`'s `profile` frame — published when
+//     `app.feeding` commits — makes the other caregiver's meal appear without a
+//     reload. A local tick re-evaluates "overdue" without a request.
+//
+// The class, not a hook: the shell serves no import map and the vendored hooks
+// module imports a bare `preact` specifier (PLAN §13.2).
 
-import { h } from "../vendor/preact.mjs";
+import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
-import { getState } from "../store.js";
+import { NetworkError, requestJson } from "../client.js";
+import { pendingSave } from "../profile-form.js";
+import { getState, subscribe } from "../store.js";
+import { feedTimeText, localDate, mealClock, mealRows } from "../meals.js";
 import { Setup } from "./setup.js";
 
 const html = htm.bind(h);
 
-export function Today() {
-  const profile = getState().profile;
-  // No profile is "not read yet": show Today rather than flashing the wizard
-  // at a household that finished setup long ago.
-  if (profile?.setup?.complete === false) {
-    return h(Setup, {});
+/** How often the card re-evaluates "overdue" with no request in flight. */
+export const TICK_MS = 30_000;
+
+const SIGNED_OUT = "Please sign in again.";
+const LOAD_FAILED = "Could not load today's meals. Try again in a moment.";
+
+export class Today extends Component {
+  state = {
+    /** The committed day view, or null before the first read. */
+    day: null,
+    loading: true,
+    error: null,
+    message: null,
+    /** `"slot-b"` or `"extra"` while a write is on the wire. */
+    busy: null,
+    extraOpen: false,
+    extraAmount: "",
+    extraNote: "",
+    /** Idempotency keys, held with the body each belongs to (P1-11's rule). */
+    pending: null,
+    /** Bumped by the local ticker so overdue state ages without a request. */
+    tick: 0,
+    /** The care-view sequence last acted on, so one frame triggers one re-read. */
+    seenCare: -1,
+  };
+
+  componentDidMount() {
+    this.request = this.props?.request ?? requestJson;
+    this.unsubscribe = subscribe((state) => this.onStore(state));
+    // The day route needs no profile: read it on mount instead of waiting for
+    // the first care frame (which may never come if `/api/puppy` keeps failing).
+    if (!this.gated()) void this.load();
+    this.timer = setInterval(() => this.onTick(), TICK_MS);
+    this.timer.unref?.();
   }
-  return html`
-    <section class="view" aria-labelledby="today-heading">
-      <h1 id="today-heading">Today</h1>
-      <p class="placeholder">
-        Today is a placeholder in this shell. Your pup's day — meals, walks and
-        the shared thread — arrives with the server integration.
-      </p>
-      <ul class="placeholder-list" aria-label="Planned Today surface">
-        <li>Meal times and a one-tap fed button</li>
-        <li>Walks with an open-walk timer</li>
-        <li>The agent feed, live between both caregivers</li>
-      </ul>
-    </section>
-  `;
+
+  componentWillUnmount() {
+    this.unsubscribe?.();
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  /**
+   * A new care view means the committed meals may have moved: `app.feeding` is
+   * one of the documents behind the `profile` frame, and a feed does not bump a
+   * revision, so identity — not `isNewer` — is what says "re-read".
+   */
+  onStore(state) {
+    const seq = state?.careSeq ?? 0;
+    if (seq === this.state.seenCare) return;
+    this.setState({ seenCare: seq });
+    if (!this.gated()) void this.load();
+  }
+
+  /** P1-14: an unfinished household sees the wizard, not a meals card. */
+  gated() {
+    return getState().profile?.setup?.complete === false;
+  }
+
+  /** The household zone, or `null` before the profile is read: times then say unknown rather than UTC. */
+  timezone() {
+    return getState().profile?.household?.timezone ?? null;
+  }
+
+  /**
+   * The local tick: re-render so "overdue" ages, and re-read the day the moment
+   * the household's date has moved on. Without the second half, a phone left on
+   * Today overnight would keep showing yesterday's slots under "Today".
+   */
+  onTick() {
+    this.setState({ tick: this.state.tick + 1 });
+    if (this.gated()) return;
+    const day = this.state.day;
+    if (!day) return;
+    const today = localDate(new Date(), this.timezone());
+    if (today !== null && today !== day.localDate) void this.load();
+  }
+
+  /**
+   * A write's answer carries the plain committed day; the reminder delay is
+   * view metadata the GET supplied, and a settings change reaches this card
+   * through the same `profile` frame, so the cached value is current.
+   */
+  mergeDay(day) {
+    const valid = (value) => Number.isFinite(value) && value >= 0;
+    const delay = valid(day.overdueAfterMin) ? day.overdueAfterMin : this.state.day?.overdueAfterMin;
+    return valid(delay) ? { ...day, overdueAfterMin: delay } : day;
+  }
+
+  async load() {
+    // Arrival order is not freshness order (P1-11's rule): a read that started
+    // before a committed write must not overwrite that write's day. `loadSeq` is
+    // bumped by every read and by every commit.
+    const seq = (this.loadSeq = (this.loadSeq ?? 0) + 1);
+    try {
+      const result = await this.request("/api/feeding/day");
+      if (seq !== this.loadSeq) return;
+      if (result.status === 401) {
+        this.setState({ loading: false, error: SIGNED_OUT });
+        return;
+      }
+      if (!result.ok || !result.body) {
+        this.setState({ loading: false, error: LOAD_FAILED });
+        return;
+      }
+      this.setState({ day: result.body, loading: false, error: null });
+    } catch (error) {
+      if (seq !== this.loadSeq) return;
+      this.setState({
+        loading: false,
+        error: error instanceof NetworkError ? error.message : LOAD_FAILED,
+      });
+    }
+  }
+
+  /**
+   * One write, one key. The body is the whole action — the slot and the optional
+   * amount/note — so a retry of the same form reuses the key and a changed form
+   * is a new action. The answer is the server's committed day, never a guess.
+   */
+  async write(path, body, busy) {
+    // An instance flag, not rendered state: `this.state` is not replaced until
+    // Preact's next render, so two taps in one task would both pass a state
+    // check. `busy` below is only for what the caregiver sees.
+    if (this.writing) return;
+    this.writing = true;
+    const pending = pendingSave(this.state.pending, body);
+    this.setState({ busy, pending, message: null, error: null });
+    let result;
+    try {
+      result = await this.request(path, { method: "POST", body, idempotencyKey: pending.key });
+    } catch (error) {
+      // An ambiguous failure: keep the key, so retrying the same body replays
+      // instead of logging the meal twice. Only a definite refusal drops it.
+      this.writing = false;
+      this.setState({
+        busy: null,
+        error: error instanceof NetworkError ? error.message : "Could not log that meal. Try again.",
+      });
+      return;
+    }
+
+    this.writing = false;
+    if (result.ok && result.body?.day) {
+      // A committed day invalidates any read that started before it.
+      this.loadSeq = (this.loadSeq ?? 0) + 1;
+      this.focusNotice();
+      this.setState({
+        busy: null,
+        day: this.mergeDay(result.body.day),
+        message: result.body.replayed ? "Already logged." : "Logged.",
+        extraOpen: false,
+        extraAmount: "",
+        extraNote: "",
+        // The next action is a different one, so it gets a fresh key.
+        pending: null,
+      });
+      return;
+    }
+
+    if (result.status === 409 && result.body?.error === "already_fed") {
+      const feed = result.body.feed;
+      const who = feed?.byLabel ? `${feed.byLabel}` : "The other caregiver";
+      const when = feed?.at ? feedTimeText(feed.at, this.timezone()) : "earlier";
+      // The 409 already carries the committed day (§7.3's shape), so show it
+      // instead of a second read that could fail and leave the card stale.
+      const day = result.body?.day;
+      this.focusNotice();
+      this.setState({
+        busy: null,
+        pending: null,
+        message: null,
+        error: `${who} already logged this meal at ${when}.`,
+        ...(day ? { day: this.mergeDay(day) } : {}),
+      });
+      return;
+    }
+
+    if (result.status === 409 && result.body?.error === "idempotency_conflict") {
+      this.setState({
+        busy: null,
+        error: "That save conflicted with an earlier action. Nothing was written; try again.",
+        pending: null,
+      });
+      return;
+    }
+
+    // A 5xx or an unreadable answer may still have committed: keep the key so a
+    // retry of the same body replays. A definite refusal (400/403) keeps it too;
+    // the same body can only be refused again, which is harmless.
+    this.setState({
+      busy: null,
+      error: result.body?.error ?? "Could not log that meal. Try again.",
+    });
+  }
+
+  /**
+   * A commit removes or disables the button the caregiver just used; move focus
+   * to the message so a keyboard user is not dropped back at the document top.
+   */
+  focusNotice() {
+    setTimeout(() => this.noticeEl?.focus?.(), 0);
+  }
+
+  markFed(slotId) {
+    return this.write("/api/feeding/fed", { slotId }, slotId);
+  }
+
+  logExtra() {
+    const body = {};
+    const amount = this.state.extraAmount.trim();
+    const note = this.state.extraNote.trim();
+    if (amount !== "") body.amount = amount;
+    if (note !== "") body.note = note;
+    return this.write("/api/feeding/extra", body, "extra");
+  }
+
+  renderMeal(row) {
+    const { slot, feed, status } = row;
+    const busy = this.state.busy !== null;
+    return html`
+      <li key=${slot.id} class=${`meal meal--${status}`}>
+        <div class="meal__head">
+          <span class="meal__label">${slot.label}</span>
+          <span class="meal__time">${slot.timeLocal}</span>
+        </div>
+        <p class="meal__status">
+          ${
+            status === "fed"
+              ? html`Fed by ${feed.byLabel} at ${feedTimeText(feed.at, this.timezone())}`
+              : status === "overdue"
+                ? "Overdue — not fed yet"
+                : "Pending"
+          }
+        </p>
+        ${
+          status === "fed"
+            ? null
+            : html`
+                <button
+                  type="button"
+                  class="button"
+                  disabled=${busy}
+                  aria-label=${`${this.state.busy === slot.id ? "Logging" : "Mark fed"} ${slot.label}`}
+                  onClick=${() => void this.markFed(slot.id)}
+                >
+                  ${this.state.busy === slot.id ? "Logging…" : "Mark fed"}
+                </button>
+              `
+        }
+      </li>
+    `;
+  }
+
+  renderExtras(day) {
+    if (day.extras.length === 0) return null;
+    return html`
+      <section class="meals__extras" aria-labelledby="extras-heading">
+        <h2 id="extras-heading" class="card__title">Extra feedings</h2>
+        <ul class="meals">
+          ${day.extras.map(
+            (extra) => html`
+              <li key=${extra.id} class="meal meal--fed">
+                <div class="meal__head">
+                  <span class="meal__label">Extra</span>
+                  <span class="meal__time">${feedTimeText(extra.at, this.timezone())}</span>
+                </div>
+                <p class="meal__status">
+                  ${extra.byLabel}${extra.amount ? ` · ${extra.amount}` : ""}${extra.note ? ` · ${extra.note}` : ""}
+                </p>
+              </li>
+            `,
+          )}
+        </ul>
+      </section>
+    `;
+  }
+
+  renderExtraForm() {
+    if (!this.state.extraOpen) {
+      return html`
+        <div class="form__actions">
+          <button type="button" class="button button--ghost" onClick=${() => this.setState({ extraOpen: true })}>
+            Extra feeding…
+          </button>
+        </div>
+      `;
+    }
+    const busy = this.state.busy !== null;
+    return html`
+      <form
+        class="meal-form"
+        onSubmit=${(event) => {
+          event.preventDefault();
+          void this.logExtra();
+        }}
+      >
+        <div class="field">
+          <label for="extra-amount">Amount (optional)</label>
+          <input
+            id="extra-amount"
+            name="amount"
+            value=${this.state.extraAmount}
+            onInput=${(event) => this.setState({ extraAmount: event.currentTarget.value })}
+            placeholder="e.g. 40 g"
+          />
+        </div>
+        <div class="field">
+          <label for="extra-note">Note (optional)</label>
+          <input
+            id="extra-note"
+            name="note"
+            value=${this.state.extraNote}
+            onInput=${(event) => this.setState({ extraNote: event.currentTarget.value })}
+            placeholder="e.g. training treat"
+          />
+        </div>
+        <div class="form__actions">
+          <button type="submit" class="button" disabled=${busy}>
+            ${this.state.busy === "extra" ? "Logging…" : "Log extra feeding"}
+          </button>
+          <button
+            type="button"
+            class="button button--ghost"
+            disabled=${busy}
+            onClick=${() => this.setState({ extraOpen: false })}
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    `;
+  }
+
+  renderMeals() {
+    const profile = getState().profile;
+    const day = this.state.day;
+    if (day === null) {
+      return html`<p class="form__status">${this.state.loading ? "Loading today's meals…" : null}</p>`;
+    }
+    const clock = mealClock(day, this.timezone());
+    const rows = mealRows(day, clock);
+    const dateLabel = day.localDate === clock.today ? "Today" : day.localDate;
+    return html`
+      <section class="card" aria-labelledby="meals-heading" aria-busy=${this.state.busy !== null}>
+        <h2 id="meals-heading" class="card__title">Meals · ${dateLabel}</h2>
+        ${
+          profile?.household?.timezone
+            ? html`<p class="field__hint">Times are ${profile.household.timezone}.</p>`
+            : null
+        }
+        ${
+          rows.length === 0
+            ? html`<p class="placeholder">No meal times yet — add them in Settings.</p>`
+            : html`<ul class="meals">${rows.map((row) => this.renderMeal(row))}</ul>`
+        }
+        ${this.renderExtraForm()}
+      </section>
+      ${this.renderExtras(day)}
+    `;
+  }
+
+  render() {
+    const profile = getState().profile;
+    // No profile is "not read yet": show Today rather than flashing the wizard
+    // at a household that finished setup long ago (P1-14).
+    if (profile?.setup?.complete === false) return h(Setup, {});
+
+    return html`
+      <section class="view" aria-labelledby="today-heading">
+        <h1 id="today-heading">Today</h1>
+        <div class="form__status">
+          ${
+            this.state.error
+              ? html`<p
+                  class="notice notice--error"
+                  role="alert"
+                  tabindex="-1"
+                  ref=${(el) => {
+                    this.noticeEl = el;
+                  }}
+                >
+                  ${this.state.error}
+                </p>`
+              : null
+          }
+          ${
+            !this.state.error && this.state.message
+              ? html`<p
+                  class="notice"
+                  role="status"
+                  tabindex="-1"
+                  ref=${(el) => {
+                    this.noticeEl = el;
+                  }}
+                >
+                  ${this.state.message}
+                </p>`
+              : null
+          }
+        </div>
+        ${this.renderMeals()}
+        <p class="placeholder">
+          Walks, weight and the agent bar arrive with their phases; this shell already shares the
+          day between both caregivers live.
+        </p>
+      </section>
+    `;
+  }
 }

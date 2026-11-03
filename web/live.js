@@ -25,7 +25,10 @@ const RECONNECT_DELAY_MS = 1000;
 export function applyCareView(view) {
   if (!view || typeof view.rev !== "number") return false;
   if (!isNewer(view, getState().profile)) return false;
-  setState({ profile: view });
+  // Every applied view bumps the sequence, even when the payload is identical
+  // (a feed changes no revision): views that read a document the frame does not
+  // carry use it as the "re-read" signal.
+  setState({ profile: view, careSeq: getState().careSeq + 1 });
   return true;
 }
 
