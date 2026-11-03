@@ -20,6 +20,9 @@
 //   PATCH /api/puppy             edit the profile (rev + Idempotency-Key)
 //   PATCH /api/household         set/confirm the timezone (rev + Idempotency-Key)
 //   PATCH /api/feeding/slots     set the meal schedule (rev + Idempotency-Key)
+//   GET  /api/feeding/day        today's meals: slots with who fed when, extras
+//   POST /api/feeding/fed        log a scheduled meal (Idempotency-Key → 409)
+//   POST /api/feeding/extra      log an extra feeding (Idempotency-Key)
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -28,7 +31,9 @@
 //     addresses this process cannot enumerate (it only knows its bind host);
 //   * every mutation also carries the fixed `X-Pupkeep-Request: 1` header and
 //     a JSON content type (§14.2); the PWA client (P1-10) must send both;
-//   * every failure answers through one mapper, so no stack trace leaves.
+//   * every failure answers through one mapper, so no stack trace leaves. A
+//     JSON body's `error` is a snake_case code when the client must branch
+//     (`stale`, `idempotency_conflict`, `already_fed`) and a sentence otherwise.
 //   * sign-in/invite links are clicked from an SMS/chat client, so they are
 //     GETs without an Origin; tokens and codes are single-use credentials,
 //     and guessing them is met by an IP rate limit (§14.2).
@@ -36,7 +41,14 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import type { AgentEvent } from "@earendil-works/pi-durable";
 import { HOUSEHOLD_FALLBACK_LABEL, THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
-import { MEAL_SCHEDULE_RULE, parseMealSlots } from "../shared/feeding.ts";
+import {
+  MEAL_SCHEDULE_RULE,
+  feedDayView,
+  feedingDay,
+  parseMealSlots,
+  type FeedConflictView,
+  type FeedWriteView,
+} from "../shared/feeding.ts";
 import { parsePuppyPatch, type PuppyProfile } from "../shared/profile.ts";
 import {
   Auth,
@@ -57,7 +69,13 @@ import type { ActorResolver } from "./domain/actor.ts";
 import type { Logger } from "./log.ts";
 import { CLIENT_KEY_LIMIT, isCommandKey, type WriteOutcome } from "./domain/commands.ts";
 import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
-import { updateMealSlots } from "./domain/feeding.ts";
+import {
+  FeedConflictError,
+  logFeed,
+  readFeeding,
+  updateMealSlots,
+  type FeedOutcome,
+} from "./domain/feeding.ts";
 import { updateHouseholdTimezone } from "./domain/household.ts";
 import { readProfile, updatePuppyProfile } from "./domain/profile.ts";
 import {
@@ -68,6 +86,7 @@ import {
   type ThreadRef,
 } from "./agent/thread.ts";
 import { readHousehold, syncHouseholdMembers } from "./domain/household.ts";
+import { localDateAt } from "./domain/time.ts";
 import type { ThreadBus } from "./agent/bus.ts";
 import { applySecurityHeaders, serveStaticRequest } from "./static.ts";
 
@@ -130,6 +149,8 @@ export interface HttpDeps {
   readonly logger: Logger;
   /** Long-poll wait; capped to THREAD_POLL_MAX_MS. */
   readonly pollTimeoutMs?: number;
+  /** The server clock, injected in tests; the wall clock otherwise (P2-03's day view). */
+  readonly now?: () => number;
   /**
    * Test seam for the attach ordering: production leaves this unset. A test can
    * commit after the read returns and prove the commit is not lost.
@@ -417,12 +438,29 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/feeding/day" && req.method === "GET") {
+      requireCare(session);
+      await handleFeedingDay(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/feeding/fed" && req.method === "POST") {
+      await handleFeedWrite(deps, req, res, requireCare(session), "slot");
+      return;
+    }
+
+    if (pathname === "/api/feeding/extra" && req.method === "POST") {
+      await handleFeedWrite(deps, req, res, requireCare(session), "extra");
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
         "route not served yet: the remaining care routes (meals, walks, growth, calendar) " +
         "arrive with their phases; the profile is GET/PATCH /api/puppy, " +
-        "the timezone PATCH /api/household and the meal schedule PATCH /api/feeding/slots",
+        "the timezone PATCH /api/household, the meal schedule PATCH /api/feeding/slots " +
+        "and today's meals GET /api/feeding/day, POST /api/feeding/fed, POST /api/feeding/extra",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -616,6 +654,18 @@ function requireCareMutation(deps: HttpDeps, req: IncomingMessage, session: Sess
 }
 
 /**
+ * The one `idempotency_conflict` answer. The key space is shared by every care
+ * write (`http:<key>`), so the sentence must not claim the key was used by the
+ * same kind of change — it may have been a timezone or a meal.
+ */
+function sendKeyConflict(res: ServerResponse): void {
+  sendJson(res, 409, {
+    error: "idempotency_conflict",
+    message: "that idempotency key was used for a different change",
+  });
+}
+
+/**
  * One answer for every care write in the §7.4 family: a stale revision is a
  * terminal 409 with the current care state (the client re-reads, it does not
  * auto-retry), a reused key is a 409 that names the cause, and success carries
@@ -628,10 +678,7 @@ async function respondToCareWrite(
   subject: string,
 ): Promise<void> {
   if (outcome === "key-conflict") {
-    sendJson(res, 409, {
-      error: "idempotency_conflict",
-      message: "that idempotency key was used for a different change",
-    });
+    sendKeyConflict(res);
     return;
   }
   const profile = await readProfile(deps.thread.harness, deps.thread.context, new Date());
@@ -724,10 +771,7 @@ async function handleProfileUpdate(
   });
 
   if (outcome.kind === "key-conflict") {
-    sendJson(res, 409, {
-      error: "idempotency_conflict",
-      message: "that idempotency key was used for a different profile change",
-    });
+    sendKeyConflict(res);
     return;
   }
   if (outcome.kind === "stale") {
@@ -807,6 +851,126 @@ async function handleMealSlotsUpdate(
     slots,
   });
   await respondToCareWrite(deps, res, outcome, "meal schedule");
+}
+
+// --- today's meals (P2-03) ---------------------------------------------------
+
+/**
+ * The day view: the household's current local date, its active slots with the
+ * feed that claimed each, and the extra feedings. Built by the shared
+ * `feedingDay`, so this route and P2-04's tool cannot disagree about a day. The
+ * household is read once, for the zone the date derives from (§8.1); a client
+ * renders each `at`/`timeLocal` in that same `household.timezone`, which it
+ * already has in the profile, never in the device's zone.
+ */
+async function handleFeedingDay(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  const [household, feeding] = await Promise.all([
+    readHousehold(deps.thread.harness, deps.thread.context),
+    readFeeding(deps.thread.harness, deps.thread.context),
+  ]);
+  sendJson(res, 200, feedingDay(feeding, localDateAt(now, household.timezone)));
+}
+
+interface FeedBody {
+  readonly slotId: string | null;
+  readonly amount?: string;
+  readonly note?: string;
+}
+
+/**
+ * The body of a meal write. A scheduled feed names its slot; an extra feeding
+ * has no slot and must not quietly become one. The values are the domain's to
+ * trim and cap — a meal the document parser would refuse rolls the commit back
+ * — so only the shape is checked here, and a misspelt key is visible.
+ */
+function parseFeedBody(raw: unknown, mode: "slot" | "extra"): FeedBody {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a meal is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, mode === "slot" ? ["slotId", "amount", "note"] : ["amount", "note"]);
+  for (const field of ["amount", "note"] as const) {
+    if (record[field] !== undefined && record[field] !== null && typeof record[field] !== "string") {
+      throw new ConflictError(`the ${field} is text`);
+    }
+  }
+  // `null` is how a form spells "left empty", and the writer treats it as unset;
+  // the route must not turn that into a conflict.
+  const amount = (record.amount as string | null | undefined) ?? undefined;
+  const note = (record.note as string | null | undefined) ?? undefined;
+  if (mode === "extra") return { slotId: null, amount, note };
+  if (typeof record.slotId !== "string" || record.slotId.trim() === "") {
+    throw new ConflictError("a meal needs the slot it feeds");
+  }
+  // An opaque id has no surrounding space; trimming is the client's whitespace,
+  // not a slot the schedule is missing.
+  return { slotId: record.slotId.trim(), amount, note };
+}
+
+/**
+ * Log one meal. Same key and body is success (a replay), a different action on
+ * an already-fed slot is a 409 carrying who/when and the current day — the one
+ * `already_fed` shape — and every other refusal goes through the one mapper.
+ * The answer carries the committed day, so the caller never merges a partial
+ * view, and P2-04's tool renders its prose from the same `feedingDay`.
+ */
+async function handleFeedWrite(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+  mode: "slot" | "extra",
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = parseFeedBody(await readJsonBody(req), mode);
+  // One clock read for the write, so the committed event and the day the answer
+  // carries are derived from the same instant (§8.1).
+  const now = new Date(deps.now?.() ?? Date.now());
+
+  let outcome: FeedOutcome;
+  try {
+    outcome = await logFeed(deps.thread.harness, deps.thread.context, {
+      actor: careActor(session),
+      // Namespaced like every care key: a client key cannot collide with a tool id.
+      actionId: `http:${key}`,
+      slotId: body.slotId,
+      amount: body.amount,
+      note: body.note,
+      source: "ui",
+      now,
+    });
+  } catch (error) {
+    // The domain's typed conflict, translated at this boundary into the 409
+    // shape; anything else is the mapper's to answer.
+    if (!(error instanceof FeedConflictError)) throw error;
+    const feeding = await readFeeding(deps.thread.harness, deps.thread.context);
+    const conflict: FeedConflictView = {
+      error: "already_fed",
+      message: error.message,
+      ...feedDayView(feeding, error.existing),
+    };
+    sendJson(res, 409, conflict);
+    return;
+  }
+
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+
+  // One reader builds the day the client renders, so a write and the next GET
+  // cannot disagree about which slots are fed (P2-01's view). The meal is already
+  // durable when this read runs: a failure here answers 503, and the client's
+  // retry with the same key replays the commit instead of logging it twice
+  // (§7.2). The day is not stored in the command record on purpose — that would
+  // put a whole day in every idempotency row and make a replay answer stale.
+  const feeding = await readFeeding(deps.thread.harness, deps.thread.context);
+  const written: FeedWriteView = {
+    ...feedDayView(feeding, outcome.event),
+    replayed: outcome.kind === "replayed",
+  };
+  sendJson(res, 200, written);
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

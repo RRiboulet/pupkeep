@@ -284,6 +284,10 @@ export type FeedingDaySlot = {
  * order with the feed that claimed each, plus the extras. `events` carries
  * every event filed under the date, including one whose slot has since been
  * removed or deactivated — history is not rewritten when the schedule changes.
+ *
+ * `events` is authoritative; `slots[].feed` and `extras` are views of it (a
+ * feed to a since-removed slot appears only in `events`), so a reader must not
+ * count the three together.
  */
 export type FeedingDay = {
   localDate: string;
@@ -318,4 +322,38 @@ export function feedingDay(feeding: Feeding, localDate: string): FeedingDay {
     slots,
     extras: events.filter((event) => event.slotId === null),
   };
+}
+
+/**
+ * The committed feed and the day it landed on — the common half of a meal
+ * write's 200 and its 409. `localDate` comes from the event, not from a clock
+ * read at response time: a feed accepted at 23:59:59 answers its own date (§8.1).
+ */
+export type FeedDayView = {
+  feed: FeedEvent;
+  day: FeedingDay;
+};
+
+/** The 200 body of a meal write: the same action replayed is success, not a conflict. */
+export type FeedWriteView = FeedDayView & {
+  replayed: boolean;
+};
+
+/**
+ * The one body a double feed answers with (§7.3): who fed that slot and when,
+ * plus the current day so a client can show the conflict instead of a dead end.
+ * `error` is a code because the client branches on it; every other refusal in
+ * the mapper carries a sentence (`src/server/http.ts`).
+ */
+export type FeedConflictView = FeedDayView & {
+  error: "already_fed";
+  message: string;
+};
+
+/**
+ * One day's view around a committed feed. The only builder both answers use, so
+ * the 200 and the 409 cannot disagree about the day.
+ */
+export function feedDayView(feeding: Feeding, feed: FeedEvent): FeedDayView {
+  return { feed, day: feedingDay(feeding, feed.localDate) };
 }

@@ -570,6 +570,9 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
         allowedOrigins: () => bindOrigins(options.host, boundPort),
         logger,
+        // The same clock the boot and the limiters use: a route's local date and
+        // a test's fixed instant must come from one source (§8.1).
+        now: options.now ?? Date.now,
       });
       listener = await (deps.listen ?? listenHttp)(options.host, options.port, handler);
       const bound = Number(new URL(listener.url).port);
