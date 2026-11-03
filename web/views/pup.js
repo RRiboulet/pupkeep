@@ -16,65 +16,14 @@
 
 import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
-import { NetworkError, newIdempotencyKey, requestJson } from "../client.js";
+import { NetworkError, requestJson } from "../client.js";
+import { changedFields, draftOf, emptyDraft, isNewer, pendingSave, sameHousehold } from "../profile-form.js";
 import { subscribe } from "../store.js";
 
 const html = htm.bind(h);
 
 const CONFLICT_MESSAGE =
   "Someone else changed this profile. Your edits are kept below; saving again replaces their change.";
-
-function sameHousehold(a, b) {
-  return (
-    a.today === b.today &&
-    a.household.timezone === b.household.timezone &&
-    a.household.name === b.household.name &&
-    a.household.members.length === b.household.members.length &&
-    a.household.members.every((member, index) => {
-      const other = b.household.members[index];
-      return other !== undefined && other.id === member.id && other.name === member.name;
-    })
-  );
-}
-
-function emptyDraft() {
-  return { name: "", birthday: "", breed: "", sex: "", targetWeightKg: "" };
-}
-
-function draftOf(profile) {
-  const puppy = profile.puppy;
-  return {
-    name: puppy.name,
-    birthday: puppy.birthday ?? "",
-    breed: puppy.breed ?? "",
-    sex: puppy.sex ?? "",
-    targetWeightKg: puppy.targetWeightKg === null ? "" : String(puppy.targetWeightKg),
-  };
-}
-
-/** The draft as wire values: empty inputs are `null` (a clear). */
-function wireOf(draft) {
-  return {
-    name: draft.name.trim(),
-    birthday: draft.birthday === "" ? null : draft.birthday,
-    breed: draft.breed.trim() === "" ? null : draft.breed.trim(),
-    sex: draft.sex === "" ? null : draft.sex,
-    targetWeightKg: draft.targetWeightKg === "" ? null : Number(draft.targetWeightKg),
-  };
-}
-
-/**
- * Only the fields that really changed. Saving the whole form unchanged would
- * otherwise bump the revision and put "updated the profile" in the household's
- * activity feed for a button press that changed nothing.
- */
-function changedFields(puppy, draft) {
-  const changed = {};
-  for (const [key, value] of Object.entries(wireOf(draft))) {
-    if (puppy[key] !== value) changed[key] = value;
-  }
-  return changed;
-}
 
 export class Pup extends Component {
   state = {
@@ -141,8 +90,10 @@ export class Pup extends Component {
       return;
     }
     // Never go backwards: a frame that was already in flight when a save
-    // returned carries an older revision, and the newest revision wins.
-    if (incoming.rev < current.rev) return;
+    // returned carries an older revision, and the newest revision wins. The
+    // whole view has three revisions (puppy, household, meals), so the shared
+    // freshness rule decides — the same one the wizard uses.
+    if (!isNewer(incoming, current)) return;
 
     if (incoming.rev > current.rev) {
       if (this.state.dirty) {
@@ -175,11 +126,7 @@ export class Pup extends Component {
     }
 
     const body = { rev: profile.rev, ...patch };
-    const signature = JSON.stringify(body);
-    const pending =
-      this.state.pending && this.state.pending.signature === signature
-        ? this.state.pending
-        : { key: newIdempotencyKey(), signature };
+    const pending = pendingSave(this.state.pending, body);
 
     this.setState({ busy: true, error: null, message: null, pending });
     try {

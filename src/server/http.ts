@@ -16,8 +16,10 @@
 //   GET  /api/agent/thread       full snapshot (transcript/tool cards/busy)
 //   GET  /api/agent/events       SSE: snapshot first, then deltas
 //   GET  /api/agent/events/poll  long-poll fallback: full snapshots only
-//   GET  /api/puppy              the puppy profile, age and household roster
-//   PATCH /api/puppy             edit it (rev + Idempotency-Key, 409 on stale)
+//   GET  /api/puppy              the care state: puppy, roster, meals, setup
+//   PATCH /api/puppy             edit the profile (rev + Idempotency-Key)
+//   PATCH /api/household         set/confirm the timezone (rev + Idempotency-Key)
+//   PATCH /api/feeding/slots     set the meal schedule (rev + Idempotency-Key)
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -34,6 +36,7 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import type { AgentEvent } from "@earendil-works/pi-durable";
 import { HOUSEHOLD_FALLBACK_LABEL, THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
+import { MEAL_SCHEDULE_RULE, parseMealSlots } from "../shared/feeding.ts";
 import { parsePuppyPatch, type PuppyProfile } from "../shared/profile.ts";
 import {
   Auth,
@@ -50,10 +53,13 @@ import {
   requireAction,
   type Session,
 } from "./auth.ts";
+import type { ActorResolver } from "./domain/actor.ts";
 import type { Logger } from "./log.ts";
-import { CLIENT_KEY_LIMIT, isCommandKey } from "./domain/commands.ts";
+import { CLIENT_KEY_LIMIT, isCommandKey, type WriteOutcome } from "./domain/commands.ts";
 import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
-import { readPuppy, profileView, updatePuppyProfile } from "./domain/profile.ts";
+import { updateMealSlots } from "./domain/feeding.ts";
+import { updateHouseholdTimezone } from "./domain/household.ts";
+import { readProfile, updatePuppyProfile } from "./domain/profile.ts";
 import {
   ThreadUnavailableError,
   labelFor,
@@ -401,11 +407,22 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/household" && req.method === "PATCH") {
+      await handleHouseholdUpdate(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/feeding/slots" && req.method === "PATCH") {
+      await handleMealSlotsUpdate(deps, req, res, requireCare(session));
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
-        "route not served yet: the care routes (meals, walks, growth, calendar) " +
-        "arrive with their phases; the profile is GET/PATCH /api/puppy",
+        "route not served yet: the remaining care routes (meals, walks, growth, calendar) " +
+        "arrive with their phases; the profile is GET/PATCH /api/puppy, " +
+        "the timezone PATCH /api/household and the meal schedule PATCH /api/feeding/slots",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -577,19 +594,100 @@ async function handleInvites(
   sendJson(res, 200, { code, link });
 }
 
+// --- care mutations (P1-11, P1-14) -------------------------------------------
+
+/**
+ * The three checks every care mutation shares (§14.2): an origin this server
+ * serves, the fixed request header plus a JSON content type, and a storable
+ * idempotency key. Returns the key so the route can namespace it — a
+ * client-chosen key can never collide with a tool's task id.
+ */
+function requireCareMutation(deps: HttpDeps, req: IncomingMessage, session: Session): string {
+  const origin = req.headers.origin;
+  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
+    throw new ForbiddenError(session.role, "care");
+  }
+  requireMutationHeaders(req);
+  const key = headerValue(req, "idempotency-key");
+  if (!isCommandKey(key, CLIENT_KEY_LIMIT)) {
+    throw new ConflictError("a care change needs an Idempotency-Key header");
+  }
+  return key;
+}
+
+/**
+ * One answer for every care write in the §7.4 family: a stale revision is a
+ * terminal 409 with the current care state (the client re-reads, it does not
+ * auto-retry), a reused key is a 409 that names the cause, and success carries
+ * the whole view so the caller never merges a partial update.
+ */
+async function respondToCareWrite(
+  deps: HttpDeps,
+  res: ServerResponse,
+  outcome: WriteOutcome,
+  subject: string,
+): Promise<void> {
+  if (outcome === "key-conflict") {
+    sendJson(res, 409, {
+      error: "idempotency_conflict",
+      message: "that idempotency key was used for a different change",
+    });
+    return;
+  }
+  const profile = await readProfile(deps.thread.harness, deps.thread.context, new Date());
+  if (outcome === "stale") {
+    sendJson(res, 409, {
+      error: "stale",
+      message: `the ${subject} changed since it was read`,
+      profile,
+    });
+    return;
+  }
+  sendJson(res, 200, { profile, replayed: outcome === "replayed" });
+}
+
+/**
+ * The care write's actor (§7.1, §9.2): the session member, resolved through the
+ * household *inside* the commit. A member the household does not carry yet (an
+ * invite whose mirror failed) travels as the household fallback with a null id,
+ * never as a real id paired with the fallback label — the pairing §15.3 forbids
+ * for transcripts.
+ */
+function careActor(session: Session): ActorResolver {
+  return async (_tx, household) => {
+    const known = household.members.some((member) => member.id === session.memberId);
+    return known
+      ? { id: session.memberId, label: labelFor(household, session.memberId) }
+      : { id: null, label: HOUSEHOLD_FALLBACK_LABEL };
+  };
+}
+
+/** The revision the household and meal-schedule writes echo back; a `rev`-less write is refused. */
+function revisionOf(body: Record<string, unknown>): number {
+  const rev = body.rev;
+  if (typeof rev !== "number" || !Number.isSafeInteger(rev) || rev < 0) {
+    throw new ConflictError("a care change needs the revision it read");
+  }
+  return rev;
+}
+
+/** Only the named fields; a typo in a client is visible instead of ignored. */
+function requireOnlyKeys(body: Record<string, unknown>, allowed: readonly string[]): void {
+  for (const key of Object.keys(body)) {
+    if (!allowed.includes(key)) throw new ConflictError(`a care change does not accept "${key}"`);
+  }
+}
+
 // --- puppy profile (P1-11) ---------------------------------------------------
 
 /**
- * The profile the Pup screen (and the agent's view) reads. The household read
- * reconciles a member who joined after boot, so the roster shown here is the
- * same one labels resolve through.
+ * The care state the shell, the Pup screen and the agent read: the puppy, the
+ * roster, the meal schedule and what first-run setup still needs. One reader
+ * (`readProfile`) builds it, so this GET and the `profile` frame cannot
+ * disagree about the household.
  */
 async function handleProfileRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
-  // The household read reconciles a member who joined after boot; the profile
-  // view is then built from that same value rather than reading it twice.
-  const household = await readHousehold(deps.thread.harness, deps.thread.context);
-  const puppy = await readPuppy(deps.thread.harness, deps.thread.context);
-  sendJson(res, 200, profileView(household, puppy, new Date()));
+  sendJson(res, 200, await readProfile(deps.thread.harness, deps.thread.context, new Date()));
 }
 
 /**
@@ -604,16 +702,7 @@ async function handleProfileUpdate(
   res: ServerResponse,
   session: Session,
 ): Promise<void> {
-  const origin = req.headers.origin;
-  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
-    throw new ForbiddenError(session.role, "care");
-  }
-  requireMutationHeaders(req);
-
-  const key = headerValue(req, "idempotency-key");
-  if (!isCommandKey(key, CLIENT_KEY_LIMIT)) {
-    throw new ConflictError("a profile change needs an Idempotency-Key header");
-  }
+  const key = requireCareMutation(deps, req, session);
 
   const body = await readJsonBody(req);
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
@@ -627,7 +716,7 @@ async function handleProfileUpdate(
   if (!patch) throw new ConflictError("a profile change needs at least one valid field");
 
   const outcome = await updatePuppyProfile(deps.thread.harness, deps.thread.context, {
-    actor: async (_tx, household) => ({ id: session.memberId, label: labelFor(household, session.memberId) }),
+    actor: careActor(session),
     // Namespaced: a client-chosen key can never collide with a tool's task id.
     actionId: `http:${key}`,
     rev,
@@ -651,6 +740,73 @@ async function handleProfileUpdate(
     return;
   }
   sendJson(res, 200, { profile: outcome.profile, replayed: outcome.kind === "replayed" });
+}
+
+// --- first-run setup (P1-14) -------------------------------------------------
+
+/**
+ * Set or re-confirm the household timezone. Confirming an unchanged zone is a
+ * real action: it is how the caregiver signs off on the one value every future
+ * `localDate` derives from, so it still bumps the revision and records who did
+ * it. The zone itself is validated in the domain, inside the commit.
+ */
+async function handleHouseholdUpdate(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = await readJsonBody(req);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ConflictError("a household change is a JSON object");
+  }
+  const record = body as Record<string, unknown>;
+  requireOnlyKeys(record, ["rev", "timezone"]);
+  const rev = revisionOf(record);
+  if (typeof record.timezone !== "string") {
+    throw new ConflictError("a household change needs a timezone");
+  }
+
+  const outcome = await updateHouseholdTimezone(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    rev,
+    timezone: record.timezone,
+  });
+  await respondToCareWrite(deps, res, outcome, "timezone");
+}
+
+/**
+ * Replace the meal schedule, one commit for the whole list. The parser is the
+ * shared one (`src/shared/feeding.ts`), so the HTTP surface and the document
+ * parser cannot disagree about what a slot is; the domain re-parses before it
+ * writes, so no caller can store a schedule a reader cannot load.
+ */
+async function handleMealSlotsUpdate(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = await readJsonBody(req);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ConflictError("a meal-schedule change is a JSON object");
+  }
+  const record = body as Record<string, unknown>;
+  requireOnlyKeys(record, ["rev", "slots"]);
+  const rev = revisionOf(record);
+  const slots = parseMealSlots(record.slots);
+  if (!slots) throw new ConflictError(MEAL_SCHEDULE_RULE);
+
+  const outcome = await updateMealSlots(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    rev,
+    slots,
+  });
+  await respondToCareWrite(deps, res, outcome, "meal schedule");
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

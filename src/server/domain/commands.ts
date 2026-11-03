@@ -160,3 +160,32 @@ export async function runIdempotent<T extends JsonValue>(
   }
   return { kind: "committed", value: committed };
 }
+
+/**
+ * How an idempotent domain write ended, as HTTP and the tools report it (PLAN
+ * §7.4). The household and meal-schedule writers return exactly this and answer
+ * through one mapper in `src/server/http.ts`; the profile writer keeps a richer
+ * outcome because its agent tool needs the current view in a stale answer.
+ */
+export type WriteOutcome =
+  | "updated"
+  | /** The same action, already committed: success, not a conflict. */
+    "replayed"
+  /** A newer revision exists; the caller re-reads, it does not auto-retry. */
+  | "stale"
+  /** One idempotency key was reused for a different request. */
+  | "key-conflict";
+
+/**
+ * The non-stale half of a completed run, so the writers do not each re-encode
+ * "committed/replayed means updated/replayed and a key collision is a conflict".
+ * The profile writer keeps its richer outcome (its agent tool needs the current
+ * view in a stale answer); the household and meal-schedule writers — and P2's
+ * feed service — use this.
+ */
+export function outcomeOf<T extends JsonValue>(
+  result: CommandOutcome<T>,
+): Exclude<WriteOutcome, "stale"> {
+  if (result.kind === "conflict") return "key-conflict";
+  return result.kind === "replayed" ? "replayed" : "updated";
+}

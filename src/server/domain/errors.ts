@@ -23,3 +23,15 @@ export class DomainConflictError extends Error {
     this.name = "DomainConflictError";
   }
 }
+
+/**
+ * The revision the caller read is no longer the current one (§7.4). A private
+ * control-flow signal inside the domain — the callers turn it into a 409 with
+ * the current view — so it is not a `Refusal` with a caregiver-facing message.
+ */
+export class StaleRevisionError extends Error {
+  constructor(message = "the record changed since it was read") {
+    super(message);
+    this.name = "StaleRevisionError";
+  }
+}

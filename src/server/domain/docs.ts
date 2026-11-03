@@ -1,11 +1,17 @@
-// The four session documents PLAN §8.1 assigns to P1-08, plus their parsers.
+// The session documents PLAN §8.1 assigns to P1-08 (household, puppy, activity,
+// commands), plus P1-14's `app.feeding` (the meal slots), and their parsers.
 //
 // The doc `version` and the value's `schemaVersion` start at 1. A shape change
 // increments both and adds `migrate(value, fromVersion)`; the parsers below then
 // accept the current shape only, because a migrated value is what the Session
-// hands them. The one exception is deliberate: `app.puppy` moved to version 2
-// when P1-11 added `rev`, and `migrate` fills `rev: 0` for a version-1 document
-// so a phone that ran P1-08 keeps its puppy instead of failing boot.
+// hands them. Two migrations exist so far:
+//   * `app.puppy` moved to version 2 when P1-11 added `rev`, and `migrate`
+//     fills `rev: 0` for a version-1 document;
+//   * `app.household` moved to version 2 when P1-14 added `rev` and
+//     `timezoneConfirmedAt`, and `migrate` fills `rev: 0` and leaves the zone
+//     unconfirmed so first-run setup asks for it.
+// A phone that ran an older build therefore keeps its household and profile
+// instead of failing boot.
 //
 // An unknown schemaVersion or a malformed value is a bootstrap error, never a
 // silent reset: resetting would discard members, settings or pending
@@ -23,18 +29,21 @@ import {
   COMMANDS_SCHEMA_VERSION,
   DEFAULT_HOUSEHOLD_NAME,
   DEFAULT_HOUSEHOLD_SETTINGS,
+  FEEDING_SCHEMA_VERSION,
   HOUSEHOLD_SCHEMA_VERSION,
   PUPPY_SCHEMA_VERSION,
   type Activity,
   type ActivityEntry,
   type CommandRecord,
   type Commands,
+  type Feeding,
   type Household,
   type HouseholdSettings,
   type MemberProfile,
   type Puppy,
   type PuppySex,
 } from "../../shared/domain.ts";
+import { parseStoredMealSlots } from "../../shared/feeding.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
 
 /**
@@ -56,8 +65,11 @@ const CHECKPOINT_DELTAS = 100;
 export function emptyHousehold(): Household {
   return {
     schemaVersion: HOUSEHOLD_SCHEMA_VERSION,
+    rev: 0,
     name: DEFAULT_HOUSEHOLD_NAME,
     timezone: "UTC",
+    // Nobody has confirmed the zone yet; first-run setup (P1-14) does.
+    timezoneConfirmedAt: null,
     members: [],
     // Replaced by the bootstrap in the same commit that creates the document.
     conversationId: 0,
@@ -88,11 +100,33 @@ export function emptyCommands(): Commands {
   return { schemaVersion: COMMANDS_SCHEMA_VERSION, createdAt: "", entries: [] };
 }
 
+/** A fresh schedule: no slots until first-run setup writes them. */
+export function emptyFeeding(): Feeding {
+  return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: 0, slots: [], createdAt: "" };
+}
+
 export const HouseholdDoc = defineDoc<Household>({
   kind: "app.household",
-  version: 1,
+  version: 2,
   scope: "session",
   initial: emptyHousehold,
+  // A version-1 document (P1-08) predates `rev` and the timezone confirmation.
+  // The captured zone is kept but stays unconfirmed, because nobody has checked
+  // it: boot must not invent a confirmation. The roster is not revised either.
+  migrate(value, fromVersion) {
+    if (fromVersion !== 1) {
+      throw new Error(`app.household has no migration from version ${fromVersion}`);
+    }
+    const migrated = {
+      ...(value as unknown as Record<string, unknown>),
+      schemaVersion: HOUSEHOLD_SCHEMA_VERSION,
+      rev: 0,
+      timezoneConfirmedAt: null,
+    };
+    const parsed = parseHousehold(migrated);
+    if (!parsed) throw new Error("app.household version 1 does not migrate to a valid version 2");
+    return parsed;
+  },
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -132,6 +166,15 @@ export const CommandsDoc = defineDoc<Commands>({
   version: 1,
   scope: "session",
   initial: emptyCommands,
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/** The meal slots P1-14 collects; P2-01 adds feed events as version 2. */
+export const FeedingDoc = defineDoc<Feeding>({
+  kind: "app.feeding",
+  version: 1,
+  scope: "session",
+  initial: emptyFeeding,
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -225,8 +268,10 @@ export function parseMemberProfiles(value: unknown): MemberProfile[] | undefined
 export function parseHousehold(value: unknown): Household | undefined {
   const record = asRecord(value);
   if (!record || record.schemaVersion !== HOUSEHOLD_SCHEMA_VERSION) return undefined;
+  if (!isNonNegativeInteger(record.rev)) return undefined;
   if (!isNonEmptyString(record.name)) return undefined;
   if (!isIanaZone(record.timezone)) return undefined;
+  if (record.timezoneConfirmedAt !== null && !isIsoDate(record.timezoneConfirmedAt)) return undefined;
   const members = parseMemberProfiles(record.members);
   if (!members) return undefined;
   if (!isPositiveInteger(record.conversationId) || !isPositiveInteger(record.systemConversationId)) return undefined;
@@ -236,8 +281,10 @@ export function parseHousehold(value: unknown): Household | undefined {
   if (!settings) return undefined;
   return {
     schemaVersion: HOUSEHOLD_SCHEMA_VERSION,
+    rev: record.rev,
     name: record.name,
     timezone: record.timezone,
+    timezoneConfirmedAt: record.timezoneConfirmedAt,
     members,
     conversationId: record.conversationId,
     systemConversationId: record.systemConversationId,
@@ -325,4 +372,16 @@ export function parseCommands(value: unknown): Commands | undefined {
     entries.push(entry);
   }
   return { schemaVersion: COMMANDS_SCHEMA_VERSION, createdAt: record.createdAt, entries };
+}
+
+/** `app.feeding` as P1-14 writes it: the meal slots, no feed events yet. */
+export function parseFeeding(value: unknown): Feeding | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== FEEDING_SCHEMA_VERSION) return undefined;
+  if (!isNonNegativeInteger(record.rev)) return undefined;
+  if (!isIsoDate(record.createdAt)) return undefined;
+  // The document may hold an empty schedule (a fresh one); a write cannot.
+  const slots = parseStoredMealSlots(record.slots);
+  if (!slots) return undefined;
+  return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: record.rev, slots, createdAt: record.createdAt };
 }

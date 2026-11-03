@@ -1,5 +1,5 @@
 // P1-08's acceptance rows: a fresh boot creates the household, puppy, activity,
-// commands and two conversations; a second boot changes nothing; a removed member
+// commands, feeding and two conversations; a second boot changes nothing; a removed member
 // stays removed; a missing profile is repaired from config; a household rename is
 // not clobbered; and the hidden system conversation never keeps a model.
 
@@ -93,6 +93,7 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
     assert.deepEqual(result.docsCreated.sort(), [
       "app.activity",
       "app.commands",
+      "app.feeding",
       "app.household",
       "app.puppy",
     ]);
@@ -221,7 +222,7 @@ test("an unknown household schemaVersion is refused instead of reset", async () 
     await bootstrapSession(opened.harness, { config: config(owner), context, now });
     await opened.harness.commit(async (tx) => {
       const draft = await tx.doc(HouseholdDoc);
-      (draft as unknown as { schemaVersion: number }).schemaVersion = 2;
+      (draft as unknown as { schemaVersion: number }).schemaVersion = 3;
     }, context);
 
     await assert.rejects(
@@ -229,7 +230,7 @@ test("an unknown household schemaVersion is refused instead of reset", async () 
       /app\.household is not a shape/,
     );
     const stored = await opened.harness.snapshot(HouseholdDoc, context);
-    assert.equal((stored as unknown as { schemaVersion: number }).schemaVersion, 2);
+    assert.equal((stored as unknown as { schemaVersion: number }).schemaVersion, 3);
   });
 });
 

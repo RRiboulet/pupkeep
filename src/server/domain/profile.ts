@@ -1,9 +1,12 @@
-// The puppy profile (PLAN §8.1, §7.4, §13.1): one document, one service.
+// The puppy profile (PLAN §8.1, §7.4, §13.1): one document, one service, and
+// the one reader that builds the shared care view (`profileView`).
 //
 // Both HTTP (`PATCH /api/puppy`) and the agent tool (`update_puppy_profile`) call
 // this module, so there is one place that checks a revision, writes the
 // idempotency record and appends the activity entry. Neither caller may write
-// `app.puppy` directly.
+// `app.puppy` directly. The household timezone (P1-14) and the meal schedule
+// (P1-14, P2) have their own writers in `household.ts` and `feeding.ts`; they
+// share this module's view so the `profile` frame is always one whole snapshot.
 //
 // Three invariants live here:
 //   * `rev` is optimistic concurrency: an edit echoes the revision it read, and
@@ -14,13 +17,15 @@
 //     the household timezone cannot leave a wrong age in the document.
 
 import type { Context } from "@earendil-works/chord";
-import type { JsonObject, SessionDocToken, Tx } from "@earendil-works/pi-durable";
-import type { Household, Puppy } from "../../shared/domain.ts";
-import type { PuppyFields, PuppyPatch, PuppyProfile } from "../../shared/profile.ts";
+import type { JsonObject, SessionDocToken } from "@earendil-works/pi-durable";
+import type { Feeding, Household, Puppy } from "../../shared/domain.ts";
+import type { PuppyFields, PuppyPatch, PuppyProfile, SetupStep } from "../../shared/profile.ts";
 import { ActivityDoc, HouseholdDoc, PuppyDoc, parsePuppy, type DocStore } from "./docs.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
+import type { ActorResolver } from "./actor.ts";
 import { type CommandOutcome, requestHashOf, runIdempotent } from "./commands.ts";
-import { DomainConflictError, UnavailableError } from "./errors.ts";
+import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
+import { readFeeding } from "./feeding.ts";
 import { readHousehold } from "./household.ts";
 import { ageOf, localDateAt } from "./time.ts";
 
@@ -33,21 +38,13 @@ export class ProfileUnavailableError extends UnavailableError {
   }
 }
 
-/** The client's `rev` is not the current one (PLAN §7.4: 409, terminal). */
-export class StaleRevisionError extends Error {
-  constructor() {
-    super("the profile changed since it was read");
-    this.name = "StaleRevisionError";
-  }
-}
-
 export interface ProfileUpdate {
   /**
    * Who is making the change, resolved *inside* the commit. HTTP already knows
    * (the session); the agent tool has to look at the latest `app.chat` entry
    * (§9.2 rule 2), and that read belongs on the same transaction as the write.
    */
-  readonly actor: (tx: Tx, household: Household) => Promise<ProfileActor>;
+  readonly actor: ActorResolver;
   /** `Idempotency-Key`, or the tool task's id (§7.4, §10.3). */
   readonly actionId: string;
   /** The revision the caller read; must equal the document's current one. */
@@ -56,11 +53,6 @@ export interface ProfileUpdate {
   readonly now?: Date;
 }
 
-export type ProfileActor = {
-  /** Config member id, or `null` for the household fallback (§9.2). */
-  readonly id: string | null;
-  readonly label: string;
-};
 
 export type ProfileUpdateOutcome =
   | { kind: "updated"; profile: PuppyProfile }
@@ -95,8 +87,25 @@ export function puppyFields(puppy: Puppy): PuppyFields {
   return { name, birthday, breed, sex, targetWeightKg };
 }
 
-/** The wire/view shape: document facts plus derived age and the roster. */
-export function profileView(household: Household, puppy: Puppy, now: Date): PuppyProfile {
+/**
+ * What first-run setup still needs (P1-14). Derived from the documents, in the
+ * wizard's order: the zone every `localDate` depends on, the puppy itself, and
+ * a meal schedule that shows at least one meal. A partner who joins mid-wizard
+ * sees the same list, so either caregiver can finish it.
+ */
+export function setupState(household: Household, puppy: Puppy, feeding: Feeding): {
+  complete: boolean;
+  missing: SetupStep[];
+} {
+  const missing: SetupStep[] = [];
+  if (household.timezoneConfirmedAt === null) missing.push("timezone");
+  if (puppy.name.trim() === "") missing.push("puppy");
+  if (feeding.slots.length === 0) missing.push("meals");
+  return { complete: missing.length === 0, missing };
+}
+
+/** The wire/view shape: document facts plus derived age, roster, meals and setup. */
+export function profileView(household: Household, puppy: Puppy, feeding: Feeding, now: Date): PuppyProfile {
   const today = localDateAt(now, household.timezone);
   return {
     rev: puppy.rev,
@@ -105,16 +114,28 @@ export function profileView(household: Household, puppy: Puppy, now: Date): Pupp
     household: {
       name: household.name,
       timezone: household.timezone,
+      timezoneConfirmedAt: household.timezoneConfirmedAt,
+      rev: household.rev,
       members: household.members.map((member) => ({ ...member })),
     },
+    meals: { rev: feeding.rev, slots: feeding.slots.map((slot) => ({ ...slot })) },
+    setup: setupState(household, puppy, feeding),
     today,
   };
 }
 
-/** Read both documents and build the current view. */
+/**
+ * Read the three committed documents and build the current view. One reader for
+ * HTTP, the `profile` frame and the tools, so all three can never disagree
+ * about the household's state.
+ */
 export async function readProfile(store: DocStore, context: Context, now: Date): Promise<PuppyProfile> {
-  const [household, puppy] = await Promise.all([readHousehold(store, context), readPuppy(store, context)]);
-  return profileView(household, puppy, now);
+  const [household, puppy, feeding] = await Promise.all([
+    readHousehold(store, context),
+    readPuppy(store, context),
+    readFeeding(store, context),
+  ]);
+  return profileView(household, puppy, feeding, now);
 }
 
 function applyPatch(draft: Puppy, patch: PuppyPatch): void {
@@ -167,7 +188,7 @@ export async function updatePuppyProfile(
         // with a name the household no longer has.
         const actor = await input.actor(tx, await tx.doc(HouseholdDoc));
         const draft = await tx.doc(PuppyDoc);
-        if (draft.rev !== input.rev) throw new StaleRevisionError();
+        if (draft.rev !== input.rev) throw new StaleRevisionError("the profile changed since it was read");
 
         const before = { ...draft };
         applyPatch(draft, input.patch);
