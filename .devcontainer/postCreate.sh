@@ -50,6 +50,16 @@ sudo git config --system credential.https://gist.github.com.helper "!${GH_BIN} a
 # used by pi and its tmux-backed subagents; enables modified Enter keys.
 cp "$REPO/.devcontainer/shell/tmux.conf" /home/vscode/.tmux.conf
 
+# --- ssh config for /voice -------------------------------------------------
+# ~/.ssh/config is container-local and wiped on rebuild; restore it from the
+# persisted template on the pi-config volume so /voice can reach the phone.
+# Missing template (fresh volume) is not an error: /voice just stays unusable.
+if [ -f /home/vscode/.pi/ssh/config ]; then
+  mkdir -p /home/vscode/.ssh
+  cp /home/vscode/.pi/ssh/config /home/vscode/.ssh/config
+  chmod 600 /home/vscode/.ssh/config
+fi
+
 # --- pi configuration -----------------------------------------------------
 # Use the same kokomi theme as my-agent-setup/analytics-agent so pi looks
 # identical across projects. Select it WITHOUT clobbering the rest of the

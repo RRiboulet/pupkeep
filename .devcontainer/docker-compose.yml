@@ -11,6 +11,11 @@ services:
       - pupkeep-pi-config:/home/vscode/.pi
     command: sleep infinity
     user: vscode
+    # host.docker.internal resolves to the host's docker gateway; /voice's ssh
+    # config (phone tunnel) depends on it. Without this, `ssh phone` fails with
+    # "Could not resolve hostname host.docker.internal".
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # The dev server must be reachable from the VM's browser-facing path, and
     # Docker can only publish a port that listens on the container's own
     # interface — not on the container's loopback. So the container runs with
