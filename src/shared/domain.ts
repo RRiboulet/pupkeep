@@ -28,7 +28,12 @@ export const COMMANDS_SCHEMA_VERSION = 1 as const;
  */
 export const FEEDING_SCHEMA_VERSION = 2 as const;
 export const NOTIFICATIONS_SCHEMA_VERSION = 1 as const;
-export const WALKS_SCHEMA_VERSION = 1 as const;
+/**
+ * Version 2 adds `discarded` (P2-07): a stale walk can be resolved by ending it
+ * or by discarding it, and the history must keep the difference. A version-1
+ * document is valid as version 2, so `migrate` only restamps it.
+ */
+export const WALKS_SCHEMA_VERSION = 2 as const;
 
 export type MemberProfile = { id: string; name: string };
 
@@ -172,6 +177,13 @@ export type Walk = {
   dogsMet?: string;
   mood?: string;
   notes?: string;
+  /**
+   * A stale walk the caregivers chose to throw away rather than believe: the
+   * timestamps are real but the duration is not, so the record keeps the fact
+   * instead of pretending it was an ordinary end. Only valid on an ended walk,
+   * and never with observations.
+   */
+  discarded?: true;
 };
 
 /**

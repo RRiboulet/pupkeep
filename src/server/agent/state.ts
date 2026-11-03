@@ -28,7 +28,7 @@ import type { ThreadBus } from "./bus.ts";
  * feeds it is listed here: a timezone confirmation or a meal-schedule save
  * reaches the other caregiver exactly like a profile edit does.
  */
-const PROFILE_KINDS = new Set(["app.puppy", "app.household", "app.feeding"]);
+const PROFILE_KINDS = new Set(["app.puppy", "app.household", "app.feeding", "app.walks"]);
 
 export interface ProfileStateOptions {
   readonly harness: Harness;

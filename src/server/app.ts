@@ -47,6 +47,7 @@ import { ThreadBus } from "./agent/bus.ts";
 import { pickInitialModel, SHARED_THREAD_INSTRUCTIONS } from "./agent/model.ts";
 import { watchProfileState, type ProfileStateWatch } from "./agent/state.ts";
 import { createFeedTools } from "./agent/feed-tools.ts";
+import { createWalkTools } from "./agent/walk-tools.ts";
 import { createProfileTools } from "./agent/tools.ts";
 import {
   configureSharedThread,
@@ -333,6 +334,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   const registry = options.registry ?? createRegistry<ToolRegistration>();
   registry.install(createProfileTools());
   registry.install(createFeedTools());
+  registry.install(createWalkTools());
 
   const parked = new Map<string, ParkedTask>();
   const report = (error: unknown, info: ReportInfo): void => {

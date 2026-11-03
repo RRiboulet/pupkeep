@@ -349,3 +349,14 @@ a.button {
 .meal-form {
   margin-top: 0.75rem;
 }
+
+/* --- Today walk (P2-07) ---------------------------------------------------- */
+
+.walk__who {
+  margin: 0.25rem 0 0.25rem;
+  font-weight: 600;
+}
+
+.walk__who [role="timer"] {
+  font-variant-numeric: tabular-nums;
+}

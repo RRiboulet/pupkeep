@@ -31,13 +31,16 @@ import {
 import { recentActivity } from "../domain/activity.ts";
 import { ActivityDoc, parseActivity, type DocStore } from "../domain/docs.ts";
 import { readFeeding } from "../domain/feeding.ts";
+import { WalksUnavailableError, readWalks } from "../domain/walks.ts";
+import { openWalk } from "../../shared/walks.ts";
 import { readProfile, updatePuppyProfile } from "../domain/profile.ts";
 import { localTimeAt } from "../domain/time.ts";
 import { feedingDayText } from "./feed-text.ts";
+import { openWalkText } from "./walk-text.ts";
 import { refused, speakerSeam, text } from "./tool-kit.ts";
 
 /** §10.1 sections this build does not track yet. Remove one per phase. */
-const NOT_TRACKED = ["walks", "growth", "milestones", "appointments", "showers"] as const;
+const NOT_TRACKED = ["growth", "milestones", "appointments", "showers"] as const;
 
 /**
  * The name and breed are caregiver free text, so they are rendered as JSON
@@ -82,13 +85,20 @@ export function createProfileTools(): Extension<ToolRegistration> {
     name: "get_context",
     description:
       "Read the current household state: now, the household-local date, the caregivers, the puppy profile and age, " +
-      "today's meals and who fed each, and recent activity. Sections this build does not track are listed in the " +
-      "answer; say so instead of guessing.",
+      "today's meals and who fed each, the open walk, and recent activity. Sections this build does not track are " +
+      "listed in the answer; say so instead of guessing.",
     parameters: Type.Object({}),
     execute: async (_args, api, context) => {
       const now = new Date(api.now());
       const profile = await readProfile(api, context, now);
       const feeding = await readFeeding(api, context);
+      let walkLine = "Walk: unavailable (retry after boot)";
+      try {
+        walkLine = openWalkText(openWalk((await readWalks(api, context)).walks), now, profile.household.timezone);
+      } catch (error) {
+        // One unreadable document must not cost the model every other section.
+        if (!(error instanceof WalksUnavailableError)) throw error;
+      }
       const activity = await api.snapshot(ActivityDoc, context);
       const parsed = activity === undefined ? undefined : parseActivity(activity);
       // Names are free text too (an invite's display name), so they get the
@@ -109,6 +119,9 @@ export function createProfileTools(): Extension<ToolRegistration> {
             profile.today,
             profile.household.timezone,
           )}`,
+          // §10.1's open walk, with the server clock so "running for" is not a
+          // device-clock guess.
+          walkLine,
           `Recent activity:\n${activityText(parsed ? recentActivity(parsed, 10) : [])}`,
           `Not tracked by this build yet: ${NOT_TRACKED.join(", ")}`,
         ].join("\n"),

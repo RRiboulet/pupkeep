@@ -221,12 +221,26 @@ export const NotificationsDoc = defineDoc<Notifications>({
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
-/** The open walk and the walk history (P2-06). */
+/** The open walk and the walk history (P2-06; version 2 adds discard, P2-07). */
 export const WalksDoc = defineDoc<Walks>({
   kind: "app.walks",
-  version: 1,
+  version: 2,
   scope: "session",
   initial: emptyWalks,
+  // A version-1 document has no discarded walks; every stored record is still a
+  // valid version-2 record (the field is optional), so this only restamps it.
+  migrate(value, fromVersion) {
+    if (fromVersion !== 1) {
+      throw new Error(`app.walks has no migration from version ${fromVersion}`);
+    }
+    const migrated = {
+      ...(value as unknown as Record<string, unknown>),
+      schemaVersion: WALKS_SCHEMA_VERSION,
+    };
+    const parsed = parseWalks(migrated);
+    if (!parsed) throw new Error("app.walks version 1 does not migrate to a valid version 2");
+    return parsed;
+  },
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 

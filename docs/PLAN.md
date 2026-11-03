@@ -949,7 +949,10 @@ version 2, and `migrate` fills `rev: 0` and `timezoneConfirmedAt: null` — the
 captured zone is kept but stays unconfirmed, because nobody has checked it. The
 third is P2-01's `app.feeding` feed events: schema 2, document version 2, and
 `migrate` adds `events: []` while keeping the slots and the revision, so a phone
-that set its meal times keeps them.
+that set its meal times keeps them. The fourth is P2-07's walk discard:
+`app.walks` moves to schema 2 and document version 2, and `migrate` only restamps
+a version-1 document, because the new `discarded` marker is optional and every
+stored walk is still valid.
 
 ### 8.2 Host-side data
 
@@ -1022,6 +1025,7 @@ type Walk = {
   dogsMet?: string;
   mood?: string;
   notes?: string;
+  discarded?: true;                  // stale walk thrown away; duration not trusted
 };
 
 type Appointment = {
@@ -2939,8 +2943,53 @@ the shared thread answers via a fake provider; a restart loses nothing.
       archive threshold — the refactor that table-drives bootstrap's
       create/repair/refuse path should also land before P3-01 adds four more
       documents.
-- [ ] **P2-07** Walk HTTP + agent tools + UI: start, live timer, end form,
+- [x] **P2-07** Walk HTTP + agent tools + UI: start, live timer, end form,
       stale-walk banner with end/discard; new start blocked until resolved.
+      **Landed:** `GET /api/walks`, `POST /api/walks/start`, `/end`, `/discard`
+      in `src/server/http.ts`; the `walks` extension with `start_walk`/`end_walk`
+      (`src/server/agent/walk-tools.ts`, copy in `walk-text.ts`) installed beside
+      the profile and feeding extensions; the Today walk card in
+      `web/views/today.js` over the pure timer helpers in `web/walks.js`; and
+      `app.walks` moves to version 2 with a `discarded` marker and a `migrate`
+      from version 1. Decisions: (1) **discard is a marked end**, not a deleted
+      record: the timestamps stay real, the duration is not trusted, and the
+      history keeps the difference (`discarded: true`, no observations). The
+      surface offers it **only on a stale walk**, the service refuses a fresh walk
+      (end it instead), and the agent has **no discard tool** — throwing a record
+      away is a caregiver's tap, not a model's inference. (2) **the HTTP end/discard
+      forms must pass the `walkId` they rendered**; the agent's "end the walk"
+      omits it and ends the open one. The 409 family is `walk_open`/`walk_stale`
+      (with the blocking record), `walk_ended` (with who/when) and
+      `walk_missing`. (3) **the timer is the server's**: `GET /api/walks` carries
+      `serverNow` and §8.5's `staleAfterMs`, the card records when it received
+      them and advances that instant locally, so a phone whose clock is minutes
+      off shows the same walk time to both caregivers. One tick per second
+      re-renders (the meals card ages "overdue" for free); it makes no request.
+      (4) **live updates reuse the care frame**: `app.walks` joined
+      `PROFILE_KINDS`, so a commit bumps `careSeq` and the card re-reads
+      `/api/walks` once per frame — no second stream. (5) **the tools are the
+      routes' service calls** (`replay: "safe"`, `tool:` action ids), and a
+      refused start/end is a sentence the model repeats (`walkOpenMessage` /
+      `walkEndedMessage`), never a failed task. (6) `get_context` now reports the
+      open walk and `walks` left `NOT_TRACKED`.
+      **Verified:** 5 route tests in `test/walk-routes.test.ts` (the open/clock/
+      window GET and `no-store`, start and the `walk_open`/`walk_stale` 409s, end
+      with observations and a normalised replay, `walk_ended` with the record,
+      the required `walkId`, a fresh discard refused and a stale one marked,
+      misspelt/typed observations, `walk_missing`, and the shared guards); 4 tool
+      tests in `test/walk-tools.test.ts` (commit + attribution + memo, replay
+      including a start replayed after the end, already-open/stale refusals,
+      invalid observations, `get_context`'s walk line); 16 domain tests in
+      `test/walks.test.ts` (discard-only-when-stale, the v1→v2 migration, the
+      concurrency pairs, and a walk commit publishing the care frame); and client
+      tests for the server-corrected timer, the stale clamp, the household-zone
+      time, start/409/end/discard behaviour, the arrival-order guard, the form
+      reset on a conflict and the rendered card. The suite is 445/445.
+      **Not verified:** no real browser or phone has shown the walk card, its
+      one-second timer or the discard confirmation; the partner leg is P0-10; the
+      two-client live race is P2-08's; and the activity line for a very long
+      "end" keeps the real duration (the UI clamps what it displays, the audit
+      record does not).
 - [ ] **P2-08** Tests: same/different actionId, concurrent feed, feed race with
       agent, walk across restart, stale walk, two-client live update.
 - [ ] **P2-09** Feed reminder task skeleton (slot + delay; can land in Phase 4 if

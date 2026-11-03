@@ -21,9 +21,11 @@ import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { createRegistry } from "@earendil-works/pi-durable";
 import { emptyConfig, type MemberRecord } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
-import { ActivityDoc, CommandsDoc, WalksDoc, parseWalks } from "../src/server/domain/docs.ts";
+import { ActivityDoc, CommandsDoc, WalksDoc, emptyWalks, parseWalks } from "../src/server/domain/docs.ts";
 import { DomainConflictError } from "../src/server/domain/errors.ts";
-import { WalksUnavailableError, endWalk, readWalks, startWalk } from "../src/server/domain/walks.ts";
+import { WalksUnavailableError, discardWalk, endWalk, readWalks, startWalk } from "../src/server/domain/walks.ts";
+import { watchProfileState } from "../src/server/agent/state.ts";
+import { createLogger } from "../src/server/log.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import {
   WALK_OBSERVATION_RULE,
@@ -125,6 +127,7 @@ test("a walk is a server-timestamped record, and only one walk can be open", () 
   assert.equal(parseWalk({ ...ended, pee: 21 }), undefined, "a typo of 21 is refused");
   assert.equal(parseWalk({ ...ended, mood: "x".repeat(41) }), undefined);
   assert.equal(parseWalk({ ...walk(), endActionId: "http:end-1" }), undefined, "an open walk carries no end fields");
+  assert.equal(parseWalk({ ...walk(), discarded: true }), undefined, "an open walk cannot be discarded");
 
   assert.deepEqual(parseWalkList([walk(), ended]), [walk(), ended]);
   // The shared opaque-id charset is enforced, not just the length.
@@ -316,7 +319,7 @@ test("a nested or model-less start records the household actor with a null id", 
 
 test("a missing or malformed walk document is unavailable, not an empty walk", async () => {
   await withWalksHarness(async ({ harness }) => {
-    const malformed = { schemaVersion: 1, createdAt: NOON.toISOString(), walks: [{ id: "walk-1" }] };
+    const malformed = { schemaVersion: 2, createdAt: NOON.toISOString(), walks: [{ id: "walk-1" }] };
     await harness.commit(async (tx) => {
       Object.assign(await tx.doc(WalksDoc), malformed);
     }, context);
@@ -386,11 +389,11 @@ test("boot creates app.walks for a database that predates it and refuses a malfo
       });
       assert.ok(boot.docsCreated.includes("app.walks"));
       const walks = await opened.harness.snapshot(WalksDoc, context);
-      assert.deepEqual(walks, { schemaVersion: 1, walks: [], createdAt: NOON.toISOString() });
+      assert.deepEqual(walks, { schemaVersion: 2, walks: [], createdAt: NOON.toISOString() });
 
       // A document that exists but does not parse must refuse boot, not reset.
       await opened.harness.commit(async (tx) => {
-        Object.assign(await tx.doc(WalksDoc), { schemaVersion: 1, walks: [{ id: "walk-1" }], createdAt: NOON.toISOString() });
+        Object.assign(await tx.doc(WalksDoc), { schemaVersion: 2, walks: [{ id: "walk-1" }], createdAt: NOON.toISOString() });
       }, context);
     } finally {
       await opened.harness.close(context);
@@ -470,5 +473,90 @@ test("a start replayed after the other caregiver ended it returns the current re
     assert.equal(replay.kind, "replayed", "a lost start response replays");
     assert.ok(replay.kind === "replayed" && replay.walk.endedAt, "and reports the walk as it is now, ended");
     assert.equal((await readWalks(harness, context)).walks.length, 1, "no second walk was appended");
+  });
+});
+
+test("discarding a stale walk marks it instead of inventing a ten-hour end", async () => {
+  await withWalksHarness(async ({ harness }) => {
+    const started = await startWalk(harness, context, { actor: alex, actionId: "http:start-1", now: NOON });
+    assert.equal(started.kind, "started");
+    const walkId = started.kind === "started" ? started.walk.id : "walk-1";
+    const later = new Date(NOON.getTime() + 9 * HOUR);
+
+    // §8.5: a fresh walk is ended, not discarded.
+    await assert.rejects(
+      discardWalk(harness, context, { actor: sam, actionId: "http:discard-early", walkId, now: NOON }),
+      /not stale; end it instead/,
+    );
+
+    const discarded = await discardWalk(harness, context, {
+      actor: sam,
+      actionId: "http:discard-1",
+      walkId,
+      now: later,
+    });
+    assert.equal(discarded.kind, "discarded");
+    const record = discarded.kind === "discarded" ? discarded.walk : undefined;
+    assert.ok(record?.discarded);
+    assert.equal(record?.endedAt, later.toISOString());
+    assert.equal(record?.endedByLabel, "Sam");
+    assert.equal(record?.pee, undefined, "a discard carries no observations");
+
+    const replay = await discardWalk(harness, context, {
+      actor: sam,
+      actionId: "http:discard-1",
+      walkId,
+      now: later,
+    });
+    assert.equal(replay.kind, "replayed");
+    assert.deepEqual(await activity(harness), ["Alex started a walk", "Sam discarded a walk that was left open"]);
+    assert.deepEqual(parseWalks(await harness.snapshot(WalksDoc, context))?.walks[0]?.discarded, true);
+  });
+});
+
+test("the walk document migrates version 1 to version 2 without losing a record", async () => {
+  const migrate = WalksDoc.definition.migrate;
+  assert.ok(migrate, "the document declares its migration");
+  const legacy = {
+    schemaVersion: 1,
+    createdAt: NOON.toISOString(),
+    walks: [
+      {
+        id: "walk-1",
+        startedAt: NOON.toISOString(),
+        startedActionId: "http:start-1",
+        startedBy: "owner",
+        startedByLabel: "Alex",
+      },
+    ],
+  };
+  assert.throws(() => migrate(legacy as never, 0), /no migration/);
+  const migrated = migrate(legacy as never, 1);
+  assert.equal(migrated.schemaVersion, 2);
+  assert.equal(migrated.walks[0]?.id, "walk-1", "the open walk survives the upgrade");
+  assert.equal(migrated.walks[0]?.discarded, undefined);
+  assert.deepEqual(emptyWalks().schemaVersion, 2, "a fresh document starts at the current version");
+});
+
+test("a walk commit publishes the care frame, so the other caregiver's card updates live", async () => {
+  await withWalksHarness(async ({ harness }) => {
+    const frames: unknown[] = [];
+    const watch = watchProfileState({
+      harness,
+      context,
+      bus: { publishState: (profile: unknown) => frames.push(profile) },
+      logger: createLogger({ scope: "test", sink: () => undefined }),
+      now: () => new Date(NOON.getTime() + 60_000),
+    });
+    try {
+      await startWalk(harness, context, { actor: alex, actionId: "http:start-1", now: NOON });
+      const deadline = Date.now() + 2000;
+      while (frames.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.ok(frames.length > 0, "app.walks is one of the documents behind the care frame");
+    } finally {
+      watch.stop();
+    }
   });
 });

@@ -301,3 +301,90 @@ export async function endWalk(store: DocStore, context: Context, input: WalkEnd)
     throw error;
   }
 }
+
+export type WalkDiscard = {
+  readonly actor: ActorResolver;
+  readonly actionId: string;
+  /** The walk the banner showed. Required: a discard names its record. */
+  readonly walkId: string;
+  readonly now?: Date;
+};
+
+export type WalkDiscardOutcome =
+  | { kind: "discarded" | "replayed"; walk: Walk }
+  | { kind: "ended-already"; walk: Walk; message: string }
+  | { kind: "no-open"; message: string }
+  | { kind: "key-conflict" };
+
+/**
+ * Discard an open walk: close it at the server's now and mark it, because the
+ * record cannot claim a trustworthy duration. §8.5's other resolution is an
+ * ordinary end; the card offers discard only past its window, because a walk
+ * left open overnight must not become a ten-hour "end" in the history.
+ */
+export async function discardWalk(
+  store: DocStore,
+  context: Context,
+  input: WalkDiscard,
+): Promise<WalkDiscardOutcome> {
+  const now = input.now ?? new Date();
+  const request = { walkId: input.walkId } as JsonObject;
+
+  try {
+    const outcome = await runIdempotent(
+      { store, context },
+      { key: input.actionId, requestHash: requestHashOf(request), now },
+      async (tx) => {
+        const actor = await input.actor(tx, await tx.doc(HouseholdDoc));
+        const walks = await tx.doc(WalksDoc);
+
+        const walk = walks.walks.find((candidate) => candidate.id === input.walkId);
+        if (!walk) throw new WalkMissingRefusal("there is no walk with that id");
+        if (walk.endedAt !== undefined) throw new WalkEndedRefusal({ ...walk });
+        if (now.getTime() < Date.parse(walk.startedAt)) {
+          throw new DomainConflictError(
+            "the server clock is behind this walk's start; discard it once the clock is corrected",
+          );
+        }
+        // §8.5: discard is the *stale* resolution. A fresh walk has a trustworthy
+        // duration, so it is ended, not thrown away.
+        if (!walkIsStale(walk, now)) {
+          throw new DomainConflictError("that walk is not stale; end it instead of discarding it");
+        }
+
+        walk.endedAt = now.toISOString();
+        walk.endActionId = input.actionId;
+        walk.endedBy = actor.id;
+        walk.endedByLabel = actor.label;
+        walk.discarded = true;
+
+        const draft = walks.walks.map((candidate) => (candidate.id === walk.id ? { ...walk } : candidate));
+        if (!parseWalkList(draft)) throw new DomainConflictError("that walk could not be discarded");
+        walks.walks = draft;
+        if (walks.createdAt === "") walks.createdAt = now.toISOString();
+
+        appendActivity(
+          await tx.doc(ActivityDoc),
+          activityEntry({
+            kind: "walk.discarded",
+            summary: `${actor.label} discarded a walk that was left open`,
+            actorId: actor.id,
+            actorLabel: actor.label,
+            now,
+          }),
+        );
+        return { walk: { ...walk } };
+      },
+    );
+
+    if (outcome.kind === "conflict") return { kind: "key-conflict" };
+    const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as { walk: Walk };
+    return { kind: outcome.kind === "replayed" ? "replayed" : "discarded", walk: recorded.walk };
+  } catch (error) {
+    if (error instanceof WalkEndedRefusal) {
+      return { kind: "ended-already", walk: error.walk, message: error.message };
+    }
+    if (error instanceof WalkMissingRefusal) return { kind: "no-open", message: error.message };
+    throw error;
+  }
+}

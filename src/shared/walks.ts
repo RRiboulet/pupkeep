@@ -68,9 +68,21 @@ const WALK_KEYS = [
   "dogsMet",
   "mood",
   "notes",
+  "discarded",
 ] as const;
 
-const END_KEYS = ["endActionId", "endedAt", "endedBy", "endedByLabel", "pee", "poop", "dogsMet", "mood", "notes"] as const;
+const END_KEYS = [
+  "endActionId",
+  "endedAt",
+  "endedBy",
+  "endedByLabel",
+  "pee",
+  "poop",
+  "dogsMet",
+  "mood",
+  "notes",
+  "discarded",
+] as const;
 const OBSERVATION_KEYS = ["pee", "poop", "dogsMet", "mood", "notes"] as const;
 
 /** What a caregiver fills in when ending a walk; absent fields are "not noted". */
@@ -215,6 +227,13 @@ export function parseWalk(raw: unknown): Walk | undefined {
   walk.endedByLabel = endedLabel;
   // Only the observation keys: `parseWalkObservations` refuses unknown keys, so
   // it is handed its own subset rather than the whole walk record.
+  if (record.discarded !== undefined) {
+    if (record.discarded !== true) return undefined;
+    // A discard is a resolution, not an end form: it carries no observations.
+    if (OBSERVATION_KEYS.some((key) => record[key] !== undefined)) return undefined;
+    walk.discarded = true;
+    return walk;
+  }
   const observations: Record<string, unknown> = {};
   for (const key of OBSERVATION_KEYS) {
     if (record[key] !== undefined) observations[key] = record[key];
@@ -276,14 +295,15 @@ export function walkIsStale(walk: Walk, now: Date): boolean {
 /** The one 409 sentence for a start blocked by an open (or stale) walk. */
 export function walkOpenMessage(walk: Walk, stale: boolean): string {
   return stale
-    ? `${JSON.stringify(walk.startedByLabel)} left a walk open over ${WALK_STALE_AFTER_MS / 3_600_000} hours ago; end it before starting another`
+    ? `${JSON.stringify(walk.startedByLabel)} has had a walk open for over ${WALK_STALE_AFTER_MS / 3_600_000} hours; end or discard it before starting another`
     : `${JSON.stringify(walk.startedByLabel)} is already walking; end that walk before starting another`;
 }
 
 /** The one 409 sentence for an end that lost the race (§7.3: who/when). */
 export function walkEndedMessage(walk: Walk): string {
   const when = walk.endedAt === undefined ? "already" : `at ${walk.endedAt}`;
-  return `${JSON.stringify(walk.endedByLabel ?? walk.startedByLabel)} already ended this walk ${when}`;
+  const what = walk.discarded ? "discarded" : "ended";
+  return `${JSON.stringify(walk.endedByLabel ?? walk.startedByLabel)} already ${what} this walk ${when}`;
 }
 
 export type { Walks };
