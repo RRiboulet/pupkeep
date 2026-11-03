@@ -325,6 +325,20 @@ export function feedingDay(feeding: Feeding, localDate: string): FeedingDay {
 }
 
 /**
+ * The HTTP day view: the committed day plus §12.1's reminder delay
+ * (`app.household.settings.feedReminderDelayMin`) — a slot is overdue once that
+ * many minutes have passed its household wall-clock time and it is still unfed.
+ * The household-local date is *not* sent: the client derives it from the
+ * household zone it already holds, so an open screen crosses midnight without
+ * asking the server which day it is on.
+ */
+export type MealDayView = FeedingDay & { overdueAfterMin: number };
+
+export function mealDayView(day: FeedingDay, overdueAfterMin: number): MealDayView {
+  return { ...day, overdueAfterMin };
+}
+
+/**
  * The committed feed and the day it landed on — the common half of a meal
  * write's 200 and its 409. `localDate` comes from the event, not from a clock
  * read at response time: a feed accepted at 23:59:59 answers its own date (§8.1).

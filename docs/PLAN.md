@@ -2831,8 +2831,51 @@ the shared thread answers via a fake provider; a restart loses nothing.
       live tool task; and the parser still accepts a real member id paired with
       the household label (the writer no longer produces one), which a future
       document version should refuse.
-- [ ] **P2-05** Today meals UI: fed/pending/overdue, who/when, disabled state,
-      extra feeding, live updates.
+- [x] **P2-05** Today meals UI: fed/pending/overdue, who/when, disabled state,
+      extra feeding, live updates. **Landed:** `web/views/today.js` (a class
+      component — the shell has no hooks), `web/meals.js` (the pure status rule,
+      formatter cache, zone-local date/minutes), and `MealDayView =
+      FeedingDay & {overdueAfterMin}` in `src/shared/feeding.ts` so the day GET
+      carries §12.1's reminder delay. Decisions: (1) **overdue is a client
+      rule**, not a server status: the card must age without a request, and
+      §12.1's threshold is a reminder property the agent should not assert, so
+      `feedingDay` stays display-free and the rule lives once, pure, in
+      `meals.js` (fed wins; past day overdue; future day pending; today once
+      `timeLocal + delay <= household-local now`). (2) **the day sends the delay,
+      not the date**: `today` is derived in the browser from the household zone
+      (the same `Intl` parts the server uses), so a screen left open overnight
+      crosses midnight, re-reads the day and stops calling yesterday "Today".
+      (3) **live updates are a signal, not data**: a feed does not bump any
+      revision, so `live.js` bumps a named `careSeq` on every applied care frame
+      and the card re-reads `/api/feeding/day` once per frame — no second stream,
+      no feeding data on the `profile` frame, and no dependence on object
+      identity. (4) **never optimistic**: the slot is painted fed only from a
+      response; a 409 `already_fed` shows who/when and uses the day the 409
+      already carries (no second read that could fail silently), an ambiguous
+      failure keeps the idempotency key so a retry replays, and a definite
+      refusal or a commit drops it. (5) **arrival order is not freshness order**:
+      `loadSeq` is invalidated by every committed write, so a slow GET cannot
+      un-feed a meal the caregiver just logged. (6) The card is keyboard-first:
+      status is words plus a redundant colour, errors are `role="alert"` and
+      success `role="status"`, a commit or conflict moves focus to the message,
+      and a button's accessible name contains its visible text.
+      **Verified:** 10 new tests in `test/client.test.js` (31 in the file) —
+      the status boundaries (delay, past/future day, 23:50 at 00:05, an unknown
+      time or clock never overdue), DST date/minute derivation and an unusable
+      zone, the day's rows, a care frame re-reading the day even when its payload
+      is identical, mounting before a profile arrives, an in-flight write never
+      painting fed, a slow read losing to a committed write, the 409 path using
+      its own day and saying only what happened, the key kept on an ambiguous
+      failure and reused on retry, one write for two taps, the conflict/key
+      branches, the delay surviving a write's plainer day, and the rendered copy
+      (`Overdue — not fed yet`, no button on a fed slot). The route test asserts
+      `overdueAfterMin` rides with the day. The shell's precache now includes
+      `meals.js`; the suite is 413/413.
+      **Not verified:** no real browser or phone has rendered the card yet (the
+      unit tests drive the component without a DOM), so the live-frame refresh,
+      the midnight rollover and the focus move need a device check on the
+      localhost/Tailscale origins; the partner leg is P0-10; walks (P2-07) are
+      the next card and will need the same write-state rules.
 - [ ] **P2-06** `app.walks` doc + domain service: start, end, details, one open
       walk, server timestamps, `startActionId`/`endActionId`, stale rule.
 - [ ] **P2-07** Walk HTTP + agent tools + UI: start, live timer, end form,

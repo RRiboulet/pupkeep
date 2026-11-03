@@ -45,6 +45,7 @@ import {
   MEAL_SCHEDULE_RULE,
   feedDayView,
   feedingDay,
+  mealDayView,
   parseMealSlots,
   type FeedConflictView,
   type FeedWriteView,
@@ -859,9 +860,11 @@ async function handleMealSlotsUpdate(
  * The day view: the household's current local date, its active slots with the
  * feed that claimed each, and the extra feedings. Built by the shared
  * `feedingDay`, so this route and P2-04's tool cannot disagree about a day. The
- * household is read once, for the zone the date derives from (§8.1); a client
- * renders each `at`/`timeLocal` in that same `household.timezone`, which it
- * already has in the profile, never in the device's zone.
+ * household is read once, for the zone the date derives from (§8.1) and for
+ * §12.1's reminder delay, which rides with the day so the card can age "overdue"
+ * without another request; a client renders each `at`/`timeLocal` in that same
+ * `household.timezone`, which it already has in the profile, never in the
+ * device's zone.
  */
 async function handleFeedingDay(deps: HttpDeps, res: ServerResponse): Promise<void> {
   const now = new Date(deps.now?.() ?? Date.now());
@@ -869,7 +872,8 @@ async function handleFeedingDay(deps: HttpDeps, res: ServerResponse): Promise<vo
     readHousehold(deps.thread.harness, deps.thread.context),
     readFeeding(deps.thread.harness, deps.thread.context),
   ]);
-  sendJson(res, 200, feedingDay(feeding, localDateAt(now, household.timezone)));
+  const today = localDateAt(now, household.timezone);
+  sendJson(res, 200, mealDayView(feedingDay(feeding, today), household.settings.feedReminderDelayMin));
 }
 
 interface FeedBody {

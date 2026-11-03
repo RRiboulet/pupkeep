@@ -41,6 +41,7 @@ const PRECACHE = [
   "./live.js",
   "./store.js",
   "./profile-form.js",
+  "./meals.js",
   "./views/today.js",
   "./views/calendar.js",
   "./views/pup.js",

@@ -25,7 +25,7 @@ import { dataStores } from "../src/server/config.ts";
 import { createLogger } from "../src/server/log.ts";
 import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
 import type { FeedEvent, MealSlot } from "../src/shared/domain.ts";
-import type { FeedingDay, FeedWriteView } from "../src/shared/feeding.ts";
+import type { FeedWriteView, MealDayView } from "../src/shared/feeding.ts";
 import type { PuppyProfile } from "../src/shared/profile.ts";
 
 const SLOTS: MealSlot[] = [
@@ -127,10 +127,10 @@ async function mutate(
   });
 }
 
-async function getDay(fixture: Fixture, token: string): Promise<{ day: FeedingDay; response: Response }> {
+async function getDay(fixture: Fixture, token: string): Promise<{ day: MealDayView; response: Response }> {
   const response = await fetch(`${fixture.url}/api/feeding/day`, { headers: { Cookie: cookieFor(token) } });
   assert.equal(response.status, 200);
-  return { day: (await response.json()) as FeedingDay, response };
+  return { day: (await response.json()) as MealDayView, response };
 }
 
 async function careView(fixture: Fixture, token: string): Promise<PuppyProfile> {
@@ -165,6 +165,7 @@ test("the day view is the local date's active slots, the feed that claimed one, 
 
     const empty = await getDay(fixture, fixture.alexCookie);
     assert.equal(empty.day.localDate, today, "the date is the household's, not UTC's");
+    assert.equal(empty.day.overdueAfterMin, 15, "§12.1's reminder delay rides with the day");
     assert.deepEqual(
       empty.day.slots.map((entry) => entry.slot.id),
       ["slot-b", "slot-d"],
@@ -218,7 +219,7 @@ test("a second caregiver on a fed slot is a 409 with who/when and the current da
 
     const conflict = await logFed(fixture, fixture.samCookie, { slotId: "slot-b" }, "sam-feed");
     assert.equal(conflict.status, 409);
-    const body = await json<{ error: string; message: string; feed: FeedEvent; day: FeedingDay }>(conflict);
+    const body = await json<{ error: string; message: string; feed: FeedEvent; day: MealDayView }>(conflict);
     assert.equal(body.error, "already_fed");
     assert.match(body.message, /Alex already logged this meal at \d{2}:\d{2}/);
     assert.equal(body.feed.id, feed.id, "the committed record, not a new attempt");
@@ -369,7 +370,7 @@ test("the day is derived in the household's zone, not from the UTC date", async 
 
     const conflict = await logFed(fixture, fixture.samCookie, { slotId: "slot-d" }, "paris-sam");
     assert.equal(conflict.status, 409);
-    assert.equal((await json<{ day: FeedingDay }>(conflict)).day.localDate, "2026-10-30");
+    assert.equal((await json<{ day: MealDayView }>(conflict)).day.localDate, "2026-10-30");
   } finally {
     await stop(fixture);
   }

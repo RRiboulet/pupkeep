@@ -284,3 +284,68 @@ a.button {
   justify-content: center;
   text-decoration: none;
 }
+
+/* --- Today meals (P2-05) -------------------------------------------------- */
+
+.meals {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.meal {
+  padding: 0.75rem;
+  border: 1px solid #e4e0ec;
+  border-left-width: 4px;
+  border-radius: var(--radius);
+}
+
+/* Status is never colour-only: the text says "Overdue" / "Pending" / "Fed",
+   and the border is the redundant cue. */
+.meal--fed {
+  border-left-color: #2f7d4f;
+}
+
+.meal--pending {
+  border-left-color: #b58a1c;
+}
+
+.meal--overdue {
+  border-left-color: #b0413e;
+}
+
+.meal__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.meal__label {
+  font-weight: 700;
+}
+
+.meal__time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.meal__status {
+  margin: 0.25rem 0 0.75rem;
+  color: var(--muted);
+}
+
+.meal--overdue .meal__status {
+  color: #7a1f1f;
+  font-weight: 600;
+}
+
+.meals__extras {
+  margin-top: 1rem;
+}
+
+.meal-form {
+  margin-top: 0.75rem;
+}
