@@ -9,6 +9,9 @@
 //     not the strings an earlier draft of §8.3 showed.
 
 import type { JsonValue } from "@earendil-works/chord";
+// Type-only on purpose: `notifications.ts` value-imports this module, so a value
+// import here would make the document shapes and the catalog load-order cyclic.
+import type { NotificationIntentCategory } from "./notifications.ts";
 
 /**
  * Version 2 adds `rev` and `timezoneConfirmedAt` (P1-14); a version-1 document
@@ -24,6 +27,7 @@ export const COMMANDS_SCHEMA_VERSION = 1 as const;
  * only) migrates on read, so a phone that set up its meal times keeps them.
  */
 export const FEEDING_SCHEMA_VERSION = 2 as const;
+export const NOTIFICATIONS_SCHEMA_VERSION = 1 as const;
 
 export type MemberProfile = { id: string; name: string };
 
@@ -127,6 +131,42 @@ export type Feeding = {
   createdAt: string;
 };
 
+/**
+ * One committed notification **intent** (PLAN §12.3). P2-02 writes these in the
+ * same commit as the care action; P4-05 adds the outbox/delivery fields, so this
+ * is deliberately the smallest shape an in-app centre needs: who it is for, why,
+ * what to show, and when it was made.
+ *
+ * `title` is category text from `shared/notifications.ts` and is the only text a
+ * push or ntfy body may carry (§14.3). `body` is in-app copy built by app code —
+ * never the model, and never pushed.
+ */
+export type NotificationIntent = {
+  id: string;
+  /**
+   * Server-authoritative dedupe key (§12.3): a repeated intent is dropped, not
+   * duplicated. Format is per category; the feeding service owns its own.
+   */
+  dedupeKey: string;
+  category: NotificationIntentCategory;
+  /** Config member id the item is for. */
+  userId: string;
+  /** Category-only title; safe for push and ntfy. */
+  title: string;
+  /** In-app text, app-built; never sent to a push service. */
+  body: string;
+  createdAt: string;
+  /** null until a caregiver reads it (P4-06's centre). */
+  readAt: string | null;
+};
+
+/** `app.notifications`: committed intents, append-mostly (P2-02; P4-05 extends). */
+export type Notifications = {
+  schemaVersion: typeof NOTIFICATIONS_SCHEMA_VERSION;
+  items: NotificationIntent[];
+  createdAt: string;
+};
+
 export type PuppySex = "male" | "female";
 
 export type Puppy = {
@@ -180,6 +220,13 @@ export type Commands = {
   createdAt: string;
   entries: CommandRecord[];
 };
+
+/**
+ * The charset every opaque id in a document shares: slot ids, logged-meal ids,
+ * action ids, command keys and notification intent ids. One rule, one place, so
+ * a key accepted by the routes cannot be refused by a document parser later.
+ */
+export const OPAQUE_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 
 /**
  * A UTC instant, ISO 8601 with a trailing `Z`: the one rule for every stored

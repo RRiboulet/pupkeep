@@ -33,6 +33,7 @@ import {
   DEFAULT_HOUSEHOLD_SETTINGS,
   FEEDING_SCHEMA_VERSION,
   HOUSEHOLD_SCHEMA_VERSION,
+  NOTIFICATIONS_SCHEMA_VERSION,
   PUPPY_SCHEMA_VERSION,
   type Activity,
   type ActivityEntry,
@@ -43,10 +44,12 @@ import {
   type HouseholdSettings,
   isIsoInstant,
   type MemberProfile,
+  type Notifications,
   type Puppy,
   type PuppySex,
 } from "../../shared/domain.ts";
 import { parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
+import { parseNotificationIntents } from "../../shared/notifications.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
 
 /**
@@ -106,6 +109,11 @@ export function emptyCommands(): Commands {
 /** A fresh schedule: no slots until first-run setup writes them, no meals yet. */
 export function emptyFeeding(): Feeding {
   return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: 0, slots: [], events: [], createdAt: "" };
+}
+
+/** No committed notification intents yet. */
+export function emptyNotifications(): Notifications {
+  return { schemaVersion: NOTIFICATIONS_SCHEMA_VERSION, items: [], createdAt: "" };
 }
 
 export const HouseholdDoc = defineDoc<Household>({
@@ -194,6 +202,15 @@ export const FeedingDoc = defineDoc<Feeding>({
     if (!parsed) throw new Error("app.feeding version 1 does not migrate to a valid version 2");
     return parsed;
   },
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/** Committed notification intents (P2-02 writes them; P4-05 adds delivery). */
+export const NotificationsDoc = defineDoc<Notifications>({
+  kind: "app.notifications",
+  version: 1,
+  scope: "session",
+  initial: emptyNotifications,
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -405,4 +422,19 @@ export function parseFeeding(value: unknown): Feeding | undefined {
   const events = parseFeedEvents(record.events);
   if (!events) return undefined;
   return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: record.rev, slots, events, createdAt: record.createdAt };
+}
+
+/**
+ * `app.notifications`: committed intents. The list invariants live in
+ * `shared/notifications.ts` (unique keys and ids, title ⇔ category) so a caller
+ * that builds a batch validates it with the same rules the document uses —
+ * exactly how `parseFeeding` delegates to `parseFeedEvents`.
+ */
+export function parseNotifications(value: unknown): Notifications | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== NOTIFICATIONS_SCHEMA_VERSION) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  const items = parseNotificationIntents(record.items);
+  if (!items) return undefined;
+  return { schemaVersion: NOTIFICATIONS_SCHEMA_VERSION, items, createdAt: record.createdAt };
 }

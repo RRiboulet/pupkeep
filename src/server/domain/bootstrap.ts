@@ -2,10 +2,12 @@
 //
 // The first boot is one commit: two ownerless conversations (the human-facing
 // thread and the hidden system thread) and the household, puppy, activity,
-// commands and feeding documents. A crash therefore leaves either all of it or
-// none of it; a second boot reads the household and only repairs what is
-// missing — including `app.feeding` for a database that predates P1-14, so an
-// upgraded phone gets the meal-slot wizard instead of a 503 on the care view.
+// commands, feeding and notifications documents. A crash therefore leaves
+// either all of it or none of it; a second boot reads the household and only
+// repairs what is missing — including `app.feeding` for a database that
+// predates P1-14 and `app.notifications` for one that predates P2-02, so an
+// upgraded phone gets the meal-slot wizard and the feed service instead of a
+// 503 on the care view.
 //
 // The household is the authority for display names after a profile exists.
 // `config.json` is the authority for auth identities and roles: it seeds a
@@ -14,18 +16,28 @@
 
 import type { Context } from "@earendil-works/chord";
 import type { ConversationId, Harness } from "@earendil-works/pi-durable";
-import type { Activity, Commands, Feeding, Household, MemberProfile, Puppy } from "../../shared/domain.ts";
+import type {
+  Activity,
+  Commands,
+  Feeding,
+  Household,
+  MemberProfile,
+  Notifications,
+  Puppy,
+} from "../../shared/domain.ts";
 import { activeMembers, reconcileMembers, type AppConfig, type Reconciliation } from "../config.ts";
 import {
   ActivityDoc,
   CommandsDoc,
   FeedingDoc,
   HouseholdDoc,
+  NotificationsDoc,
   PuppyDoc,
   emptyActivity,
   emptyCommands,
   emptyFeeding,
   emptyHousehold,
+  emptyNotifications,
   emptyPuppy,
   isIanaZone,
   parseActivity,
@@ -33,6 +45,7 @@ import {
   parseFeeding,
   parseHousehold,
   parseMemberProfiles,
+  parseNotifications,
   parsePuppy,
 } from "./docs.ts";
 
@@ -127,6 +140,10 @@ function initialFeeding(createdAt: string): Feeding {
   return { ...emptyFeeding(), createdAt };
 }
 
+function initialNotifications(createdAt: string): Notifications {
+  return { ...emptyNotifications(), createdAt };
+}
+
 async function clearSystemModel(harness: Harness, id: ConversationId, context: Context): Promise<boolean> {
   const conversation = await harness.conversation(id, context);
   if (!conversation) {
@@ -164,6 +181,9 @@ export async function bootstrapSession(
     if ((await harness.snapshot(FeedingDoc, context)) !== undefined) {
       throw new BootstrapError("app.household is missing but app.feeding exists; refusing to reset it");
     }
+    if ((await harness.snapshot(NotificationsDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.notifications exists; refusing to reset it");
+    }
 
     const createdAt = now().toISOString();
     const timezone = options.timezone ?? defaultTimezone();
@@ -181,6 +201,7 @@ export async function bootstrapSession(
       Object.assign(await tx.doc(ActivityDoc), initialActivity(createdAt));
       Object.assign(await tx.doc(CommandsDoc), initialCommands(createdAt));
       Object.assign(await tx.doc(FeedingDoc), initialFeeding(createdAt));
+      Object.assign(await tx.doc(NotificationsDoc), initialNotifications(createdAt));
 
       return { shared: shared.id, system: system.id };
     }, context);
@@ -192,7 +213,14 @@ export async function bootstrapSession(
       profilesCreated: members.length,
       profilesRemoved: 0,
       nameDrift: [],
-      docsCreated: ["app.household", "app.puppy", "app.activity", "app.commands", "app.feeding"],
+      docsCreated: [
+        "app.household",
+        "app.puppy",
+        "app.activity",
+        "app.commands",
+        "app.feeding",
+        "app.notifications",
+      ],
       clearedSystemModel,
     };
   }
@@ -259,12 +287,19 @@ export async function bootstrapSession(
   if (feedingSnapshot !== undefined && !feeding) {
     throw new BootstrapError("app.feeding is not a shape this build understands; refusing to reset it");
   }
+  const notificationsSnapshot = await harness.snapshot(NotificationsDoc, context);
+  const notifications =
+    notificationsSnapshot === undefined ? undefined : parseNotifications(notificationsSnapshot);
+  if (notificationsSnapshot !== undefined && !notifications) {
+    throw new BootstrapError("app.notifications is not a shape this build understands; refusing to reset it");
+  }
 
   const docsCreated: string[] = [];
   if (!puppy) docsCreated.push("app.puppy");
   if (!activity) docsCreated.push("app.activity");
   if (!commands) docsCreated.push("app.commands");
   if (!feeding) docsCreated.push("app.feeding");
+  if (!notifications) docsCreated.push("app.notifications");
 
   if (membersChanged || docsCreated.length > 0) {
     const createdAt = now().toISOString();
@@ -277,6 +312,7 @@ export async function bootstrapSession(
       if (!activity) Object.assign(await tx.doc(ActivityDoc), initialActivity(createdAt));
       if (!commands) Object.assign(await tx.doc(CommandsDoc), initialCommands(createdAt));
       if (!feeding) Object.assign(await tx.doc(FeedingDoc), initialFeeding(createdAt));
+      if (!notifications) Object.assign(await tx.doc(NotificationsDoc), initialNotifications(createdAt));
     }, context);
   }
 

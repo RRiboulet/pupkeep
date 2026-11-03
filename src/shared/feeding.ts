@@ -25,7 +25,7 @@
 import type { FeedEvent, Feeding, MealSlot } from "./domain.ts";
 import { isLocalDate, hasControlCharacter } from "./profile.ts";
 import { HOUSEHOLD_FALLBACK_LABEL } from "./chat.ts";
-import { isIsoInstant } from "./domain.ts";
+import { OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
 
 /** Most meals a schedule may hold; a puppy eating more than this is a typo. */
 export const MEAL_SLOTS_MAX = 12;
@@ -64,12 +64,8 @@ export const FEED_NOTE_LIMIT = 280;
  * `isIsoInstant` in `domain.ts`.
  */
 const LOCAL_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
-/**
- * The charset for every opaque id in this document: a slot's (`slot-…`), a
- * logged meal's, and its action id (`http:<key>` / `tool:<taskId>`). Opaque to
- * the server, stable across edits.
- */
-const OPAQUE_ID = /^[A-Za-z0-9._:-]+$/;
+/** The shared opaque-id charset (`src/shared/domain.ts`). */
+const OPAQUE_ID = OPAQUE_ID_PATTERN;
 
 /** True for a household wall-clock time, `HH:MM` on a 24-hour clock. */
 export function isLocalTime(value: unknown): value is string {
