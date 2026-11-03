@@ -9,7 +9,7 @@ A shared, agent-operated puppy care app for two caregivers, built on
 > storage, encrypted backup, devcontainer, shared household thread, puppy
 > profile and the first-run setup wizard (timezone, puppy, meal times) are in
 > place, and every pull request typechecks and runs the full test suite
-> (`.github/workflows/ci.yml`). Phase 2 (feeding and walks) is next; the phone
+> (`.github/workflows/ci.yml`). Phase 2 (feeding and walks) is under way; the phone
 > runbook and its Termux scripts are in place, but stay a **draft** until
 > P5-01/P5-04 walk them on a phone. The source of truth is
 > [`docs/PLAN.md`](docs/PLAN.md);

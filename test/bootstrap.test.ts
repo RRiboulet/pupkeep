@@ -18,6 +18,7 @@ import { bootstrapSession, BootstrapError } from "../src/server/domain/bootstrap
 import {
   ActivityDoc,
   CommandsDoc,
+  FeedingDoc,
   HouseholdDoc,
   PuppyDoc,
   emptyHousehold,
@@ -104,6 +105,11 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
     assert.equal(puppy?.rev, 0);
     assert.equal(puppy?.name, "");
     assert.equal(puppy?.createdAt, NOW.toISOString());
+    const feeding = await opened.harness.snapshot(FeedingDoc, context);
+    assert.equal(feeding?.schemaVersion, 2);
+    assert.equal(feeding?.rev, 0);
+    assert.deepEqual(feeding?.slots, [], "the wizard writes the schedule, not boot");
+    assert.deepEqual(feeding?.events, [], "no meals are invented");
     const activity = await opened.harness.snapshot(ActivityDoc, context);
     assert.deepEqual(activity?.entries, []);
     const commands = await opened.harness.snapshot(CommandsDoc, context);

@@ -811,7 +811,9 @@ outside this commit path; they are not care state.
   request hash is 409. A different actionId on an already-fed `(slotId,
   localDate)` returns 409 with who/when. Same for end-walk and approval.
 - Feed uniqueness is a **partial unique index** where `slotId IS NOT NULL`;
-  extra feeds have `slotId = NULL` and never collide.
+  extra feeds have `slotId = NULL` and never collide. The events live inside the
+  `app.feeding` JSON document, so there is no SQL index to create: P2-01 encodes
+  the rule as a parser invariant and P2-02 answers the write with 409.
 - One open walk per puppy; a stale walk must be closed/discarded before a new
   one starts (threshold in §8.5).
 - Appointment/profile edits carry a revision (`rev`) plus `actionId`; stale
@@ -942,7 +944,10 @@ the document version 2, and `migrate` fills `rev: 0` for a version-1 document so
 a phone that ran P1-08 keeps its puppy instead of failing boot. The second is
 P1-14's `app.household` revision and timezone confirmation: schema 2, document
 version 2, and `migrate` fills `rev: 0` and `timezoneConfirmedAt: null` — the
-captured zone is kept but stays unconfirmed, because nobody has checked it.
+captured zone is kept but stays unconfirmed, because nobody has checked it. The
+third is P2-01's `app.feeding` feed events: schema 2, document version 2, and
+`migrate` adds `events: []` while keeping the slots and the revision, so a phone
+that set its meal times keeps them.
 
 ### 8.2 Host-side data
 
@@ -1058,7 +1063,9 @@ or "Household" and the confirming human.
 
 - Feeding events: keep all in v1; cap or archive by month if the doc grows past
   a measured threshold. A **partial unique index** enforces one non-null
-  `slotId` per `localDate`; extra feeds have `slotId = NULL`.
+  `slotId` per `localDate`; extra feeds have `slotId = NULL`. Both are document
+  invariants (P2-01); the parser refuses a stored double feed rather than
+  repairing it.
 - Walk history: keep all; same archive path. After 8 hours a walk is **stale**:
   the banner offers end/discard; `start_walk` returns a stale conflict until it
   is resolved. No auto-close; the record keeps the real timestamps and the UI
@@ -2518,10 +2525,76 @@ the shared thread answers via a fake provider; a restart loses nothing.
 
 ### Phase 2 — Feeding and walks
 
-- [ ] **P2-01** `app.feeding` doc: slots, events, invariants, localDate/timezone.
+- [x] **P2-01** `app.feeding` doc: slots, events, invariants, localDate/timezone.
       Inherits P1-14's version-1 document (slots, `rev`, the shared slot parser)
       and adds the feed events as version 2 with a `migrate` that keeps the
-      slots; the detail/decision-of-record is in P1-14's entry above.
+      slots. **Landed:** `src/shared/domain.ts` (`FEEDING_SCHEMA_VERSION` 2,
+      `FeedEvent` as §8.3 specifies, `events` on `Feeding`, and `isIsoInstant`
+      as the one instant rule — `src/server/domain/docs.ts` now uses it instead
+      of its own copy), `src/shared/feeding.ts` (the event parser and the list
+      invariants, plus the pure `feedingDay`/`FeedingDay` view),
+      `src/server/domain/docs.ts` (the version-1 → version-2 `migrate`, the
+      strict `parseFeeding`, `emptyFeeding` with `events: []`).
+      Decisions: (1) **the plan's "partial unique index" is a document
+      invariant**, because the events live inside a JSON session document and
+      there is no table to index: the parser refuses a document with two normal
+      feeds for one `(slotId, localDate)`, and P2-02's service answers that
+      conflict with 409 instead of appending. Event ids are unique for the same
+      reason. **`actionId` is deliberately not a document invariant**: the
+      idempotency key lives in `app.commands` with a 24 h TTL (§7.3), so a key
+      reused after that window is legal for the service — making it a permanent
+      document rule would turn a client key into a boot failure. P2-02 owns that
+      answer (replay inside the window, the slot+date conflict outside it).
+      (2) **order is not an invariant**: events are stored in append order and
+      `feedingDay` sorts by `at`, so a backward clock jump (NTP, a restore, a
+      timezone tool) can never wedge the next meal or make the document
+      unreadable. The shared `isIsoInstant` now proves the instant's components
+      round-trip (no 30 February, no 24:00, no leap second) instead of trusting
+      `Date.parse`, which normalizes those. (3) **`localDate` is a write-time rule only**:
+      §8.5 derives it from `at` in the household zone when the service appends,
+      and the parser deliberately does not compare it with the current zone — a
+      household that moves timezone must not have its history re-dated or become
+      unreadable. That is the answer to P1-14's carried note. (4) **a slot id may
+      outlive the slot**: removing or deactivating a meal keeps the meals already
+      logged, which `feedingDay` reports in `events` (and not in `slots`).
+      (5) `feedingDay(feeding, localDate)` is the one pure day view — active
+      slots in time order, each with the feed that claimed it, plus the extras —
+      so P2-03's day route and P2-04's `get_feeding_day` cannot disagree about a
+      day; "overdue" is not computed here (it needs a server clock, and P2-03/
+      P2-05 own it). (6) events are **never pruned in v1** (§8.5), so the parser
+      sets no cap; a measured cap or monthly archive is P5-07's call, and its
+      measurement should include the read-parse cost, because every care-view
+      read re-validates the list. (7) `byLabel`/`byUserId` are **uncapped**: they
+      mirror the member roster and `config.json`, whose write sites do not cap a
+      display name, and a cap here would let a long name produce a document the
+      parser refuses — which fails boot (§8.1). The rule is the roster's:
+      non-empty, trimmed, no control characters. (8) the event `actionId` and a
+      command key share a charset and a 120-char limit, now pinned by a test that
+      a key `isCommandKey` accepts parses as `http:<key>` — a drift between the
+      two would be a boot failure, not a rejected write.
+      **Verified:** 15 new tests in `test/feeding.test.ts` — the event shape
+      (every required field, unknown keys, control characters, caps, the
+      source enum, the `byUserId: null` ⇔ "Household" fence), the list
+      invariants (a duplicate event id refused, the double-feed key refused, a
+      repeated `actionId` accepted because the key is 24 h-scoped, extras and
+      next-day feeds allowed, an event naming a removed slot accepted, a
+      clock-jump append accepted and read in time order), the
+      document parser (current shape only, double feed refused), the migration
+      directly **and** through a stored version-1 document, `feedingDay` (slot
+      order, the fed slot, pending slots, extras, another day excluded,
+      inactive/removed slots kept as history, an invalid date throwing), the
+      household-calendar day (23:30Z is 29 October in UTC and 30 October in
+      Paris), a later zone change not re-dating a meal, and P1-14's
+      `updateMealSlots` keeping the meals already logged. Bootstrap now pins
+      the fresh `app.feeding` as version 2 with no slots and no events; the
+      suite is 359/359. The write service, routes, tools and UI are P2-02..P2-05
+      and are not part of this task; **P2-02 carries the write-side guarantee**
+      (the parser is a detector, not a preventer: a writer that appends before
+      checking could still commit a document that fails boot, which is why the
+      conflict check belongs in the same commit).
+      **Not verified:** no real household has logged a meal through this shape
+      yet; the first append runs in P2-02, and the day view is exercised only by
+      these unit tests until P2-03 serves it.
 - [ ] **P2-02** Feed domain service: log normal feed, extra feed, conflict,
       activity, partner notification intent, `actionId`, `app.commands`
       idempotency, partial unique index. Same actionId is success; different

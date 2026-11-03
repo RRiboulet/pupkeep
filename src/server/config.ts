@@ -18,7 +18,7 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { JsonFileStore, type JsonFileOptions } from "./json-file.ts";
-import type { MemberProfile } from "../shared/domain.ts";
+import { isIsoInstant, type MemberProfile } from "../shared/domain.ts";
 import { parseModelProbeCache, PROBE_CACHE_VERSION, type ModelProbeCache } from "./models/cache.ts";
 
 export const DATA_DIR_MODE = 0o700;
@@ -143,15 +143,10 @@ export function activeMembers(config: AppConfig): MemberRecord[] {
   return config.members.filter((member) => member.removedAt === undefined);
 }
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 /** A hash or opaque token: long enough that it is not a hand-typed word. */
 const HASH = /^[A-Za-z0-9_-]{16,}$/;
 /** An ntfy topic must be unguessable: 22 base64url chars ≈ 132 bits. */
 const NTFY_TOPIC = /^[A-Za-z0-9_-]{22,}$/;
-
-function isDate(value: unknown): value is string {
-  return typeof value === "string" && ISO_DATE.test(value);
-}
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -165,9 +160,9 @@ function parseSession(value: unknown): SessionRecord | undefined {
   const { tokenHash, createdAt, lastSeenAt, expiresAt } = record;
   // A raw token in the hash field would defeat "config.json holds hashes only".
   if (typeof tokenHash !== "string" || !HASH.test(tokenHash)) return undefined;
-  if (!isDate(createdAt)) return undefined;
-  if (lastSeenAt !== undefined && !isDate(lastSeenAt)) return undefined;
-  if (expiresAt !== undefined && !isDate(expiresAt)) return undefined;
+  if (!isIsoInstant(createdAt)) return undefined;
+  if (lastSeenAt !== undefined && !isIsoInstant(lastSeenAt)) return undefined;
+  if (expiresAt !== undefined && !isIsoInstant(expiresAt)) return undefined;
   return {
     tokenHash,
     createdAt,
@@ -183,9 +178,9 @@ function parseMember(value: unknown): MemberRecord | undefined {
   if (typeof id !== "string" || id.trim() === "") return undefined;
   if (role !== "owner" && role !== "member") return undefined;
   if (typeof displayName !== "string" || displayName.trim() === "") return undefined;
-  if (!isDate(createdAt)) return undefined;
+  if (!isIsoInstant(createdAt)) return undefined;
   // An empty or non-date `removedAt` would parse and silently deactivate a member.
-  if (removedAt !== undefined && !isDate(removedAt)) return undefined;
+  if (removedAt !== undefined && !isIsoInstant(removedAt)) return undefined;
   if (inviteHash !== undefined && (typeof inviteHash !== "string" || !HASH.test(inviteHash))) return undefined;
 
   const parsedSessions: SessionRecord[] = [];
@@ -228,7 +223,7 @@ export function parseConfig(raw: unknown): AppConfig | undefined {
     if (typeof codeHash !== "string" || !HASH.test(codeHash)) return undefined;
     if (role !== "owner" && role !== "member") return undefined;
     if (typeof displayName !== "string" || displayName.trim() === "") return undefined;
-    if (!isDate(createdAt) || !isDate(expiresAt)) return undefined;
+    if (!isIsoInstant(createdAt) || !isIsoInstant(expiresAt)) return undefined;
     invites.push({ codeHash, role, displayName, createdAt, expiresAt });
   }
 
@@ -339,7 +334,7 @@ function parseSubscription(value: unknown): PushSubscriptionRecord | undefined {
   // time; `auth` is a 16-byte secret (22 base64url chars).
   if (id === "" || memberId === "" || !/^https:\/\//.test(endpoint as string)) return undefined;
   if ((p256dh as string).length < 40 || (auth as string).length < 16) return undefined;
-  if (!isDate(createdAt)) return undefined;
+  if (!isIsoInstant(createdAt)) return undefined;
   return {
     id: id as string,
     memberId: memberId as string,

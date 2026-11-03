@@ -4,12 +4,14 @@
 // The doc `version` and the value's `schemaVersion` start at 1. A shape change
 // increments both and adds `migrate(value, fromVersion)`; the parsers below then
 // accept the current shape only, because a migrated value is what the Session
-// hands them. Two migrations exist so far:
+// hands them. Three migrations exist so far:
 //   * `app.puppy` moved to version 2 when P1-11 added `rev`, and `migrate`
 //     fills `rev: 0` for a version-1 document;
 //   * `app.household` moved to version 2 when P1-14 added `rev` and
 //     `timezoneConfirmedAt`, and `migrate` fills `rev: 0` and leaves the zone
-//     unconfirmed so first-run setup asks for it.
+//     unconfirmed so first-run setup asks for it;
+//   * `app.feeding` moved to version 2 when P2-01 added the feed events, and
+//     `migrate` adds `events: []` while keeping the slots and the revision.
 // A phone that ran an older build therefore keeps its household and profile
 // instead of failing boot.
 //
@@ -39,11 +41,12 @@ import {
   type Feeding,
   type Household,
   type HouseholdSettings,
+  isIsoInstant,
   type MemberProfile,
   type Puppy,
   type PuppySex,
 } from "../../shared/domain.ts";
-import { parseStoredMealSlots } from "../../shared/feeding.ts";
+import { parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
 
 /**
@@ -100,9 +103,9 @@ export function emptyCommands(): Commands {
   return { schemaVersion: COMMANDS_SCHEMA_VERSION, createdAt: "", entries: [] };
 }
 
-/** A fresh schedule: no slots until first-run setup writes them. */
+/** A fresh schedule: no slots until first-run setup writes them, no meals yet. */
 export function emptyFeeding(): Feeding {
-  return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: 0, slots: [], createdAt: "" };
+  return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: 0, slots: [], events: [], createdAt: "" };
 }
 
 export const HouseholdDoc = defineDoc<Household>({
@@ -169,12 +172,28 @@ export const CommandsDoc = defineDoc<Commands>({
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
-/** The meal slots P1-14 collects; P2-01 adds feed events as version 2. */
+/** The meal schedule (P1-14) and the meals logged against it (P2-01). */
 export const FeedingDoc = defineDoc<Feeding>({
   kind: "app.feeding",
-  version: 1,
+  version: 2,
   scope: "session",
   initial: emptyFeeding,
+  // Version 1 (P1-14) had the slots and no events. Add the empty list rather
+  // than refusing the document: a phone that set its meal times keeps them, and
+  // a version-1 `rev` is still a valid revision.
+  migrate(value, fromVersion) {
+    if (fromVersion !== 1) {
+      throw new Error(`app.feeding has no migration from version ${fromVersion}`);
+    }
+    const migrated = {
+      ...(value as unknown as Record<string, unknown>),
+      schemaVersion: FEEDING_SCHEMA_VERSION,
+      events: [],
+    };
+    const parsed = parseFeeding(migrated);
+    if (!parsed) throw new Error("app.feeding version 1 does not migrate to a valid version 2");
+    return parsed;
+  },
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -190,11 +209,7 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
-function isIsoDate(value: unknown): value is string {
-  return typeof value === "string" && ISO_DATE.test(value) && !Number.isNaN(Date.parse(value));
-}
 
 export function isIanaZone(value: unknown): value is string {
   if (!isNonEmptyString(value)) return false;
@@ -271,12 +286,12 @@ export function parseHousehold(value: unknown): Household | undefined {
   if (!isNonNegativeInteger(record.rev)) return undefined;
   if (!isNonEmptyString(record.name)) return undefined;
   if (!isIanaZone(record.timezone)) return undefined;
-  if (record.timezoneConfirmedAt !== null && !isIsoDate(record.timezoneConfirmedAt)) return undefined;
+  if (record.timezoneConfirmedAt !== null && !isIsoInstant(record.timezoneConfirmedAt)) return undefined;
   const members = parseMemberProfiles(record.members);
   if (!members) return undefined;
   if (!isPositiveInteger(record.conversationId) || !isPositiveInteger(record.systemConversationId)) return undefined;
   if (record.conversationId === record.systemConversationId) return undefined;
-  if (!isIsoDate(record.createdAt)) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
   const settings = parseSettings(record.settings);
   if (!settings) return undefined;
   return {
@@ -307,7 +322,7 @@ export function parsePuppy(value: unknown): Puppy | undefined {
       return undefined;
     }
   }
-  if (!isIsoDate(record.createdAt)) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
   return {
     schemaVersion: PUPPY_SCHEMA_VERSION,
     rev: record.rev,
@@ -324,7 +339,7 @@ function parseActivityEntry(value: unknown): ActivityEntry | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
   const { id, at, kind, summary, actorId, actorLabel } = record;
-  if (!isNonEmptyString(id) || !isIsoDate(at)) return undefined;
+  if (!isNonEmptyString(id) || !isIsoInstant(at)) return undefined;
   if (!isNonEmptyString(kind) || typeof summary !== "string") return undefined;
   if (actorId !== null && !isNonEmptyString(actorId)) return undefined;
   if (!isNonEmptyString(actorLabel)) return undefined;
@@ -334,7 +349,7 @@ function parseActivityEntry(value: unknown): ActivityEntry | undefined {
 export function parseActivity(value: unknown): Activity | undefined {
   const record = asRecord(value);
   if (!record || record.schemaVersion !== ACTIVITY_SCHEMA_VERSION) return undefined;
-  if (!isIsoDate(record.createdAt)) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
   if (!Array.isArray(record.entries)) return undefined;
   const entries: ActivityEntry[] = [];
   for (const item of record.entries) {
@@ -350,7 +365,7 @@ function parseCommandRecord(value: unknown): CommandRecord | undefined {
   if (!record) return undefined;
   const { key, requestHash, result, expiresAt } = record;
   if (!isNonEmptyString(key) || !isNonEmptyString(requestHash)) return undefined;
-  if (!isIsoDate(expiresAt)) return undefined;
+  if (!isIsoInstant(expiresAt)) return undefined;
   if (result === undefined) return undefined;
   return { key, requestHash, result: result as CommandRecord["result"], expiresAt };
 }
@@ -358,7 +373,7 @@ function parseCommandRecord(value: unknown): CommandRecord | undefined {
 export function parseCommands(value: unknown): Commands | undefined {
   const record = asRecord(value);
   if (!record || record.schemaVersion !== COMMANDS_SCHEMA_VERSION) return undefined;
-  if (!isIsoDate(record.createdAt)) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
   if (!Array.isArray(record.entries)) return undefined;
   const entries: CommandRecord[] = [];
   const keys = new Set<string>();
@@ -374,14 +389,20 @@ export function parseCommands(value: unknown): Commands | undefined {
   return { schemaVersion: COMMANDS_SCHEMA_VERSION, createdAt: record.createdAt, entries };
 }
 
-/** `app.feeding` as P1-14 writes it: the meal slots, no feed events yet. */
+/** `app.feeding`: the schedule plus the meals logged against it. */
 export function parseFeeding(value: unknown): Feeding | undefined {
   const record = asRecord(value);
   if (!record || record.schemaVersion !== FEEDING_SCHEMA_VERSION) return undefined;
   if (!isNonNegativeInteger(record.rev)) return undefined;
-  if (!isIsoDate(record.createdAt)) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
   // The document may hold an empty schedule (a fresh one); a write cannot.
   const slots = parseStoredMealSlots(record.slots);
   if (!slots) return undefined;
-  return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: record.rev, slots, createdAt: record.createdAt };
+  // Events are never pruned in v1 (§8.5), so the list is unbounded by design;
+  // the invariants (unique ids, one feed per slot+date — actionId and order are
+  // deliberately not document rules) come from `shared/feeding.ts`, which the
+  // service also uses before it appends.
+  const events = parseFeedEvents(record.events);
+  if (!events) return undefined;
+  return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: record.rev, slots, events, createdAt: record.createdAt };
 }
