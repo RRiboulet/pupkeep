@@ -2575,9 +2575,10 @@ the shared thread answers via a fake provider; a restart loses nothing.
       **Verified:** 15 new tests in `test/feeding.test.ts` — the event shape
       (every required field, unknown keys, control characters, caps, the
       source enum, the `byUserId: null` ⇔ "Household" fence), the list
-      invariants (duplicate ids/action ids refused, the double-feed key refused,
-      extras and next-day feeds allowed, an event naming a removed slot
-      accepted, a clock-jump append accepted and read in time order), the
+      invariants (a duplicate event id refused, the double-feed key refused, a
+      repeated `actionId` accepted because the key is 24 h-scoped, extras and
+      next-day feeds allowed, an event naming a removed slot accepted, a
+      clock-jump append accepted and read in time order), the
       document parser (current shape only, double feed refused), the migration
       directly **and** through a stored version-1 document, `feedingDay` (slot
       order, the fed slot, pending slots, extras, another day excluded,
@@ -2586,8 +2587,11 @@ the shared thread answers via a fake provider; a restart loses nothing.
       Paris), a later zone change not re-dating a meal, and P1-14's
       `updateMealSlots` keeping the meals already logged. Bootstrap now pins
       the fresh `app.feeding` as version 2 with no slots and no events; the
-      suite is 357/357. The write service, routes, tools and UI are P2-02..P2-05
-      and are not part of this task.
+      suite is 359/359. The write service, routes, tools and UI are P2-02..P2-05
+      and are not part of this task; **P2-02 carries the write-side guarantee**
+      (the parser is a detector, not a preventer: a writer that appends before
+      checking could still commit a document that fails boot, which is why the
+      conflict check belongs in the same commit).
       **Not verified:** no real household has logged a meal through this shape
       yet; the first append runs in P2-02, and the day view is exercised only by
       these unit tests until P2-03 serves it.

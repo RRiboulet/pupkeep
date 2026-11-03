@@ -399,9 +399,9 @@ export function parseFeeding(value: unknown): Feeding | undefined {
   const slots = parseStoredMealSlots(record.slots);
   if (!slots) return undefined;
   // Events are never pruned in v1 (§8.5), so the list is unbounded by design;
-  // the invariants (unique ids and action ids, one feed per slot+date — order is
-  // deliberately not one) come from `shared/feeding.ts`, which the service also
-  // uses before it appends.
+  // the invariants (unique ids, one feed per slot+date — actionId and order are
+  // deliberately not document rules) come from `shared/feeding.ts`, which the
+  // service also uses before it appends.
   const events = parseFeedEvents(record.events);
   if (!events) return undefined;
   return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: record.rev, slots, events, createdAt: record.createdAt };

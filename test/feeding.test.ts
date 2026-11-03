@@ -4,9 +4,10 @@
 //   * the event shape: one logged meal, its optional fields, and the household
 //     fallback fence;
 //   * the list invariants the plan calls a "partial unique index" — one normal
-//     feed per slot per local date, unique ids and action ids (append order is
-//     not an invariant; the day view sorts) — which is where a double feed
-//     becomes impossible rather than duplicated;
+//     feed per slot per local date and unique event ids. Append order and
+//     `actionId` uniqueness are deliberately not document rules (the day view
+//     sorts; the key is 24 h-scoped in `app.commands`), which is where a double
+//     feed becomes impossible rather than duplicated;
 //   * the document: the version-1 → version-2 migration that keeps a P1-14
 //     schedule, and the pure day view P2-03/P2-04 will serve.
 //
@@ -153,6 +154,8 @@ test("a command key that can be used as an idempotency key parses as a feed acti
   // agent uses `tool:<taskId>`. Those strings become the event's `actionId`, and
   // a document the parser refuses fails boot — so the two charsets must agree.
   for (const key of ["a".repeat(100), "0f0e1d2c-3b4a-5968-7788-99aabbccddee", "k_1.2:3"]) {
+    // `http:` plus a maximum client key is the longest action id the routes can
+    // produce (105 chars); it must stay inside the 120-char action-id bound.
     assert.ok(isCommandKey(key, CLIENT_KEY_LIMIT), key);
     const event = parseFeedEvent(feed({ actionId: `http:${key}` }));
     assert.equal(event?.actionId, `http:${key}`, "an accepted client key is a storable action id");
@@ -172,7 +175,7 @@ test("no member id always travels with the household label", () => {
 
 // --- the list invariants ----------------------------------------------------
 
-test("meals are one list: unique ids and action ids, one per slot per day", () => {
+test("meals are one list: unique ids, one per slot per day", () => {
   const extra = feed({ id: "feed-2", slotId: null, at: "2026-10-29T15:00:00.000Z", actionId: "http:feed-2" });
   const valid = parseFeedEvents([feed(), extra]);
   assert.equal(valid?.length, 2);

@@ -45,16 +45,24 @@ export const MEAL_SCHEDULE_RULE =
 export const FEED_ID_LIMIT = 64;
 /** Matches `COMMAND_KEY_LIMIT`: `http:<key>` or `tool:<taskId>`. */
 export const FEED_ACTION_ID_LIMIT = 120;
-export const FEED_AMOUNT_LIMIT = 40;
+/** The same bound as a slot's planned portion: both describe the same quantity. */
+export const FEED_AMOUNT_LIMIT = SLOT_PORTION_LIMIT;
 export const FEED_NOTE_LIMIT = 280;
-// `byLabel` and `byUserId` are deliberately **uncapped**: they mirror a member
-// profile (`app.household.members`) and a config member id, whose write sites
-// do not cap them either (`parseMemberProfiles`, `config.json`). A cap here
-// would turn a long display name into a document the parser refuses — and a
-// refused `app.feeding` fails boot (§8.1) — so the rule is the roster's:
-// non-empty and free of control characters.
+// `byLabel` and `byUserId` are deliberately **uncapped**. They mirror a member
+// profile (`app.household.members`) and a config member id; the roster parser
+// (`parseMemberProfiles`) does not cap a name's length, and a hand-edited
+// `config.json` can carry any id, so a cap here could turn a legitimate member
+// into a document the parser refuses — and a refused `app.feeding` fails boot
+// (§8.1). The invite route does cap a *new* display name at 64 characters;
+// this reader must not assume that every stored profile came through it. The
+// rule is therefore the roster's: non-empty, trimmed, free of control
+// characters.
 
-/** 24-hour wall clock, `00:00`–`23:59`. */
+/**
+ * 24-hour wall clock, `00:00`–`23:59`. The three calendar types live in their
+ * document's home: this one, `isLocalDate` in `profile.ts`, and
+ * `isIsoInstant` in `domain.ts`.
+ */
 const LOCAL_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 /**
  * The charset for every opaque id in this document: a slot's (`slot-…`), a
@@ -139,7 +147,11 @@ const FEED_KEYS = ["id", "slotId", "localDate", "at", "amount", "note", "byUserI
  * Trim and validate one free-text field. `null` means "not set" (omit it from
  * the stored value); `undefined` means the value is malformed.
  */
-/** A member label/id: non-empty, trimmed, no control characters; no length cap (see above). */
+/**
+ * A member label or id as the roster/config world wrote it: non-empty, trimmed,
+ * no control characters, no length cap (see `FEED_AMOUNT_LIMIT`'s note above
+ * `byLabel`), and never `null` — callers that allow "not set" use `cleanText`.
+ */
 function displayText(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();

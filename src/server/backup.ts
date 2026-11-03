@@ -41,6 +41,7 @@ import { emptyPush, parseConfig, parsePush, dataPaths } from "./config.ts";
 import { atomicWrite } from "./json-file.ts";
 import { acquireLock, inspectLock, LOCK_FILE, SERVER_LOCK_FILE, type LockHandle } from "./lock.ts";
 import { TABLE_PREFIX } from "./harness.ts";
+import { isIsoInstant } from "../shared/domain.ts";
 import { scrub } from "../shared/redact.ts";
 
 /** PLAN §7.5's backup set, in the order the archive lists them. */
@@ -359,16 +360,12 @@ export function emptyBackupStatus(now: Date = new Date()): BackupStatus {
   };
 }
 
-function isIsoDate(value: unknown): value is string {
-  return typeof value === "string" && !Number.isNaN(Date.parse(value));
-}
-
 export function parseBackupStatus(raw: unknown): BackupStatus | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const record = raw as Record<string, unknown>;
   if (record.schemaVersion !== 1) return undefined;
-  if (!isIsoDate(record.lastAttemptAt)) return undefined;
-  if (record.lastSuccessAt !== null && !isIsoDate(record.lastSuccessAt)) return undefined;
+  if (!isIsoInstant(record.lastAttemptAt)) return undefined;
+  if (record.lastSuccessAt !== null && !isIsoInstant(record.lastSuccessAt)) return undefined;
   if (record.lastArchive !== null && typeof record.lastArchive !== "string") return undefined;
   if (record.lastError !== null && typeof record.lastError !== "string") return undefined;
   return {

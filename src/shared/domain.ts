@@ -118,7 +118,10 @@ export type Feeding = {
   slots: MealSlot[];
   /**
    * Append order; a day view sorts by `at`. At most one normal feed per slot
-   * per local date, and never a repeated id or action id.
+   * per local date, and never a repeated event id. `actionId` uniqueness is
+   * **not** a document rule: the idempotency key is 24 h-scoped in
+   * `app.commands` (§7.3), so a reused key must not make the document
+   * unreadable — the service answers it (see `shared/feeding.ts`).
    */
   events: FeedEvent[];
   createdAt: string;
@@ -179,9 +182,10 @@ export type Commands = {
 };
 
 /**
- * A UTC instant, ISO 8601 with a trailing `Z`. The one rule for every stored
- * instant (`createdAt`, `at`, `expiresAt`): a local date is a different type and
- * is validated by `isLocalDate` in `profile.ts`.
+ * A UTC instant, ISO 8601 with a trailing `Z`: the one rule for every stored
+ * instant — session documents, `config.json` and the backup status. A local date
+ * and a wall-clock time are different types: `isLocalDate` lives in
+ * `profile.ts`, `isLocalTime` in `feeding.ts`.
  */
 const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
 
