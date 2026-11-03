@@ -76,8 +76,8 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
   assert.match(dockerfile, /^FROM mcr\.microsoft\.com\/devcontainers\/javascript-node:24-bookworm$/m);
   assert.match(dockerfile, /test "\$\(node --version \| cut -d\. -f1\)" = "v24"/);
 
-  assert.match(dockerfile, /@earendil-works\/pi-coding-agent@1\.4\.0/);
-  assert.match(dockerfile, /test "\$\(pi --version\)" = "1\.4\.0"/);
+  assert.match(dockerfile, /@earendil-works\/pi-coding-agent@1\.5\.0/);
+  assert.match(dockerfile, /test "\$\(pi --version\)" = "1\.5\.0"/);
 
   assert.match(dockerfile, /CLOUDFLARED_VERSION=2026\.10\.5/);
   // Cloudflare publishes a `.deb` per architecture and no shared manifest, so
@@ -165,6 +165,9 @@ test("postCreate seeds .env, runs the suite, checks versions and installs the sh
   assert.match(script, /npm ci/);
   assert.match(script, /npm run typecheck/);
   assert.match(script, /npm test/);
+  // tmux config for pi and its tmux-backed subagents ships with the repo (tracked,
+  // not generated) and postCreate installs it into the remote user home.
+  assert.match(script, /cp .*\.devcontainer\/shell\/tmux\.conf" \/home\/vscode\/\.tmux\.conf/);
   assert.match(script, /chmod 700 \/tmp\/pupkeep-dev/);
   // The home belongs to vscode from the image on; only the named volume can
   // still arrive root-owned, and that is what postCreate repairs. It must not
@@ -176,7 +179,7 @@ test("postCreate seeds .env, runs the suite, checks versions and installs the sh
   assert.match(script, /node_major/);
   assert.match(script, /v24/);
   assert.match(script, /pi_version/);
-  assert.match(script, /1\.4\.0/);
+  assert.match(script, /1\.5\.0/);
   assert.match(script, /gh 2\.103\.2 is required/);
   assert.match(script, /cloudflared 2026\.10\.5/);
   assert.match(script, /git config --global user\.email/);

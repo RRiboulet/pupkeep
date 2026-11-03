@@ -90,7 +90,7 @@ declaring the same package again makes every extension load twice — the first
 version of this repo did, and subagents launched in this directory failed at
 startup with `Flag "--attach-subagent" conflicts with …`. A standalone clone can
 add the package to its own local settings; the repo does not force it. The pi
-runtime the plan pins is `1.4.0`, enforced by the devcontainer (P1-02) rather
+runtime the plan pins is `1.5.0`, enforced by the devcontainer (P1-02) rather
 than by a file here.
 
 **The development agent is not the product agent, and they must never be
@@ -110,7 +110,7 @@ single major that would make one of the two environments non-conforming.
 
 `.devcontainer/` builds from
 `mcr.microsoft.com/devcontainers/javascript-node:24-bookworm` and installs Node
-24, pi coding agent `1.4.0`, sqlite3, cloudflared, rclone, tmux, gh, jq, age,
+24, pi coding agent `1.5.0`, sqlite3, cloudflared, rclone, tmux, gh, jq, age,
 expect and the rest of the host tooling. Open the repo with the Dev Containers
 extension; `postCreate.sh` runs `npm ci`, `npm run typecheck` and `npm test`, and
 seeds `.env` only when it is absent.

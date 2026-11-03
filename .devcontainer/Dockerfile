@@ -83,9 +83,9 @@ RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     && cloudflared --version
 
 # The pi coding agent, exact. The enclosing workspace tracks @latest, but this
-# repo pins 1.4.0 (PLAN §5.1) and the devcontainer is the enforcement point.
-RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.4.0 \
-    && test "$(pi --version)" = "1.4.0"
+# repo pins 1.5.0 (PLAN §5.1) and the devcontainer is the enforcement point.
+RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.5.0 \
+    && test "$(pi --version)" = "1.5.0"
 
 # The github-cli feature installs gh *after* this image. Register gh as git's
 # credential helper system-wide now: the token survives in the pi-config volume,

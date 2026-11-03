@@ -46,6 +46,10 @@ sudo git config --system credential.https://github.com.helper "!${GH_BIN} auth g
 sudo git config --system credential.https://gist.github.com.helper ''
 sudo git config --system credential.https://gist.github.com.helper "!${GH_BIN} auth git-credential"
 
+# --- tmux config ----------------------------------------------------------
+# used by pi and its tmux-backed subagents; enables modified Enter keys.
+cp "$REPO/.devcontainer/shell/tmux.conf" /home/vscode/.tmux.conf
+
 # --- .env ------------------------------------------------------------------
 # Copy only when absent: a developer's local keys and overrides must survive a
 # rebuild. `.env` is gitignored; `.env.example` is the committed template.
@@ -79,8 +83,8 @@ if [ "$node_major" != "v24" ]; then
 fi
 
 pi_version="$(pi --version)"
-if [ "$pi_version" != "1.4.0" ]; then
-  echo "pi 1.4.0 is required; found ${pi_version}" >&2
+if [ "$pi_version" != "1.5.0" ]; then
+  echo "pi 1.5.0 is required; found ${pi_version}" >&2
   exit 1
 fi
 

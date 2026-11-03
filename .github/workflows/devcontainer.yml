@@ -91,7 +91,7 @@ jobs:
             test -d node_modules
             test -d /tmp/pupkeep-dev
             test "$(node --version | cut -d. -f1)" = "v24"
-            test "$(pi --version)" = "1.4.0"
+            test "$(pi --version)" = "1.5.0"
             gh --version | grep '2.103.2' >/dev/null
             cloudflared --version | grep '2026.10.5' >/dev/null
             for tool in age expect jq openssl rclone rg sqlite3 tar tmux; do
