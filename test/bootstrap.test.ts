@@ -20,6 +20,7 @@ import {
   CommandsDoc,
   FeedingDoc,
   HouseholdDoc,
+  NotificationsDoc,
   PuppyDoc,
   emptyHousehold,
   parseCommands,
@@ -96,6 +97,7 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
       "app.commands",
       "app.feeding",
       "app.household",
+      "app.notifications",
       "app.puppy",
     ]);
 
@@ -110,6 +112,9 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
     assert.equal(feeding?.rev, 0);
     assert.deepEqual(feeding?.slots, [], "the wizard writes the schedule, not boot");
     assert.deepEqual(feeding?.events, [], "no meals are invented");
+    const notifications = await opened.harness.snapshot(NotificationsDoc, context);
+    assert.deepEqual(notifications?.items, [], "no intents are invented");
+    assert.equal(notifications?.createdAt, NOW.toISOString());
     const activity = await opened.harness.snapshot(ActivityDoc, context);
     assert.deepEqual(activity?.entries, []);
     const commands = await opened.harness.snapshot(CommandsDoc, context);

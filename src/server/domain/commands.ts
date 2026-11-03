@@ -15,7 +15,7 @@ import type { JsonValue } from "@earendil-works/chord";
 import type { Context } from "@earendil-works/chord";
 import { createHash } from "node:crypto";
 import type { Tx } from "@earendil-works/pi-durable";
-import type { CommandRecord, Commands } from "../../shared/domain.ts";
+import { OPAQUE_ID_PATTERN, type CommandRecord, type Commands } from "../../shared/domain.ts";
 import { CommandsDoc, parseCommands, type DocStore } from "./docs.ts";
 import { UnavailableError } from "./errors.ts";
 
@@ -50,7 +50,8 @@ export interface CommandRequest {
   readonly now: Date;
 }
 
-const KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
+/** The shared opaque-id charset (`src/shared/domain.ts`). */
+const KEY_PATTERN = OPAQUE_ID_PATTERN;
 
 /**
  * One key, two different requests. A private sentinel rather than a domain

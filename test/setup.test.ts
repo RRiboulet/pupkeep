@@ -798,6 +798,7 @@ test("a database from before P1-14 boots through the household migration and get
       "app.activity",
       "app.commands",
       "app.feeding",
+      "app.notifications",
       "app.puppy",
     ]);
 

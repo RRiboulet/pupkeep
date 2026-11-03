@@ -930,7 +930,9 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.commands` | HTTP idempotency keys/results | Key + request hash + result + 24h expiry; committed with the action |
 
 P1-08 defines the first four documents; P1-14 adds `app.feeding` with the meal
-slots (P2-01 adds the feed events and moves that document to version 2). Each
+slots (P2-01 adds the feed events and moves that document to version 2); P2-02
+adds `app.notifications` with the committed intents a care action creates (P4-05
+adds the outbox and delivery fields as version 2). Each
 value carries `schemaVersion: 1` and its Pi Durable document version is 1; a
 future change increments both and adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
@@ -1399,8 +1401,15 @@ displayed but not pushed in v1.
 ### 12.3 Outbox, Web Push and ntfy
 
 - Notification intents are committed to `app.notifications` with a server-side
-  dedupe key: `(category, subject, offset, localDate/rev, userId)`. The Web Push
-  `tag` is display-only; it is not the authority.
+  dedupe key. The tuple is per category; the implemented `fed` key is
+  `fed|<localDate>|slot|<slotId>|<userId>` or
+  `fed|<localDate>|extra|<eventId>|<userId>`, every part percent-encoded before
+  the join so an id containing the separator cannot alias another intent. The
+  Web Push `tag` is display-only; it is not the authority.
+- A stored intent's `title` must equal its category's catalog string
+  (`shared/notifications.ts`), which is what keeps care detail out of a push
+  body. The catalog text is therefore **document-frozen**: rewording an entry
+  requires a document version bump and a `migrate` (P4-05).
 - A host delivery loop sends Web Push for pending items and publishes the same
   intent to the partner’s configured **ntfy** topic (generic text only), then
   marks sent/failed with retry/backoff. In-app items are immediately visible via
@@ -2595,10 +2604,87 @@ the shared thread answers via a fake provider; a restart loses nothing.
       **Not verified:** no real household has logged a meal through this shape
       yet; the first append runs in P2-02, and the day view is exercised only by
       these unit tests until P2-03 serves it.
-- [ ] **P2-02** Feed domain service: log normal feed, extra feed, conflict,
+- [x] **P2-02** Feed domain service: log normal feed, extra feed, conflict,
       activity, partner notification intent, `actionId`, `app.commands`
       idempotency, partial unique index. Same actionId is success; different
-      actionId same slot is 409.
+      actionId same slot is 409. **Landed:** `logFeed` in
+      `src/server/domain/feeding.ts` (one writer for a normal and an extra feed),
+      `FeedConflictError` (a 409 carrying a detached copy of the committed
+      event), `src/shared/notifications.ts` (categories, category-only titles,
+      the intent parser and `appendIntents`), `NotificationsDoc`/`parseNotifications`
+      in `src/server/domain/docs.ts`, and bootstrap creating/repairing the
+      document. One commit writes the event, one activity entry, one intent per
+      *other* caregiver and the idempotency record — or nothing.
+      Decisions: (1) **P2-02 creates `app.notifications`** rather than deferring
+      the document to P4-05: G2 requires the intent committed in Phase 2, and
+      §12.3 names that document. It holds the smallest thing an in-app centre
+      needs — dedupe key, category, target member, category-only title, in-app
+      body, `createdAt`, `readAt` — and P4-05 adds the outbox/delivery fields as
+      version 2 with a `migrate`, exactly as P1-14/P2-01 did for feeding.
+      (2) **A feed does not bump `app.feeding.rev`.** `rev` is the *schedule's*
+      revision (P1-14): a caregiver logging breakfast must not make the other
+      phone's open wizard save report a stale conflict. (3) **The conflict is
+      answered in the service**, not left to the parser: a different `actionId`
+      on an already-fed `(slotId, localDate)` throws `FeedConflictError` with
+      who/when; the same `actionId` replays through `runIdempotent` before the
+      check. (4) **The appended list is re-parsed inside the commit** as a
+      backstop, so a buggy write rolls back instead of committing a document
+      that would fail the next boot — the failure mode P2-01's parser alone
+      could not prevent. The **notifications list gets the same backstop**: a
+      committed intent the parser refuses is a boot failure, so the result is
+      validated before it is written. (5) **Intents go to the other caregivers
+      only** (the actor never notifies themselves; a one-member household writes
+      none; the household-fallback actor notifies every member), with a server
+      dedupe key of **percent-encoded parts joined by `|`** —
+      `fed|2026-10-29|slot|<slotId>|<userId>` or
+      `fed|2026-10-29|extra|<eventId>|<userId>`. Encoding is load-bearing: opaque
+      ids may contain `:`, so joining them raw lets two different
+      `(slotId, userId)` pairs collide into one key and silently drop an intent.
+      (6) The **title is category-only** from `shared/notifications.ts` (`fed` =
+      "A meal was logged") and is the only text a push or ntfy body may carry;
+      the `body` (`Alex fed "Breakfast" at 13:00`) is in-app copy and is never
+      pushed (§14.3). The stored title must equal the catalog string, so **the
+      catalog text is document-frozen**: rewording an entry needs a version bump
+      and a `migrate` (P4-05). (7) Retention follows §8.5: an unread item is
+      never pruned, the newest 500 *read* items are kept — which in Phase 2
+      keeps everything, because nothing can be read until P4-06's centre exists.
+      (8) **Notification display text is uncapped**, like `byLabel`: a roster
+      name and a config id are uncapped where they are written, so a cap here
+      would let a long name commit an unparseable document — the same
+      boot-wedge rule as P2-01's decision (7). Only the code-owned `title` and
+      the id are bounded. (9) The **request hash includes `source`**, so a route
+      and a tool reusing one key is a key conflict rather than a replay under the
+      wrong channel. The actor is deliberately not hashed (resolved inside the
+      commit); a client key is not namespaced per member, so two caregivers
+      sharing one key with an identical body would replay as the first one's
+      feed — UUID keys make that negligible, and P2-03 must not reuse a key.
+      (10) The intent **list invariants live in `shared/notifications.ts`**
+      (`parseNotificationIntents`), as `parseFeedEvents` does for feeding, so a
+      caller building a batch and the document parser share one rule.
+      **Verified:** 15 new tests in `test/feed.test.ts` — the intent parser and
+      document (category/title agreement, dedupe and id uniqueness, bounds,
+      instants, control characters), `appendIntents` (duplicate key dropped,
+      unread never pruned, newest read kept in order), a normal feed (event +
+      activity + partner intent + command record, trimmed amount), the
+      household-local date (23:30Z is the next day in Paris) and `source`, an
+      extra feeding (no slot, no conflict, one intent per event), unknown/
+      inactive slot and malformed-event refusals writing nothing, the replay
+      (same key returns the committed event; same key with another body is
+      `key-conflict`; a different caregiver's key on a fed slot is a 409 with
+      who/when), two caregivers racing one slot (one feed, one conflict), a
+      feed not invalidating an open schedule edit, the encoded dedupe key (ids
+      containing `:`/`|` cannot collide), a 400-character display name logging a
+      meal whose document still parses, a malformed stored `app.notifications`
+      refusing boot instead of being reset, the household-fallback actor
+      notifying every member with a null id, and a key reused after the 24 h
+      window becoming a new action (extra feed twice; the next day's slot feed)
+      rather than a silent replay. The suite is 374/374. An upgrade of a real
+      P2-01 data directory (the phone-flow one) was restarted through this
+      build: `docsCreated=1` for `app.notifications`, with the schedule and the
+      confirmed timezone untouched. The HTTP route (P2-03), the tools (P2-04)
+      and the Today UI (P2-05) are not part of this task.
+      **Not verified:** no request has logged a meal through the route/tool yet;
+      delivery of an intent is P4-05/P4-06, and nothing reads `readAt` yet.
 - [ ] **P2-03** Feed HTTP routes: mark fed, extra feed, day view; 409 shape;
       idempotency key.
 - [ ] **P2-04** Feed agent tools: `log_feeding`, `log_extra_feeding`,
@@ -2644,7 +2730,9 @@ process kill; both clients see the same state; the partner notification
 - [ ] **P4-04** Daily feed planner + feed reminder tasks; stale windows; no
       duplicate planner; boot reconciliation; skip past offsets.
 - [ ] **P4-05** `app.notifications` + outbox + Web Push + VAPID + service worker;
-      server dedupe key authoritative.
+      server dedupe key authoritative. Inherits P2-02's version-1 document (the
+      committed intents, the category-only title catalog and the dedupe key) and
+      adds the outbox/delivery fields as version 2 with a `migrate`.
 - [ ] **P4-06** Notification centre, prefs, test notification, badge; host
       Termux:API; ntfy recommended for the partner. The **claim** that it
       delivers to the partner is gated on P0-10 (§2.3); the code is not.
