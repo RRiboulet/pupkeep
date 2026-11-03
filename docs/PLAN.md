@@ -2414,7 +2414,9 @@ that the partner is reached out-of-app is gated on P0-10.
       the ntfy onboarding all rest on the Phase 0 spikes.
       **Carried out:** the quick tunnel has no owner link of its own — the
       launcher mints before the tunnel prints its URL, so a `cloudflare` start
-      reports `no-origin`, and nothing re-mints when `onTunnelUrl` fires. The
+      reports `no-origin`, and nothing re-mints when `onTunnelUrl` fires. (The
+      launcher now *prints* that URL from `bin/pupkeep.js`; it previously
+      swallowed the line, so §9's "open the tunnel URL" had no way to learn it.) The
       runbook documents the route that works today (sign in on the tunnel origin
       with the token from `owner-link.txt`); minting on the tunnel URL belongs to
       the Web Push task, **P4-05**, which is the first thing that needs it.

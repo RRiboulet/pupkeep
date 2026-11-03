@@ -330,6 +330,14 @@ SSL_CERT_FILE=/etc/tls/cert.pem termux-chroot ~/.pupkeep/bin/cloudflared \
 `termux-chroot` supplies `/etc/resolv.conf`; `SSL_CERT_FILE` resolves *inside*
 the chroot to `$PREFIX/etc/tls/cert.pem`. Do not set the host path.
 
+The URL is ephemeral, so the launcher prints it when cloudflared registers it:
+
+```text
+pupkeep: quick tunnel at https://<random>.trycloudflare.com
+```
+
+That line is not a secret and is safe in `server.log`; the owner link is not.
+
 Then:
 
 1. **Sign in on the tunnel origin as the owner.** The quick tunnel cannot mint its
