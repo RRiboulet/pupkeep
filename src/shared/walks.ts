@@ -68,6 +68,7 @@ const WALK_KEYS = [
   "dogsMet",
   "mood",
   "notes",
+  "discarded",
 ] as const;
 
 const END_KEYS = ["endActionId", "endedAt", "endedBy", "endedByLabel", "pee", "poop", "dogsMet", "mood", "notes"] as const;
@@ -215,6 +216,13 @@ export function parseWalk(raw: unknown): Walk | undefined {
   walk.endedByLabel = endedLabel;
   // Only the observation keys: `parseWalkObservations` refuses unknown keys, so
   // it is handed its own subset rather than the whole walk record.
+  if (record.discarded !== undefined) {
+    if (record.discarded !== true) return undefined;
+    // A discard is a resolution, not an end form: it carries no observations.
+    if (OBSERVATION_KEYS.some((key) => record[key] !== undefined)) return undefined;
+    walk.discarded = true;
+    return walk;
+  }
   const observations: Record<string, unknown> = {};
   for (const key of OBSERVATION_KEYS) {
     if (record[key] !== undefined) observations[key] = record[key];

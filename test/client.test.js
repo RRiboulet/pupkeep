@@ -21,6 +21,7 @@ const { applyCareView, startLive } = await import("../web/live.js");
 const { feedTimeText, localDate, localMinutes, mealClock, mealRows, mealStatus, minutesOf } = await import(
   "../web/meals.js"
 );
+const { correctedNow, timerText, walkSeconds, walkStale, walkTimeText } = await import("../web/walks.js");
 const { getState, setState } = await import("../web/store.js");
 const { changedFields, draftOf, isNewer, pendingSave, wireOf } = await import("../web/profile-form.js");
 
@@ -349,9 +350,10 @@ test("a care frame re-reads the day, even when the frame's payload is identical"
   setState({ profile: profileOf(), careSeq: 1 });
   const request = fakeRequest({ status: 200, ok: true, body: mealDay() });
   const today = todayWith(request);
+  const dayReads = () => request.calls.filter((call) => call.path === "/api/feeding/day").length;
   today.onStore(getState());
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(request.calls.length, 1, "the first care frame is read once");
+  assert.equal(dayReads(), 1, "the first care frame is read once");
   assert.equal(today.state.day.localDate, "2026-10-30");
 
   // A feed commits without moving any revision, so the frame's *payload* is
@@ -360,11 +362,11 @@ test("a care frame re-reads the day, even when the frame's payload is identical"
   setState({ profile: identical, careSeq: 2 });
   today.onStore(getState());
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(request.calls.length, 2, "an applied frame is a new sequence");
+  assert.equal(dayReads(), 2, "an applied frame is a new sequence");
 
   today.onStore(getState());
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(request.calls.length, 2, "one frame, one read");
+  assert.equal(dayReads(), 2, "one frame, one read");
 });
 
 test("mounting reads the day and starts the ticker, even before a profile arrives", async () => {
@@ -374,7 +376,11 @@ test("mounting reads the day and starts the ticker, even before a profile arrive
   today.componentDidMount();
   try {
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(request.calls.length, 1, "the day route needs no profile to answer");
+    assert.equal(
+      request.calls.filter((call) => call.path === "/api/feeding/day").length,
+      1,
+      "the day route needs no profile to answer",
+    );
     assert.ok(today.timer, "the overdue ticker runs");
   } finally {
     today.componentWillUnmount();
@@ -654,4 +660,116 @@ test("the card's copy says overdue in words, and a fed slot offers no button", (
   });
   assert.match(textsOf(pending).join(""), /Pending/);
   assert.equal(buttonsOf(pending)[0].props.disabled, false);
+});
+
+// --- Today walk (P2-07) -----------------------------------------------------
+
+test("the walk timer runs on the server-corrected clock, not the device's", () => {
+  const received = Date.parse("2026-10-30T08:05:00.000Z");
+  // The server said 08:00; ten seconds of local time have passed since.
+  const now = correctedNow("2026-10-30T08:00:00.000Z", received, received + 10_000);
+  assert.equal(now, Date.parse("2026-10-30T08:00:10.000Z"));
+  assert.equal(timerText(walkSeconds("2026-10-30T08:00:00.000Z", now)), "0:10");
+  assert.equal(timerText(65), "1:05");
+  assert.equal(timerText(3665), "1:01:05");
+  assert.equal(
+    correctedNow("not an instant", received, received + 5_000),
+    received + 5_000,
+    "a bad server clock falls back to local now",
+  );
+});
+
+test("a walk is stale only past the server's window, and times use the household zone", () => {
+  const started = "2026-10-30T08:00:00.000Z";
+  assert.equal(walkStale(started, Date.parse("2026-10-30T15:59:00.000Z"), 8 * 60 * 60 * 1000), false);
+  assert.equal(walkStale(started, Date.parse("2026-10-30T16:00:00.000Z"), 8 * 60 * 60 * 1000), true);
+  assert.equal(walkStale(started, Date.parse("2026-10-30T23:00:00.000Z"), 0), false, "no window, never stale");
+  assert.equal(walkTimeText(started, "Europe/Paris"), "09:00");
+  assert.equal(walkTimeText(started, "Not/AZone"), "at an unknown time");
+});
+
+function walkData({ open = null, staleAfterMs = 8 * 60 * 60 * 1000, serverNow = "2026-10-30T08:05:00.000Z", receivedAt = Date.parse("2026-10-30T08:05:00.000Z") } = {}) {
+  return { open, serverNow, staleAfterMs, receivedAt };
+}
+
+function walkOf(overrides = {}) {
+  return {
+    id: "walk-1",
+    startedAt: "2026-10-30T08:00:00.000Z",
+    startedActionId: "http:start-1",
+    startedByLabel: "Alex",
+    startedBy: "owner",
+    ...overrides,
+  };
+}
+
+test("starting a walk is only shown after the commit, and a lost race shows the open walk", async () => {
+  setState({ profile: profileOf() });
+  const request = fakeRequest((path) => {
+    if (path === "/api/walks") return { status: 200, ok: true, body: walkData({ open: walkOf() }) };
+    if (path === "/api/walks/start") return { status: 200, ok: true, body: { walk: walkOf(), replayed: false } };
+    return { status: 200, ok: true, body: walkData({ open: walkOf() }) };
+  });
+  const today = todayWith(request, { walk: walkData() });
+
+  const pending = today.startWalk();
+  assert.equal(today.state.walk.open, null, "nothing is open until the server says so");
+  await pending;
+  assert.equal(today.state.walk.open?.id, "walk-1", "the committed walk is shown");
+
+  const raceRequest = fakeRequest((path) =>
+    path === "/api/walks"
+      ? { status: 200, ok: true, body: walkData() }
+      : {
+          status: 409,
+          ok: false,
+          body: { error: "walk_open", message: '"Sam" is already walking', walk: walkOf({ startedByLabel: "Sam" }) },
+        },
+  );
+  const raced = todayWith(raceRequest, { walk: walkData() });
+  await raced.startWalk();
+  assert.equal(raced.state.walk.open?.startedByLabel, "Sam", "the blocking walk is shown, not a dead end");
+  assert.match(raced.state.walkError, /Sam/);
+});
+
+test("ending a walk sends the id and only the observations that were filled in", async () => {
+  setState({ profile: profileOf() });
+  const request = fakeRequest((path) => {
+    if (path === "/api/walks") return { status: 200, ok: true, body: walkData() };
+    return { status: 200, ok: true, body: { walk: walkOf({ endedAt: "2026-10-30T08:35:00.000Z" }), replayed: false } };
+  });
+  const today = todayWith(request, {
+    walk: walkData({ open: walkOf() }),
+    walkDraft: { pee: "1", poop: "", dogsMet: " a beagle ", mood: "  ", notes: "park loop" },
+  });
+
+  await today.endWalk();
+  const post = request.calls.find((call) => call.path === "/api/walks/end");
+  assert.ok(post, "the end endpoint was called");
+  assert.deepEqual(post.options.body, { walkId: "walk-1", pee: 1, dogsMet: " a beagle ", notes: "park loop" });
+  assert.equal(today.state.walk.open, null, "the refetched day has nothing open");
+});
+
+test("the discard control appears only on a stale walk, and end form stays available", () => {
+  setState({ profile: profileOf() });
+  const today = todayWith(fakeRequest({ status: 200, ok: true, body: null }));
+  const stale = {
+    open: walkOf(),
+    serverNow: "2026-10-30T18:00:00.000Z",
+    staleAfterMs: 8 * 60 * 60 * 1000,
+    // `walkNow` advances the server instant by local elapsed time, so the test
+    // records "received just now" and the timer shows the server's 10 h.
+    receivedAt: Date.now(),
+  };
+
+  today.state.walk = stale;
+  const staleTree = today.renderWalk();
+  assert.match(textsOf(staleTree).join(" "), /walk has been open for/, "the caregiver is warned");
+  assert.ok(textsOf(staleTree).join(" ").includes("Discard…"), "a stale walk can be discarded");
+  assert.match(textsOf(staleTree).join(" "), /10:00:00/, "the live timer shows the elapsed time");
+
+  today.state.walk = { ...stale, serverNow: "2026-10-30T08:05:00.000Z", receivedAt: Date.now() };
+  const freshTree = today.renderWalk();
+  assert.ok(!textsOf(freshTree).join(" ").includes("Discard…"), "a fresh walk is only endable");
+  assert.ok(textsOf(freshTree).join(" ").includes("5:00"), "the timer counts from the server clock");
 });

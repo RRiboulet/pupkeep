@@ -23,6 +23,10 @@
 //   GET  /api/feeding/day        today's meals: slots with who fed when, extras
 //   POST /api/feeding/fed        log a scheduled meal (Idempotency-Key → 409)
 //   POST /api/feeding/extra      log an extra feeding (Idempotency-Key)
+//   GET  /api/walks              the open walk, the server clock and the stale window
+//   POST /api/walks/start        start a walk (Idempotency-Key → 409 when one is open)
+//   POST /api/walks/end          end the walk the form saw (Idempotency-Key)
+//   POST /api/walks/discard      discard a stale walk (Idempotency-Key)
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -88,6 +92,16 @@ import {
 } from "./agent/thread.ts";
 import { readHousehold, syncHouseholdMembers } from "./domain/household.ts";
 import { localDateAt } from "./domain/time.ts";
+import {
+  discardWalk,
+  endWalk,
+  readWalks,
+  startWalk,
+  type WalkDiscardOutcome,
+  type WalkEndOutcome,
+  type WalkStartOutcome,
+} from "./domain/walks.ts";
+import { WALK_STALE_AFTER_MS, openWalk } from "../shared/walks.ts";
 import type { ThreadBus } from "./agent/bus.ts";
 import { applySecurityHeaders, serveStaticRequest } from "./static.ts";
 
@@ -455,13 +469,35 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/walks" && req.method === "GET") {
+      requireCare(session);
+      await handleWalksRead(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/walks/start" && req.method === "POST") {
+      await handleWalkStart(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/walks/end" && req.method === "POST") {
+      await handleWalkClose(deps, req, res, requireCare(session), "end");
+      return;
+    }
+
+    if (pathname === "/api/walks/discard" && req.method === "POST") {
+      await handleWalkClose(deps, req, res, requireCare(session), "discard");
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
         "route not served yet: the remaining care routes (meals, walks, growth, calendar) " +
         "arrive with their phases; the profile is GET/PATCH /api/puppy, " +
-        "the timezone PATCH /api/household, the meal schedule PATCH /api/feeding/slots " +
-        "and today's meals GET /api/feeding/day, POST /api/feeding/fed, POST /api/feeding/extra",
+        "the timezone PATCH /api/household, the meal schedule PATCH /api/feeding/slots, " +
+        "today's meals GET /api/feeding/day, POST /api/feeding/fed, POST /api/feeding/extra, " +
+        "and walks GET /api/walks, POST /api/walks/start, POST /api/walks/end, POST /api/walks/discard",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -975,6 +1011,146 @@ async function handleFeedWrite(
     replayed: outcome.kind === "replayed",
   };
   sendJson(res, 200, written);
+}
+
+// --- walks (P2-07) -----------------------------------------------------------
+
+/**
+ * The open walk, the server clock and §8.5's window. The timer is derived from
+ * a server offset, never the device clock (§8.4): the client remembers
+ * `serverNow` and ticks locally from it.
+ */
+async function handleWalksRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  const walks = await readWalks(deps.thread.harness, deps.thread.context);
+  sendJson(res, 200, {
+    open: openWalk(walks.walks) ?? null,
+    serverNow: now.toISOString(),
+    staleAfterMs: WALK_STALE_AFTER_MS,
+  });
+}
+
+/** An open or stale walk blocks a start (§7.3); both answer with the record. */
+function respondWalkStart(res: ServerResponse, outcome: WalkStartOutcome): void {
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  if (outcome.kind === "open" || outcome.kind === "stale") {
+    sendJson(res, 409, {
+      error: outcome.kind === "stale" ? "walk_stale" : "walk_open",
+      message: outcome.message,
+      walk: outcome.walk,
+    });
+    return;
+  }
+  sendJson(res, 200, { walk: outcome.walk, replayed: outcome.kind === "replayed" });
+}
+
+async function handleWalkStart(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = await readJsonBody(req);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ConflictError("a walk start is a JSON object");
+  }
+  requireOnlyKeys(body as Record<string, unknown>, []);
+  respondWalkStart(
+    res,
+    await startWalk(deps.thread.harness, deps.thread.context, {
+      actor: careActor(session),
+      actionId: `http:${key}`,
+      now: new Date(deps.now?.() ?? Date.now()),
+    }),
+  );
+}
+
+/**
+ * The body of an end or a discard. The end form must pass the walk id it
+ * rendered: with no id the service would end whatever is open now, which is
+ * right for the agent's "end the walk" and wrong for a stale form (§9.1).
+ */
+function parseWalkCloseBody(raw: unknown, mode: "end" | "discard"): {
+  walkId: string;
+  observations: Record<string, unknown>;
+} {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("closing a walk is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(
+    record,
+    mode === "end" ? ["walkId", "pee", "poop", "dogsMet", "mood", "notes"] : ["walkId"],
+  );
+  if (typeof record.walkId !== "string" || record.walkId.trim() === "") {
+    throw new ConflictError("closing a walk needs the walk id the form showed");
+  }
+  const observations: Record<string, unknown> = {};
+  for (const field of ["pee", "poop", "dogsMet", "mood", "notes"] as const) {
+    if (record[field] !== undefined) observations[field] = record[field];
+  }
+  return { walkId: record.walkId.trim(), observations };
+}
+
+function respondWalkClosed(
+  res: ServerResponse,
+  outcome: WalkEndOutcome | WalkDiscardOutcome,
+  replayedKind: string,
+): void {
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  if (outcome.kind === "ended-already") {
+    sendJson(res, 409, { error: "walk_ended", message: outcome.message, walk: outcome.walk });
+    return;
+  }
+  if (outcome.kind === "no-open") {
+    sendJson(res, 409, { error: "walk_missing", message: outcome.message });
+    return;
+  }
+  // `ended`/`discarded` and their replay share a 200; `replayed` is the flag.
+  sendJson(res, 200, { walk: outcome.walk, replayed: outcome.kind === replayedKind });
+}
+
+async function handleWalkClose(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+  mode: "end" | "discard",
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = parseWalkCloseBody(await readJsonBody(req), mode);
+  const now = new Date(deps.now?.() ?? Date.now());
+  if (mode === "discard") {
+    respondWalkClosed(
+      res,
+      await discardWalk(deps.thread.harness, deps.thread.context, {
+        actor: careActor(session),
+        actionId: `http:${key}`,
+        walkId: body.walkId,
+        now,
+      }),
+      "replayed",
+    );
+    return;
+  }
+  respondWalkClosed(
+    res,
+    await endWalk(deps.thread.harness, deps.thread.context, {
+      actor: careActor(session),
+      actionId: `http:${key}`,
+      walkId: body.walkId,
+      observations: body.observations,
+      now,
+    }),
+    "replayed",
+  );
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

@@ -699,7 +699,7 @@ test("install fills exactly PRECACHE, from pristine same-origin 200s", async () 
   const expected = [...worker.precache]
     .map((entry) => new URL(entry, `${ORIGIN}/sw.js`).pathname)
     .sort();
-  assert.equal(expected.length, 20, "the shell is the document, styles, modules, manifest and icons");
+  assert.equal(expected.length, 21, "the shell is the document, styles, modules, manifest and icons");
   assert.deepEqual(worker.cache.paths(), expected, "the cache holds exactly the precache list");
   assert.equal(worker.network.length, worker.precache.length, "one network fetch per entry");
   for (const call of worker.network) {
