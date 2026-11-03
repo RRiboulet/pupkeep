@@ -2755,8 +2755,82 @@ the shared thread answers via a fake provider; a restart loses nothing.
       must mint a fresh key per action; the route cannot tell whose key it is.
       `feed.actionId` (`http:<key>`) is echoed inside `day.events` for the
       household's audit trail and is not display copy.
-- [ ] **P2-04** Feed agent tools: `log_feeding`, `log_extra_feeding`,
-      `get_feeding_day`; actor/idempotency.
+- [x] **P2-04** Feed agent tools: `log_feeding`, `log_extra_feeding`,
+      `get_feeding_day`; actor/idempotency. **Landed:** `src/server/agent/feed-tools.ts`
+      (`feeding` extension) installed beside the profile extension in
+      `src/server/app.ts`, over P2-02's `logFeed` and P2-03's shared
+      `feedingDay`; the attribution/memo machinery moved to
+      `src/server/agent/tool-kit.ts` and `update_puppy_profile` now shares it.
+      Decisions: (1) **the tools are the routes' domain calls**, not a second
+      implementation, and the day/refusal text is built from the committed
+      document, so a log tool reports the slot, household-local date, time and
+      caregiver it actually stored. (2) **the actor is the speaker** (§9.2):
+      resolved inside the write's own `tx` from the assistant entry that issued
+      the call, cached in the task's durable memo after the commit, and the
+      household fallback for a nested or model-less call; the model's arguments
+      never name a caregiver. (3) **the task id is the action id**,
+      `tool:<taskId>`, so a rerun after a restart replays the recorded meal and a
+      client-planted key cannot hijack a tool call; both write tools are
+      `replay: "safe"`. (4) **a domain 409 is a sentence, not a throw**: a fed
+      slot answers who/when plus "call get_feeding_day", an unknown or inactive
+      slot repeats the domain sentence, and a reused key says nothing was
+      written — the model is told the committed truth, never an optimistic one.
+      (5) **free text stays data**: slot labels, amounts, notes and names are
+      JSON-quoted in the answer (§9.5), and a "not fed" slot is stated rather
+      than omitted. (6) **`get_context` now reports today's meals** and drops
+      `meals` from `NOT_TRACKED`, so the model cannot claim meals are untracked
+      while the tools log them. (7) **`feedingDayText` lives in
+      `src/server/agent/feed-text.ts`**, a pure renderer both extensions import
+      downward, rather than in a tool-registration module. (8) **the day names
+      each slot's id** (`id "slot-b", "Breakfast" (07:00)`), because
+      `log_feeding` needs an id the model cannot derive from a label; and a feed
+      filed against a slot that has since left the schedule is listed as such
+      (`filed against meal time "slot-b" (no longer in the schedule)`), since
+      `events` is authoritative and `slots`/`extras` are only views. (9) **a
+      replay reports the event's own slot**: `event.slotId === null` is "an
+      extra feeding", a non-null id missing from the day says "no longer in the
+      schedule" — never an extra feeding, and never silence. (10) **the memo
+      stores who spoke, not the label**: a crash-rerun re-derives the name (or
+      the household pairing) from the household the transaction reads. (11)
+      **the fed-slot refusal is rebuilt, not echoed**: `byLabel` is uncapped
+      caregiver text, so the sentence the model repeats JSON-quotes it
+      (a name shaped like an instruction stays data), and one `actorFrom` helper
+      applies §9.2's missing-or-unknown ⇒ household rule to both the transcript
+      scan and the memo path. (12) **a missing `app.feeding` is a refusal** in
+      the read tool (`FeedingUnavailableError` → `isError` text, "retry after
+      boot"), not a failed task; the write path still surfaces a real failure.
+      **Verified:** 7 tests in `test/feed-tools.test.ts` over a real SQLite
+      harness and a pinned 23:30Z clock in `Europe/Paris` — the day view
+      (today and a named date, slot ids, `not fed`, a bogus date refused), a
+      logged meal (household date 30 October, `tool:` action id, trimmed amount,
+      quoted note, household fallback actor, activity entry, command record,
+      memo cached after the commit, same-task replay), the second call on a fed
+      slot (who/when, nothing written), an unknown slot, the same task id with
+      another body, an extra feeding that claims no slot, a meal whose slot left
+      the schedule (still listed, and the replay says so), `get_context`
+      reporting meals instead of `NOT_TRACKED`, — through the real thread and a
+      faux provider — a model's `log_feeding` call recorded as
+      `byUserId: "owner"`/`byLabel: "Alex"` with a `tool:` action id, so §9.2
+      attribution is proven rather than only its fallback, a refusal that names
+      an instruction-shaped caregiver without losing the quotes, and 21 extras
+      keeping the newest 20 with "and 1 earlier extra feedings" counted.
+      `test/conversation.test.ts`'s tool-card case now drives the real
+      `log_feeding` and asserts the domain refusal on the card. The suite is
+      395/395.
+      **Not verified:** no live model has chosen these tools (the faux provider
+      drives the real task path but not a real model); P2-05's UI and P2-08's
+      feed race with the agent are still out; intent delivery is P4-05/P4-06.
+      **Carried out:** tool results carry text only (no `details`), so P2-05's
+      cards render prose until a view needs structure; `get_context` reads the
+      feeding document in addition to the profile's own read, one extra snapshot
+      per call; `remember()` has two call sites and P2-07 should get an
+      `asSpeaker` wrapper if a third lands. Two §9.2 fences are enforced in code
+      but not yet by a test — scanning from the issuing assistant entry (not the
+      transcript tail) and labelling from `app.household` rather than the chat
+      entry's stored name — because both need a transcript assembled around a
+      live tool task; and the parser still accepts a real member id paired with
+      the household label (the writer no longer produces one), which a future
+      document version should refuse.
 - [ ] **P2-05** Today meals UI: fed/pending/overdue, who/when, disabled state,
       extra feeding, live updates.
 - [ ] **P2-06** `app.walks` doc + domain service: start, end, details, one open

@@ -1048,10 +1048,10 @@ test("model tool calls surface as attributed tool cards in the snapshot", async 
       }
     );
     assert.equal(card.toolName, "log_feeding");
-    // No care tool is registered until P1-11, so the harness answers the
-    // model's call with its unavailable diagnostic — and the card still shows.
+    // P2-04 registers the real tool; this fixture has no meal slots, so the
+    // domain refuses the call — and the refusal still reaches the card.
     assert.equal(card.status, "error");
-    assert.match(card.text, /not available/);
+    assert.match(card.text, /no longer in the schedule/);
     assert.equal(card.byUserId, "owner", "the card names who asked");
     assert.equal(card.byLabel, "Alex", "the label resolves through the household profile");
     assert.notEqual(card.toolCallId, "");
