@@ -31,7 +31,7 @@ import {
 import { recentActivity } from "../domain/activity.ts";
 import { ActivityDoc, parseActivity, type DocStore } from "../domain/docs.ts";
 import { readFeeding } from "../domain/feeding.ts";
-import { readWalks } from "../domain/walks.ts";
+import { WalksUnavailableError, readWalks } from "../domain/walks.ts";
 import { openWalk } from "../../shared/walks.ts";
 import { readProfile, updatePuppyProfile } from "../domain/profile.ts";
 import { localTimeAt } from "../domain/time.ts";
@@ -92,7 +92,13 @@ export function createProfileTools(): Extension<ToolRegistration> {
       const now = new Date(api.now());
       const profile = await readProfile(api, context, now);
       const feeding = await readFeeding(api, context);
-      const walks = await readWalks(api, context);
+      let walkLine = "Walk: unavailable (retry after boot)";
+      try {
+        walkLine = openWalkText(openWalk((await readWalks(api, context)).walks), now, profile.household.timezone);
+      } catch (error) {
+        // One unreadable document must not cost the model every other section.
+        if (!(error instanceof WalksUnavailableError)) throw error;
+      }
       const activity = await api.snapshot(ActivityDoc, context);
       const parsed = activity === undefined ? undefined : parseActivity(activity);
       // Names are free text too (an invite's display name), so they get the
@@ -115,7 +121,7 @@ export function createProfileTools(): Extension<ToolRegistration> {
           )}`,
           // §10.1's open walk, with the server clock so "running for" is not a
           // device-clock guess.
-          openWalkText(openWalk(walks.walks), now, profile.household.timezone),
+          walkLine,
           `Recent activity:\n${activityText(parsed ? recentActivity(parsed, 10) : [])}`,
           `Not tracked by this build yet: ${NOT_TRACKED.join(", ")}`,
         ].join("\n"),

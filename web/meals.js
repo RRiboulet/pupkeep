@@ -8,32 +8,12 @@
 // These are plain functions over plain objects (no Preact, no fetch, no DOM), so
 // a Node test can pin the boundaries: midnight, a past or future day, an unfed
 // slot before and after its reminder delay, and a fed slot that can never be
-// called overdue.
+// called overdue. The zone formatting itself lives in `clock.js`, shared with
+// the walk timer so both keep one formatter cache.
 
-/** One formatter per zone and kind: `Intl` construction is the expensive part. */
-const FORMATTERS = new Map();
+import { localDate as clockDate, localMinutes as clockMinutes, localTimeText } from "./clock.js";
 
-/** A getter for one formatter part, or `null` when the zone/instant is unusable. */
-function partsOf(timezone, options, instant) {
-  // `timeZone: undefined` asks Intl for the *device's* zone; this card never
-  // does that (§8.1), so only a real zone is trusted.
-  if (typeof timezone !== "string" || timezone === "") return null;
-  const key = `${timezone}|${JSON.stringify(options)}`;
-  try {
-    let formatter = FORMATTERS.get(key);
-    if (!formatter) {
-      formatter = new Intl.DateTimeFormat("en-GB", { ...options, timeZone: timezone });
-      FORMATTERS.set(key, formatter);
-    }
-    const parts = formatter.formatToParts(instant);
-    return (type) => parts.find((part) => part.type === type)?.value ?? "";
-  } catch {
-    // An unusable zone is a configuration defect the server refuses at boot;
-    // showing an unknown time is visibly wrong rather than silently the
-    // device's zone.
-    return null;
-  }
-}
+export { clockDate as localDate, clockMinutes as localMinutes };
 
 /** `"07:30"` → 450. An unparseable time yields `null` so a caller can say so. */
 export function minutesOf(timeLocal) {
@@ -43,41 +23,11 @@ export function minutesOf(timeLocal) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
-/**
- * The household-local wall clock of `instant` as minutes since midnight. The
- * zone is the household's, passed explicitly: `Intl` never falls back to the
- * device's zone without being asked to.
- */
-export function localMinutes(instant, timezone) {
-  const get = partsOf(timezone, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }, instant);
-  if (get === null) return null;
-  const hour = Number(get("hour"));
-  const minute = Number(get("minute"));
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
-  return hour * 60 + minute;
-}
 
-/**
- * The household-local calendar date of `instant` as `YYYY-MM-DD`, derived the
- * same way the server derives it (`localDateAt`): an open Today screen must
- * notice midnight on its own, without asking the server which day it is on.
- */
-export function localDate(instant, timezone) {
-  const get = partsOf(timezone, { year: "numeric", month: "2-digit", day: "2-digit" }, instant);
-  if (get === null) return null;
-  const year = get("year");
-  const month = get("month");
-  const day = get("day");
-  return year && month && day ? `${year}-${month}-${day}` : null;
-}
 
 /** `"07:30"` for a stored instant, in the household zone. */
 export function feedTimeText(instant, timezone) {
-  const minutes = localMinutes(new Date(instant), timezone);
-  if (minutes === null) return "at an unknown time";
-  const hour = String(Math.floor(minutes / 60)).padStart(2, "0");
-  const minute = String(minutes % 60).padStart(2, "0");
-  return `${hour}:${minute}`;
+  return localTimeText(instant, timezone);
 }
 
 /**
@@ -114,8 +64,8 @@ export function mealRows(day, clock) {
  */
 export function mealClock(day, timezone, now = new Date()) {
   return {
-    today: localDate(now, timezone),
-    nowMinutes: localMinutes(now, timezone),
+    today: clockDate(now, timezone),
+    nowMinutes: clockMinutes(now, timezone),
     // The document accepts any finite non-negative delay, so the card does too
     // (a fractional minute is not an integer but is still a bound).
     delayMin:

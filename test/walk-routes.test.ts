@@ -225,6 +225,31 @@ test("closing a walk needs the id the form showed; discard marks a stale walk", 
     assert.equal(discarded.status, 200);
     assert.equal(((await discarded.json()) as { walk: Walk }).walk.discarded, true);
 
+    // A fresh walk is endable, not discardable (§8.5).
+    fixture.setNow(T0);
+    const earlyStart = await post(fixture, "/api/walks/start", fixture.alexCookie, { key: "start-2" });
+    const early = (await earlyStart.json()) as { walk: Walk };
+    const earlyDiscard = await post(fixture, "/api/walks/discard", fixture.samCookie, {
+      key: "discard-early",
+      body: { walkId: early.walk.id },
+    });
+    assert.equal(earlyDiscard.status, 409);
+    assert.match(((await earlyDiscard.json()) as { error: string }).error, /not stale/);
+    await post(fixture, "/api/walks/end", fixture.samCookie, { key: "end-early", body: { walkId: early.walk.id } });
+    fixture.setNow(new Date(T0.getTime() + 9 * 60 * 60_000));
+
+    const extraKeys = await post(fixture, "/api/walks/end", fixture.samCookie, {
+      key: "end-extra",
+      body: { walkId: walk.id, peee: 1 },
+    });
+    assert.equal(extraKeys.status, 409, "a misspelt observation is visible");
+    const stringCount = await post(fixture, "/api/walks/end", fixture.samCookie, {
+      key: "end-string",
+      body: { walkId: walk.id, pee: "1" },
+    });
+    assert.equal(stringCount.status, 409);
+    assert.match(((await stringCount.json()) as { error: string }).error, /observations are optional/);
+
     const missing = await post(fixture, "/api/walks/discard", fixture.samCookie, {
       key: "discard-2",
       body: { walkId: "walk-gone" },

@@ -24,6 +24,8 @@ import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
 import { ActivityDoc, CommandsDoc, WalksDoc, emptyWalks, parseWalks } from "../src/server/domain/docs.ts";
 import { DomainConflictError } from "../src/server/domain/errors.ts";
 import { WalksUnavailableError, discardWalk, endWalk, readWalks, startWalk } from "../src/server/domain/walks.ts";
+import { watchProfileState } from "../src/server/agent/state.ts";
+import { createLogger } from "../src/server/log.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import {
   WALK_OBSERVATION_RULE,
@@ -125,6 +127,7 @@ test("a walk is a server-timestamped record, and only one walk can be open", () 
   assert.equal(parseWalk({ ...ended, pee: 21 }), undefined, "a typo of 21 is refused");
   assert.equal(parseWalk({ ...ended, mood: "x".repeat(41) }), undefined);
   assert.equal(parseWalk({ ...walk(), endActionId: "http:end-1" }), undefined, "an open walk carries no end fields");
+  assert.equal(parseWalk({ ...walk(), discarded: true }), undefined, "an open walk cannot be discarded");
 
   assert.deepEqual(parseWalkList([walk(), ended]), [walk(), ended]);
   // The shared opaque-id charset is enforced, not just the length.
@@ -480,6 +483,12 @@ test("discarding a stale walk marks it instead of inventing a ten-hour end", asy
     const walkId = started.kind === "started" ? started.walk.id : "walk-1";
     const later = new Date(NOON.getTime() + 9 * HOUR);
 
+    // §8.5: a fresh walk is ended, not discarded.
+    await assert.rejects(
+      discardWalk(harness, context, { actor: sam, actionId: "http:discard-early", walkId, now: NOON }),
+      /not stale; end it instead/,
+    );
+
     const discarded = await discardWalk(harness, context, {
       actor: sam,
       actionId: "http:discard-1",
@@ -521,9 +530,33 @@ test("the walk document migrates version 1 to version 2 without losing a record"
       },
     ],
   };
+  assert.throws(() => migrate(legacy as never, 0), /no migration/);
   const migrated = migrate(legacy as never, 1);
   assert.equal(migrated.schemaVersion, 2);
   assert.equal(migrated.walks[0]?.id, "walk-1", "the open walk survives the upgrade");
   assert.equal(migrated.walks[0]?.discarded, undefined);
   assert.deepEqual(emptyWalks().schemaVersion, 2, "a fresh document starts at the current version");
+});
+
+test("a walk commit publishes the care frame, so the other caregiver's card updates live", async () => {
+  await withWalksHarness(async ({ harness }) => {
+    const frames: unknown[] = [];
+    const watch = watchProfileState({
+      harness,
+      context,
+      bus: { publishState: (profile: unknown) => frames.push(profile) },
+      logger: createLogger({ scope: "test", sink: () => undefined }),
+      now: () => new Date(NOON.getTime() + 60_000),
+    });
+    try {
+      await startWalk(harness, context, { actor: alex, actionId: "http:start-1", now: NOON });
+      const deadline = Date.now() + 2000;
+      while (frames.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.ok(frames.length > 0, "app.walks is one of the documents behind the care frame");
+    } finally {
+      watch.stop();
+    }
+  });
 });

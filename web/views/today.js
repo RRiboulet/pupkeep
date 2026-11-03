@@ -1,9 +1,9 @@
 // Today — the care surface the two caregivers live on (PLAN §13.1).
 //
-// This build owns the meals card: each active slot as fed, pending or overdue,
-// who fed it and when, a "Mark fed" action that cannot fire twice, and an
-// explicit "Extra feeding" form. Walks, the agent bar and recent activity arrive
-// with their phases; the first-run setup gate already lives here (P1-14).
+// This build owns the meals card (fed/pending/overdue, mark-fed, extra feeding)
+// and the walk card (start, a live server-corrected timer, end, and a stale
+// discard). The agent bar, weight and recent activity arrive with their phases;
+// the first-run setup gate already lives here (P1-14).
 //
 // Three rules shape the screen:
 //   * **never optimistic.** Nothing is marked fed until the server's commit
@@ -120,6 +120,12 @@ export class Today extends Component {
    * Today overnight would keep showing yesterday's slots under "Today".
    */
   onTick() {
+    this.ticks = (this.ticks ?? 0) + 1;
+    // A live walk timer needs the second; the meals card only ages "overdue",
+    // so with no walk open the screen re-renders once every 30 ticks. No tick
+    // makes a request.
+    const open = this.state.walk?.open ?? null;
+    if (!open && this.ticks % 30 !== 0) return;
     this.setState({ tick: this.state.tick + 1 });
     if (this.gated()) return;
     const day = this.state.day;
@@ -141,8 +147,12 @@ export class Today extends Component {
 
   /** The open walk plus the server clock the timer is corrected against. */
   async loadWalks() {
+    // Arrival order is not freshness order: a read that started before a
+    // committed write must not restore a closed walk.
+    const seq = (this.walkSeq = (this.walkSeq ?? 0) + 1);
     try {
       const result = await this.request("/api/walks");
+      if (seq !== this.walkSeq) return;
       if (result.status === 401) {
         this.setState({ walkLoading: false, walkError: SIGNED_OUT });
         return;
@@ -153,6 +163,7 @@ export class Today extends Component {
       }
       this.setState({ walk: { ...result.body, receivedAt: Date.now() }, walkLoading: false, walkError: null });
     } catch (error) {
+      if (seq !== this.walkSeq) return;
       this.setState({
         walkLoading: false,
         walkError: error instanceof NetworkError ? error.message : "Could not load the walk.",
@@ -195,8 +206,8 @@ export class Today extends Component {
     // An instance flag, not rendered state: `this.state` is not replaced until
     // Preact's next render, so two taps in one task would both pass a state
     // check. `busy` below is only for what the caregiver sees.
-    if (this.writing) return;
-    this.writing = true;
+    if (this.mealWriting) return;
+    this.mealWriting = true;
     const pending = pendingSave(this.state.pending, body);
     this.setState({ busy, pending, message: null, error: null });
     let result;
@@ -205,7 +216,7 @@ export class Today extends Component {
     } catch (error) {
       // An ambiguous failure: keep the key, so retrying the same body replays
       // instead of logging the meal twice. Only a definite refusal drops it.
-      this.writing = false;
+      this.mealWriting = false;
       this.setState({
         busy: null,
         error: error instanceof NetworkError ? error.message : "Could not log that meal. Try again.",
@@ -213,7 +224,7 @@ export class Today extends Component {
       return;
     }
 
-    this.writing = false;
+    this.mealWriting = false;
     if (result.ok && result.body?.day) {
       // A committed day invalidates any read that started before it.
       this.loadSeq = (this.loadSeq ?? 0) + 1;
@@ -288,25 +299,30 @@ export class Today extends Component {
    * `walk_stale`) shows it, so a start that lost a race is not a dead end.
    */
   async writeWalk(path, body, busy) {
-    if (this.writing) return;
-    this.writing = true;
+    if (this.walkWriting) return;
+    this.walkWriting = true;
     const pending = pendingSave(this.state.walkPending, { path, ...body });
     this.setState({ walkBusy: busy, walkPending: pending, walkMessage: null, walkError: null });
     let result;
     try {
       result = await this.request(path, { method: "POST", body, idempotencyKey: pending.key });
     } catch (error) {
-      this.writing = false;
+      this.walkWriting = false;
       this.setState({
         walkBusy: null,
         walkError: error instanceof NetworkError ? error.message : "Could not update the walk. Try again.",
       });
       return;
     }
-    this.writing = false;
+    this.walkWriting = false;
 
     if (result.ok) {
+      // Paint the committed record immediately (the response carries it), then
+      // re-read only to refresh the clock pairing.
+      const walk = result.body?.walk;
+      const open = walk && walk.endedAt === undefined ? walk : null;
       this.setState({
+        ...(walk ? { walk: { ...(this.state.walk ?? { serverNow: new Date().toISOString(), staleAfterMs: 0, receivedAt: Date.now() }), open } } : {}),
         walkBusy: null,
         walkPending: null,
         walkMessage: result.body?.replayed ? "Already saved." : "Saved.",
@@ -314,30 +330,52 @@ export class Today extends Component {
         walkDiscardOpen: false,
         walkDraft: { pee: "", poop: "", dogsMet: "", mood: "", notes: "" },
       });
-      this.loadSeq = (this.loadSeq ?? 0) + 1;
+      this.walkSeq = (this.walkSeq ?? 0) + 1;
       await this.loadWalks();
       return;
     }
 
+    // Every terminal refusal clears the form so a later walk cannot inherit this
+    // one's draft, and the message is set *after* any re-read (the read clears
+    // the error slot).
+    const resetForm = {
+      walkFormOpen: false,
+      walkDiscardOpen: false,
+      walkDraft: { pee: "", poop: "", dogsMet: "", mood: "", notes: "" },
+    };
+
     if (result.status === 409 && (result.body?.error === "walk_open" || result.body?.error === "walk_stale")) {
       const walk = result.body.walk;
+      if (this.state.walk === null) {
+        // No clock pairing to keep: the next read supplies `serverNow`.
+        this.setState({ walkBusy: null, walkPending: null, walkMessage: null, ...resetForm });
+        await this.loadWalks();
+        this.setState({ walkError: result.body.message });
+        return;
+      }
+      // Keep `serverNow`/`receivedAt` together: re-stamping `receivedAt` against
+      // the old instant would rewind the timer.
       this.setState({
         walkBusy: null,
         walkPending: null,
         walkMessage: null,
         walkError: result.body.message,
-        ...(walk ? { walk: { ...this.state.walk, open: walk, receivedAt: Date.now() } } : {}),
+        ...(walk ? { walk: { ...this.state.walk, open: walk } } : {}),
+        ...resetForm,
       });
       return;
     }
 
     if (result.status === 409) {
-      this.setState({
-        walkBusy: null,
-        walkPending: null,
-        walkError: result.body?.message ?? result.body?.error ?? "That walk is no longer open.",
-      });
+      const walk = result.body?.walk;
+      this.setState({ walkBusy: null, walkPending: null, walkMessage: null, ...resetForm });
       await this.loadWalks();
+      const ended = walk?.endedAt ? walkTimeText(walk.endedAt, this.timezone()) : null;
+      const sentence =
+        result.body?.error === "walk_ended" && walk
+          ? `${walk.endedByLabel ?? walk.startedByLabel} already ended this walk${ended ? ` at ${ended}` : ""}.`
+          : (result.body?.message ?? result.body?.error ?? "That walk is no longer open.");
+      this.setState({ walkError: sentence });
       return;
     }
 
@@ -510,6 +548,8 @@ export class Today extends Component {
     const timezone = this.timezone();
     const nowMs = this.walkNow();
     const stale = open ? walkStale(open.startedAt, nowMs, data?.staleAfterMs) : false;
+    const todayDate = localDate(new Date(nowMs), timezone);
+    const startDate = open ? localDate(new Date(open.startedAt), timezone) : null;
     const busy = this.state.walkBusy !== null;
     const draft = this.state.walkDraft;
     const field = (name, label, extra = {}) => html`
@@ -553,15 +593,18 @@ export class Today extends Component {
                 `
               : html`
                   <p class="walk__who">
-                    ${open.startedByLabel} is walking — <span role="timer" aria-label=${`Walk started at ${walkTimeText(open.startedAt, timezone)}`}>${timerText(walkSeconds(open.startedAt, nowMs))}</span>
+                    ${open.startedByLabel} is walking — <span role="timer" aria-label=${`Walk started at ${walkTimeText(open.startedAt, timezone)}`}>${stale ? `${timerText((data?.staleAfterMs ?? 0) / 1000)}+` : timerText(walkSeconds(open.startedAt, nowMs))}</span>
                   </p>
-                  <p class="field__hint">Started at ${walkTimeText(open.startedAt, timezone)}${timezone ? ` (${timezone})` : ""}</p>
+                  <p class="field__hint">
+                    Started ${startDate === todayDate ? "at" : `on ${startDate} at`}
+                    ${walkTimeText(open.startedAt, timezone)}${timezone ? ` (${timezone})` : ""}
+                  </p>
                   ${
                     stale
                       ? html`<p class="notice notice--warn">
-                          This walk has been open for
-                          ${Math.floor(walkMinutes(open.startedAt, nowMs) / 60)} hours — end it with the real time, or
-                          discard it if nobody remembers.
+                          This walk has been open for over
+                          ${Math.floor((data?.staleAfterMs ?? 0) / 3_600_000)} hours — end it now, or discard it if
+                          nobody remembers when it finished.
                         </p>`
                       : null
                   }
@@ -623,9 +666,9 @@ export class Today extends Component {
                         `
                   }
                   ${
-                    this.state.walkDiscardOpen
+                    stale && this.state.walkDiscardOpen
                       ? html`
-                          <div class="notice notice--warn">
+                          <div class="notice notice--warn" role="group" aria-label="Confirm discard">
                             <p>Discard this walk? The record stays, marked as discarded; its duration is not trusted.</p>
                             <div class="form__actions">
                               <button type="button" class="button" disabled=${busy} onClick=${() => void this.discardWalk()}>
@@ -720,8 +763,8 @@ export class Today extends Component {
         ${this.renderWalk()}
         ${this.renderMeals()}
         <p class="placeholder">
-          Walks, weight and the agent bar arrive with their phases; this shell already shares the
-          day between both caregivers live.
+          Weight and the agent bar arrive with their phases; meals and the walk are already shared
+          between both caregivers live.
         </p>
       </section>
     `;

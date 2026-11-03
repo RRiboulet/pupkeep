@@ -305,8 +305,8 @@ export async function endWalk(store: DocStore, context: Context, input: WalkEnd)
 export type WalkDiscard = {
   readonly actor: ActorResolver;
   readonly actionId: string;
-  /** The stale walk the banner showed; omit only for an agent-style "drop it". */
-  readonly walkId?: string;
+  /** The walk the banner showed. Required: a discard names its record. */
+  readonly walkId: string;
   readonly now?: Date;
 };
 
@@ -317,10 +317,10 @@ export type WalkDiscardOutcome =
   | { kind: "key-conflict" };
 
 /**
- * Discard a stale walk: close it at the server's now and mark it, because the
+ * Discard an open walk: close it at the server's now and mark it, because the
  * record cannot claim a trustworthy duration. §8.5's other resolution is an
- * ordinary end; this one exists so a walk left open overnight does not become a
- * ten-hour "end" in the history.
+ * ordinary end; the card offers discard only past its window, because a walk
+ * left open overnight must not become a ten-hour "end" in the history.
  */
 export async function discardWalk(
   store: DocStore,
@@ -328,7 +328,7 @@ export async function discardWalk(
   input: WalkDiscard,
 ): Promise<WalkDiscardOutcome> {
   const now = input.now ?? new Date();
-  const request = { walkId: input.walkId ?? null } as JsonObject;
+  const request = { walkId: input.walkId } as JsonObject;
 
   try {
     const outcome = await runIdempotent(
@@ -338,18 +338,19 @@ export async function discardWalk(
         const actor = await input.actor(tx, await tx.doc(HouseholdDoc));
         const walks = await tx.doc(WalksDoc);
 
-        const walk =
-          input.walkId === undefined
-            ? openWalk(walks.walks)
-            : walks.walks.find((candidate) => candidate.id === input.walkId);
-        if (!walk) {
-          const recent = input.walkId === undefined ? lastEndedWalk(walks.walks) : undefined;
-          if (recent) throw new WalkEndedRefusal({ ...recent });
-          throw new WalkMissingRefusal(
-            input.walkId === undefined ? WALK_NONE_OPEN_MESSAGE : "there is no walk with that id",
+        const walk = walks.walks.find((candidate) => candidate.id === input.walkId);
+        if (!walk) throw new WalkMissingRefusal("there is no walk with that id");
+        if (walk.endedAt !== undefined) throw new WalkEndedRefusal({ ...walk });
+        if (now.getTime() < Date.parse(walk.startedAt)) {
+          throw new DomainConflictError(
+            "the server clock is behind this walk's start; discard it once the clock is corrected",
           );
         }
-        if (walk.endedAt !== undefined) throw new WalkEndedRefusal({ ...walk });
+        // §8.5: discard is the *stale* resolution. A fresh walk has a trustworthy
+        // duration, so it is ended, not thrown away.
+        if (!walkIsStale(walk, now)) {
+          throw new DomainConflictError("that walk is not stale; end it instead of discarding it");
+        }
 
         walk.endedAt = now.toISOString();
         walk.endActionId = input.actionId;

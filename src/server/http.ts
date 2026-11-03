@@ -1096,11 +1096,7 @@ function parseWalkCloseBody(raw: unknown, mode: "end" | "discard"): {
   return { walkId: record.walkId.trim(), observations };
 }
 
-function respondWalkClosed(
-  res: ServerResponse,
-  outcome: WalkEndOutcome | WalkDiscardOutcome,
-  replayedKind: string,
-): void {
+function respondWalkClosed(res: ServerResponse, outcome: WalkEndOutcome | WalkDiscardOutcome): void {
   if (outcome.kind === "key-conflict") {
     sendKeyConflict(res);
     return;
@@ -1114,7 +1110,7 @@ function respondWalkClosed(
     return;
   }
   // `ended`/`discarded` and their replay share a 200; `replayed` is the flag.
-  sendJson(res, 200, { walk: outcome.walk, replayed: outcome.kind === replayedKind });
+  sendJson(res, 200, { walk: outcome.walk, replayed: outcome.kind === "replayed" });
 }
 
 async function handleWalkClose(
@@ -1136,7 +1132,6 @@ async function handleWalkClose(
         walkId: body.walkId,
         now,
       }),
-      "replayed",
     );
     return;
   }
@@ -1149,7 +1144,6 @@ async function handleWalkClose(
       observations: body.observations,
       now,
     }),
-    "replayed",
   );
 }
 

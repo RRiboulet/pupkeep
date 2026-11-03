@@ -150,6 +150,9 @@ test("start_walk and end_walk commit through the thread with the speaker attribu
     const activity = await fixture.app.app.snapshot(ActivityDoc, context);
     assert.ok(activity?.entries.some((entry) => entry.summary === "Household ended a walk (35 minutes)"));
 
+    const startReplay = await start.execute({}, toolApi(fixture, conversationId, "task-start", memos), context);
+    assert.match(resultText(startReplay), /^Already started\. Ended:/, "a replay after the end reports the closed walk");
+
     const replayEnd = await end.execute(
       { pee: 1, mood: "happy", notes: "park loop" },
       toolApi(fixture, conversationId, "task-end", memos, T0 + 36 * 60_000),
@@ -182,7 +185,7 @@ test("a start on an open walk or a stale one is a refusal with the walk describe
       context,
     );
     assert.equal(stale.isError, true);
-    assert.match(resultText(stale), /left a walk open over 8 hours ago/);
+    assert.match(resultText(stale), /has had a walk open for over 8 hours/);
     assert.equal((await readWalks(fixture.app.app, context)).walks.length, 1, "a refusal writes nothing");
   } finally {
     await stop(fixture);

@@ -7,8 +7,11 @@
 // time — a phone whose clock is minutes off still shows the same walk time to
 // both caregivers.
 //
+import { localTimeText } from "./clock.js";
+
 // These are plain functions over plain objects, so a Node test can pin the
-// offset, the stale boundary and the timer formatting without a DOM.
+// offset, the stale boundary and the timer formatting without a DOM. The zone
+// formatting is `clock.js`'s, shared with the meals card and cached per zone.
 
 /** Minutes since the walk started, from the server-corrected clock. */
 export function walkMinutes(startedAt, nowMs) {
@@ -56,17 +59,5 @@ export function walkStale(startedAt, nowMs, staleAfterMs) {
 
 /** `HH:MM` for a stored instant in the household zone (what the card shows). */
 export function walkTimeText(instant, timezone) {
-  if (typeof timezone !== "string" || timezone === "") return "at an unknown time";
-  try {
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: timezone,
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(new Date(instant));
-    const get = (type) => parts.find((part) => part.type === type)?.value ?? "";
-    return `${get("hour")}:${get("minute")}`;
-  } catch {
-    return "at an unknown time";
-  }
+  return localTimeText(instant, timezone);
 }

@@ -524,12 +524,14 @@ test("an open screen notices midnight and re-reads today instead of keeping yest
   const request = fakeRequest((path) => ({ status: 200, ok: true, body: mealDay({ localDate: today, today }) }));
   const stale = todayWith(request, { day: mealDay({ localDate: "2020-01-01", today: "2020-01-01" }) });
 
-  stale.onTick();
+  // With no walk open the screen re-renders every 30th tick; the day check runs
+  // then, so the rollover is caught within half a minute.
+  for (let index = 0; index < 30; index += 1) stale.onTick();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(request.calls.length, 1, "yesterday's day is re-read once the household date moves");
 
   const current = todayWith(request, { day: mealDay({ localDate: today, today }) });
-  current.onTick();
+  for (let index = 0; index < 30; index += 1) current.onTick();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(request.calls.length, 1, "the same day is not re-read by the ticker");
 });
@@ -766,10 +768,84 @@ test("the discard control appears only on a stale walk, and end form stays avail
   const staleTree = today.renderWalk();
   assert.match(textsOf(staleTree).join(" "), /walk has been open for/, "the caregiver is warned");
   assert.ok(textsOf(staleTree).join(" ").includes("Discard…"), "a stale walk can be discarded");
-  assert.match(textsOf(staleTree).join(" "), /10:00:00/, "the live timer shows the elapsed time");
+  assert.match(textsOf(staleTree).join(" "), /8:00:00\+/, "a stale timer is clamped at the window (PLAN §8.5)");
 
   today.state.walk = { ...stale, serverNow: "2026-10-30T08:05:00.000Z", receivedAt: Date.now() };
   const freshTree = today.renderWalk();
   assert.ok(!textsOf(freshTree).join(" ").includes("Discard…"), "a fresh walk is only endable");
   assert.ok(textsOf(freshTree).join(" ").includes("5:00"), "the timer counts from the server clock");
+});
+
+test("discarding sends the walk id, and a lost end shows who ended it", async () => {
+  setState({ profile: profileOf() });
+  const discardRequest = fakeRequest((path) => {
+    if (path === "/api/walks") return { status: 200, ok: true, body: walkData() };
+    return { status: 200, ok: true, body: { walk: walkOf({ endedAt: "2026-10-30T18:00:00.000Z", discarded: true }), replayed: false } };
+  });
+  const discarding = todayWith(discardRequest, { walk: walkData({ open: walkOf() }), walkDiscardOpen: true });
+  await discarding.discardWalk();
+  const discard = discardRequest.calls.find((call) => call.path === "/api/walks/discard");
+  assert.ok(discard, "the discard endpoint was called");
+  assert.deepEqual(discard.options.body, { walkId: "walk-1" });
+  assert.equal(discarding.state.walk.open, null, "the committed discard closes the card");
+
+  const conflictRequest = fakeRequest((path) =>
+    path === "/api/walks"
+      ? { status: 200, ok: true, body: walkData() }
+      : {
+          status: 409,
+          ok: false,
+          body: {
+            error: "walk_ended",
+            message: '"Sam" already ended this walk at 08:35',
+            walk: walkOf({ endedAt: "2026-10-30T08:35:00.000Z", endedBy: "partner", endedByLabel: "Sam" }),
+          },
+        },
+  );
+  const lost = todayWith(conflictRequest, { walk: walkData({ open: walkOf() }) });
+  await lost.endWalk();
+  assert.match(lost.state.walkError, /Sam already ended this walk at 09:35/);
+  assert.ok(
+    conflictRequest.calls.some((call) => call.path === "/api/walks"),
+    "the card re-reads after the conflict",
+  );
+});
+
+test("a slow walk read cannot overwrite a newer one, and a conflict clears the form", async () => {
+  setState({ profile: profileOf() });
+  let releaseFirst;
+  let reads = 0;
+  const request = fakeRequest((path) => {
+    if (path !== "/api/walks") return { status: 200, ok: true, body: null };
+    reads += 1;
+    if (reads === 1) {
+      return new Promise((resolve) => {
+        releaseFirst = () => resolve({ status: 200, ok: true, body: walkData({ open: walkOf({ startedByLabel: "Old" }) }) });
+      });
+    }
+    return { status: 200, ok: true, body: walkData() };
+  });
+  const today = todayWith(request);
+
+  const first = today.loadWalks();
+  await today.loadWalks();
+  releaseFirst();
+  await first;
+  assert.equal(today.state.walk.open, null, "the newer read wins");
+
+  const conflictRequest = fakeRequest((path) => {
+    if (path === "/api/walks") return { status: 200, ok: true, body: walkData() };
+    return { status: 409, ok: false, body: { error: "walk_ended", message: "already over" } };
+  });
+  const conflicted = todayWith(conflictRequest, {
+    walk: walkData({ open: walkOf() }),
+    walkFormOpen: true,
+    walkDiscardOpen: true,
+    walkDraft: { pee: "2", poop: "1", dogsMet: "", mood: "", notes: "park loop" },
+  });
+  await conflicted.endWalk();
+  assert.equal(conflicted.state.walkFormOpen, false, "the refused form closes");
+  assert.equal(conflicted.state.walkDiscardOpen, false);
+  assert.deepEqual(conflicted.state.walkDraft, { pee: "", poop: "", dogsMet: "", mood: "", notes: "" });
+  assert.ok(conflicted.state.walkError, "and the refusal is still shown");
 });

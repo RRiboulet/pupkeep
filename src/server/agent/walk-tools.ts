@@ -75,6 +75,11 @@ export function createWalkTools(): Extension<ToolRegistration> {
       }
       const household = await readHousehold(api, context);
       const line = walkStartText(outcome.walk, household.timezone);
+      if (outcome.kind === "replayed" && outcome.walk.endedAt !== undefined) {
+        // The recorded start is a fact; the *walk* may have been ended since.
+        const ended = walkCloseText(outcome.walk, household.timezone);
+        return text(`Already started. ${ended}`);
+      }
       return text(outcome.kind === "replayed" ? `Already started. ${line}` : line);
     },
   });
