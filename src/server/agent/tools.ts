@@ -13,74 +13,31 @@
 //     the model.
 //
 // `get_context` is the plan's one context tool. This build tracks the
-// household, the puppy profile and the activity feed; the rest of §10.1's
-// sections arrive with their phases, and `Not tracked` in the answer says so
-// explicitly so the model cannot report "no meals logged" from an empty result.
+// household, the puppy profile, today's meals (P2-04's `feedingDayText`) and the
+// activity feed; the rest of §10.1's sections arrive with their phases, and
+// `Not tracked` in the answer says so explicitly so the model cannot report an
+// empty result as "nothing happened".
 
 import { Type } from "@earendil-works/pi-ai";
-import type { ConversationId, Cursor, EntryId, TaskId, Tx } from "@earendil-works/pi-durable";
 import { defineExtension, defineTool, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
-import { CHAT_ENTRY_KIND, HOUSEHOLD_FALLBACK_LABEL } from "../../shared/chat.ts";
-import type { ActivityEntry, Household } from "../../shared/domain.ts";
+import type { ActivityEntry } from "../../shared/domain.ts";
+import { feedingDay } from "../../shared/feeding.ts";
 import {
   PROFILE_TEXT_LIMIT,
   TARGET_WEIGHT_MAX_KG,
   parsePuppyPatch,
   type PuppyFields,
 } from "../../shared/profile.ts";
-import type { ActorRef } from "../domain/actor.ts";
 import { recentActivity } from "../domain/activity.ts";
 import { ActivityDoc, parseActivity, type DocStore } from "../domain/docs.ts";
+import { readFeeding } from "../domain/feeding.ts";
 import { readProfile, updatePuppyProfile } from "../domain/profile.ts";
 import { localTimeAt } from "../domain/time.ts";
-import { chatDataOf, labelFor } from "./thread.ts";
+import { feedingDayText } from "./feed-text.ts";
+import { refused, speakerSeam, text } from "./tool-kit.ts";
 
 /** §10.1 sections this build does not track yet. Remove one per phase. */
-const NOT_TRACKED = ["meals", "walks", "growth", "milestones", "appointments", "showers"] as const;
-
-/** One page of the backwards scan for the speaker. */
-const SPEAKER_PAGE_SIZE = 100;
-/** The tool task's memo, so a rerun after a crash does not rescan (§9.2). */
-const ACTOR_MEMO = "actor";
-
-/**
- * §9.2 rule 1, at the tool side: read this task's input, take the `assistant`
- * entry that issued the call, and scan backwards from it to the latest
- * `app.chat` entry inside the `tx` read. The scan is anchored at the call, not
- * at the transcript tail, so entries appended after the call (its own result,
- * later turns) can never change who is attributed.
- *
- * A nested call has no assistant entry of its own; §9.2 says fail closed, so it
- * answers the household fallback instead of guessing from the parent.
- */
-async function speakerIn(
-  tx: Tx,
-  taskId: TaskId,
-  conversationId: ConversationId,
-  household: Household,
-): Promise<ActorRef> {
-  const task = await tx.task(taskId);
-  const input = task?.input as { readonly kind?: unknown; readonly assistant?: unknown } | undefined;
-  if (input?.kind !== "model" || typeof input.assistant !== "number") {
-    return { id: null, label: HOUSEHOLD_FALLBACK_LABEL };
-  }
-
-  let cursor: Cursor | undefined;
-  for (;;) {
-    const page = await tx.scanEntries(
-      { conversationId, maxEntryId: input.assistant as EntryId, order: "descending" },
-      SPEAKER_PAGE_SIZE,
-      cursor,
-    );
-    for (const entry of page.items) {
-      if (entry.kind !== CHAT_ENTRY_KIND) continue;
-      const chat = chatDataOf(entry);
-      if (chat) return { id: chat.authorId, label: labelFor(household, chat.authorId) };
-    }
-    if (page.next === undefined) return { id: null, label: HOUSEHOLD_FALLBACK_LABEL };
-    cursor = page.next;
-  }
-}
+const NOT_TRACKED = ["walks", "growth", "milestones", "appointments", "showers"] as const;
 
 /**
  * The name and breed are caregiver free text, so they are rendered as JSON
@@ -104,10 +61,6 @@ function activityText(entries: readonly ActivityEntry[]): string {
   return entries.map((entry) => `${entry.at} ${JSON.stringify(entry.summary)}`).join("\n");
 }
 
-function text(value: string): { output: { type: "text"; text: string }[] } {
-  return { output: [{ type: "text", text: value }] };
-}
-
 /** The profile tools, as one extension so a conversation selects them together. */
 export function createProfileTools(): Extension<ToolRegistration> {
   const getPuppy = defineTool({
@@ -129,11 +82,13 @@ export function createProfileTools(): Extension<ToolRegistration> {
     name: "get_context",
     description:
       "Read the current household state: now, the household-local date, the caregivers, the puppy profile and age, " +
-      "and recent activity. Sections this build does not track are listed in the answer; say so instead of guessing.",
+      "today's meals and who fed each, and recent activity. Sections this build does not track are listed in the " +
+      "answer; say so instead of guessing.",
     parameters: Type.Object({}),
     execute: async (_args, api, context) => {
       const now = new Date(api.now());
       const profile = await readProfile(api, context, now);
+      const feeding = await readFeeding(api, context);
       const activity = await api.snapshot(ActivityDoc, context);
       const parsed = activity === undefined ? undefined : parseActivity(activity);
       // Names are free text too (an invite's display name), so they get the
@@ -147,6 +102,13 @@ export function createProfileTools(): Extension<ToolRegistration> {
           `Household: ${JSON.stringify(profile.household.name)}, caregivers: ${caregivers || "none yet"}`,
           `Puppy: ${profileText(profile.puppy, profile.age?.label ?? null, profile.today)}`,
           `Revision: ${profile.rev}`,
+          // The day's meals are a section the model must be able to quote: a slot
+          // with no feed is "not fed", never "no meals logged" (§10.1).
+          `Meals today: ${feedingDayText(
+            feedingDay(feeding, profile.today),
+            profile.today,
+            profile.household.timezone,
+          )}`,
           `Recent activity:\n${activityText(parsed ? recentActivity(parsed, 10) : [])}`,
           `Not tracked by this build yet: ${NOT_TRACKED.join(", ")}`,
         ].join("\n"),
@@ -179,21 +141,12 @@ export function createProfileTools(): Extension<ToolRegistration> {
       const { rev, ...fields } = args;
       const patch = parsePuppyPatch(fields);
       if (!patch) {
-        return { ...text("No valid profile fields to change; send name, birthday, breed, sex or targetWeightKg."), isError: true };
+        return refused("No valid profile fields to change; send name, birthday, breed, sex or targetWeightKg.");
       }
       const store: DocStore = api;
-      // Read the memo before the commit: the memo API is a Session write, and a
-      // Session call made inside a commit callback queues on the line it holds.
-      const cached = await api.memo<ActorRef>(ACTOR_MEMO, context);
-      let resolved: ActorRef | undefined;
+      const speaker = await speakerSeam(api, context);
       const outcome = await updatePuppyProfile(store, context, {
-        actor: (tx, household) => {
-          if (cached) return Promise.resolve(cached);
-          return speakerIn(tx, api.taskId, api.conversationId, household).then((actor) => {
-            resolved = actor;
-            return actor;
-          });
-        },
+        actor: speaker.actor,
         // The task id is the durable identity of this call: one call, one
         // action. Namespaced so an HTTP client cannot plant a record under a
         // predictable task id and hijack (or wedge) a later tool call.
@@ -202,28 +155,19 @@ export function createProfileTools(): Extension<ToolRegistration> {
         patch,
         now: new Date(api.now()),
       });
-      if (resolved) {
-        // After the domain commit, never inside it. A failed memo costs one
-        // rescan on a rerun and nothing else, so it must not fail the change.
-        await api.memo(ACTOR_MEMO, resolved, context).catch(() => undefined);
-      }
+      // After the domain commit, never inside it (§9.2).
+      await speaker.remember();
 
       if (outcome.kind === "key-conflict") {
-        return {
-          ...text("This call reused an idempotency key for a different change; nothing was written."),
-          isError: true,
-        };
+        return refused("This call reused an idempotency key for a different change; nothing was written.");
       }
       if (outcome.kind === "stale") {
         const current = outcome.profile;
-        return {
-          ...text(
-            `Not saved: the profile changed since revision ${rev} (now ${current.rev}). ` +
-              `Current profile: ${profileText(current.puppy, current.age?.label ?? null, current.today)}. ` +
-              "Call get_puppy and try again with the new revision.",
-          ),
-          isError: true,
-        };
+        return refused(
+          `Not saved: the profile changed since revision ${rev} (now ${current.rev}). ` +
+            `Current profile: ${profileText(current.puppy, current.age?.label ?? null, current.today)}. ` +
+            "Call get_puppy and try again with the new revision.",
+        );
       }
 
       const profile = outcome.profile;
