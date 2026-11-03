@@ -95,8 +95,13 @@ export function isLocalDate(value: unknown): value is string {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-/** No control characters: a name is one line of text, not a second feed entry. */
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+/**
+ * No control characters: a name is one line of text, not a second feed entry.
+ * C0 and C1 controls plus Unicode's line/paragraph separators — `\u2028` and
+ * `\u2029` are line breaks to plain-text readers even though JavaScript does
+ * not treat them as such in a text node.
+ */
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 /** True when `text` carries a control character (a newline, a NUL, a DEL). */
 export function hasControlCharacter(text: string): boolean {

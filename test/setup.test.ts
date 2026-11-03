@@ -729,9 +729,10 @@ test("a household-less database with a feeding document is refused, not reset", 
   await withHarness(async ({ harness }) => {
     await harness.commit(async (tx) => {
       Object.assign(await tx.doc(FeedingDoc), {
-        schemaVersion: 1,
+        schemaVersion: 2,
         rev: 0,
         slots: [],
+        events: [],
         createdAt: NOW.toISOString(),
       });
     }, context);

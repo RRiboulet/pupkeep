@@ -7,8 +7,8 @@
 //   * never cache a formatter per call site. `Intl.DateTimeFormat` is expensive
 //     to construct and cheap to reuse, so one cache keyed by zone and options.
 //
-// The full feeding/walking/care calendar arrives with P2-01. This module holds
-// only what the profile (age) and `get_context` (today, now) need.
+// The feeding day view (P2-01) and the walk/growth calendar (P3+) build on this
+// module; it holds the date arithmetic they and the profile (age) share.
 
 import type { PuppyAge } from "../../shared/profile.ts";
 
