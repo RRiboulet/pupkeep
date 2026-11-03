@@ -18,6 +18,7 @@ import {
   type AppConfig,
   type MemberRecord,
 } from "../src/server/config.ts";
+import { NOTIFICATION_CATEGORIES } from "../src/shared/notifications.ts";
 
 function member(overrides: Partial<MemberRecord> = {}): MemberRecord {
   return {
@@ -127,6 +128,19 @@ test("unknown notification categories are refused", () => {
     prefs: { m1: { enabled: true, categories: ["feed_overdue", "vet_appointments"] } },
   };
   assert.equal(parsePush(push), undefined);
+});
+
+test("the category vocabulary is §12.1's five, and prefs accept all of them", () => {
+  // A literal list on purpose: asserting only against the constant would pass
+  // even if the constant itself dropped a category.
+  assert.deepEqual([...NOTIFICATION_CATEGORIES], ["appointment", "feed_overdue", "fed", "approval", "test"]);
+  // Prefs take the whole vocabulary, so settings never shrink to the subset the
+  // intent parser accepts.
+  const parsed = parsePush({
+    ...emptyPush(),
+    prefs: { m1: { enabled: true, categories: [...NOTIFICATION_CATEGORIES] } },
+  });
+  assert.deepEqual(parsed?.prefs.m1?.categories, [...NOTIFICATION_CATEGORIES]);
 });
 
 test("push keeps the VAPID pair and per-user ntfy topics", () => {

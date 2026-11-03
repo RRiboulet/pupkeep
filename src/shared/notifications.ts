@@ -22,15 +22,36 @@
 //     a boot failure caused by a profile. `title` is code-owned and stays bounded.
 
 import type { NotificationIntent } from "./domain.ts";
-import { isIsoInstant } from "./domain.ts";
+import { OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
 import { hasControlCharacter } from "./profile.ts";
 
-/** Categories P2-02 can write. P4-05 adds appointment/reminder ones with a bump. */
-export const NOTIFICATION_CATEGORIES = ["fed"] as const;
+/**
+ * §12.1's vocabulary: every category a caregiver's notification settings may
+ * offer. `push.json`'s per-member prefs validate against all of it, including
+ * the categories this build cannot deliver yet, so settings never shrink to the
+ * writable subset below.
+ */
+export const NOTIFICATION_CATEGORIES = [
+  "appointment",
+  "feed_overdue",
+  "fed",
+  "approval",
+  "test",
+] as const;
 export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
 
+/**
+ * The categories this build commits intents for — P2-02 writes `fed`; P4-05 adds
+ * the reminder and approval ones. The intent parser refuses anything else: a
+ * Phase 2 build must not store an intent it cannot deliver. Widening the set
+ * also needs a `NOTIFICATION_TITLES` entry; the document version bump is for
+ * changing that catalog's text or the intent's shape, not for the widening.
+ */
+export const NOTIFICATION_INTENT_CATEGORIES = ["fed"] as const satisfies readonly NotificationCategory[];
+export type NotificationIntentCategory = (typeof NOTIFICATION_INTENT_CATEGORIES)[number];
+
 /** Category-only titles: the only text allowed in a push or ntfy body. */
-export const NOTIFICATION_TITLES: Readonly<Record<NotificationCategory, string>> = Object.freeze({
+export const NOTIFICATION_TITLES: Readonly<Record<NotificationIntentCategory, string>> = Object.freeze({
   fed: "A meal was logged",
 });
 
@@ -39,8 +60,6 @@ export const NOTIFICATION_LIMIT = 500;
 export const NOTIFICATION_ID_LIMIT = 64;
 /** Code-owned catalog text; not derived from a caregiver's input. */
 export const NOTIFICATION_TITLE_LIMIT = 80;
-
-const OPAQUE_ID = /^[A-Za-z0-9._:-]+$/;
 
 function text(value: unknown, limit: number): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -74,12 +93,12 @@ export function parseNotificationIntent(raw: unknown): NotificationIntent | unde
   if (Object.keys(record).some((key) => !keys.includes(key))) return undefined;
 
   const { id, dedupeKey, category, userId, readAt } = record;
-  if (typeof id !== "string" || id.length === 0 || id.length > NOTIFICATION_ID_LIMIT || !OPAQUE_ID.test(id)) {
+  if (typeof id !== "string" || id.length === 0 || id.length > NOTIFICATION_ID_LIMIT || !OPAQUE_ID_PATTERN.test(id)) {
     return undefined;
   }
   const key = displayText(dedupeKey);
   if (key === undefined) return undefined;
-  if (!(NOTIFICATION_CATEGORIES as readonly string[]).includes(category as string)) return undefined;
+  if (!(NOTIFICATION_INTENT_CATEGORIES as readonly string[]).includes(category as string)) return undefined;
   const user = displayText(userId);
   if (user === undefined) return undefined;
   const title = text(record.title, NOTIFICATION_TITLE_LIMIT);
@@ -147,6 +166,9 @@ export function appendIntents(
   if (all.length <= limit) return all;
 
   const unread = all.filter((intent) => intent.readAt === null);
+  // `slice(-0)` is `slice(0)`, which keeps every read item; so does a
+  // fractional or NaN limit, which `slice` also maps to `0`.
+  if (!Number.isInteger(limit) || limit <= 0) return unread;
   const read = all.filter((intent) => intent.readAt !== null).slice(-limit);
   // Keep document order: unread items are the ones a caregiver still has to see.
   const keep = new Set<NotificationIntent>([...unread, ...read]);

@@ -133,7 +133,8 @@ test("an intent is a category title, in-app copy, a dedupe key and a reader", ()
 
   const bad: Array<[string, Record<string, unknown>]> = [
     ["unknown key", { ...intent(), extra: true }],
-    ["unknown category", { ...intent(), category: "appointment" }],
+    ["a category this build cannot write yet", { ...intent(), category: "appointment" }],
+    ["unknown category", { ...intent(), category: "walk_reminder" }],
     ["empty body", { ...intent(), body: "   " }],
     ["body with a newline", { ...intent(), body: "fed\nBreakfast" }],
     ["bad instant", { ...intent(), createdAt: "2026-02-30T00:00:00.000Z" }],
@@ -181,6 +182,24 @@ test("appendIntents drops a duplicate key and never prunes an unread item", () =
     read.slice(-NOTIFICATION_LIMIT).map((item) => item.id),
     "the newest read items are kept, in order",
   );
+  assert.deepEqual(
+    appendIntents([], [...read, first], 0),
+    [first],
+    "a zero limit still keeps the unread item",
+  );
+});
+
+test("appendIntents never lets a limit that cannot bound the read items keep them", () => {
+  const unread = intent();
+  const read = [1, 2].map((index) => ({
+    ...intent({ id: `notice-r${index}`, dedupeKey: `fed|2026-10-29|slot|slot-${index}|partner` }),
+    readAt: NOON.toISOString(),
+  }));
+  // `slice(-0)` is `slice(0)`, and a fractional or NaN limit also maps to `0`:
+  // without the guard every read item would survive its retention window.
+  for (const limit of [0, -1, 0.5, Number.NaN]) {
+    assert.deepEqual(appendIntents([], [...read, unread], limit), [unread], `limit ${limit}`);
+  }
 });
 
 // --- logging a meal ---------------------------------------------------------

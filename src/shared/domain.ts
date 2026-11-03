@@ -9,7 +9,9 @@
 //     not the strings an earlier draft of §8.3 showed.
 
 import type { JsonValue } from "@earendil-works/chord";
-import type { NotificationCategory } from "./notifications.ts";
+// Type-only on purpose: `notifications.ts` value-imports this module, so a value
+// import here would make the document shapes and the catalog load-order cyclic.
+import type { NotificationIntentCategory } from "./notifications.ts";
 
 /**
  * Version 2 adds `rev` and `timezoneConfirmedAt` (P1-14); a version-1 document
@@ -146,7 +148,7 @@ export type NotificationIntent = {
    * duplicated. Format is per category; the feeding service owns its own.
    */
   dedupeKey: string;
-  category: NotificationCategory;
+  category: NotificationIntentCategory;
   /** Config member id the item is for. */
   userId: string;
   /** Category-only title; safe for push and ntfy. */
@@ -221,8 +223,8 @@ export type Commands = {
 
 /**
  * The charset every opaque id in a document shares: slot ids, logged-meal ids,
- * action ids and command keys. One rule, one place, so a key accepted by the
- * routes cannot be refused by a document parser later.
+ * action ids, command keys and notification intent ids. One rule, one place, so
+ * a key accepted by the routes cannot be refused by a document parser later.
  */
 export const OPAQUE_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 

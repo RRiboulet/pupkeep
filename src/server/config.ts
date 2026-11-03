@@ -19,6 +19,7 @@ import { chmod, mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { JsonFileStore, type JsonFileOptions } from "./json-file.ts";
 import { isIsoInstant, type MemberProfile } from "../shared/domain.ts";
+import { NOTIFICATION_CATEGORIES, type NotificationCategory } from "../shared/notifications.ts";
 import { parseModelProbeCache, PROBE_CACHE_VERSION, type ModelProbeCache } from "./models/cache.ts";
 
 export const DATA_DIR_MODE = 0o700;
@@ -293,8 +294,6 @@ export interface PushSubscriptionRecord {
   createdAt: string;
 }
 
-export type NotificationCategory = "appointment" | "feed_overdue" | "fed" | "approval" | "test";
-
 export interface NotificationPrefs {
   enabled: boolean;
   categories: NotificationCategory[];
@@ -315,13 +314,9 @@ export function emptyPush(): PushConfig {
   return { schemaVersion: PUSH_SCHEMA_VERSION, vapid: null, subscriptions: [], prefs: {}, ntfy: {} };
 }
 
-const CATEGORIES: ReadonlySet<string> = new Set<NotificationCategory>([
-  "appointment",
-  "feed_overdue",
-  "fed",
-  "approval",
-  "test",
-]);
+// Every §12.1 category, including the ones this build cannot deliver yet, so
+// settings never shrink to the subset the intent parser accepts.
+const CATEGORIES: ReadonlySet<string> = new Set(NOTIFICATION_CATEGORIES);
 
 function parseSubscription(value: unknown): PushSubscriptionRecord | undefined {
   const record = asRecord(value);

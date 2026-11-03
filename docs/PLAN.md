@@ -1410,6 +1410,12 @@ displayed but not pushed in v1.
   (`shared/notifications.ts`), which is what keeps care detail out of a push
   body. The catalog text is therefore **document-frozen**: rewording an entry
   requires a document version bump and a `migrate` (P4-05).
+- The intent parser accepts only the categories the current build can deliver
+  (`NOTIFICATION_INTENT_CATEGORIES` in the same module, `fed` in Phase 2);
+  §12.1's vocabulary that settings may offer is wider, so a Phase 2 build
+  refuses an intent it could not deliver instead of storing it. P4-05 widens
+  the parsable set as delivery lands; the version bump covers catalog text and
+  the intent's shape, not the widening itself.
 - A host delivery loop sends Web Push for pending items and publishes the same
   intent to the partner’s configured **ntfy** topic (generic text only), then
   marks sent/failed with retry/backoff. In-app items are immediately visible via
