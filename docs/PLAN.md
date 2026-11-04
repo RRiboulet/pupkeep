@@ -2990,8 +2990,47 @@ the shared thread answers via a fake provider; a restart loses nothing.
       two-client live race is P2-08's; and the activity line for a very long
       "end" keeps the real duration (the UI clamps what it displays, the audit
       record does not).
-- [ ] **P2-08** Tests: same/different actionId, concurrent feed, feed race with
+- [x] **P2-08** Tests: same/different actionId, concurrent feed, feed race with
       agent, walk across restart, stale walk, two-client live update.
+      **Landed:** `test/multiplayer.test.ts` — eight tests over the real
+      listener, a real SQLite file, the real agent task path and the one SSE
+      stream. Decisions: (1) **interleavings are driven, not hoped for**:
+      `Promise.all` for the concurrent feed pair and the same-key pair, the
+      injected app clock for the stale walk, and a scripted faux provider for the
+      agent path — no sleep-based ordering. (2) **the walk restart is a real
+      SIGKILL**: a child process bootstraps the household, calls `startWalk` and
+      prints the id; the parent kills it with no close and no checkpoint, starts
+      a fresh app on the same directory, finds the open walk, and has the other
+      caregiver end it — the §15.2 "kill during a walk" case rather than a
+      graceful reopen. (3) **the agent race is exercised in both orders** (agent
+      commits then the route conflicts; route commits then the tool renders the
+      conflict on its card) because the commit line serialises them: the claim is
+      that neither surface can produce a second meal, not that the loser reads a
+      particular message. (4) **live updates are asserted at the frame, not the
+      DOM**: the partner's stream receives a `profile` frame for a feed and for a
+      walk start, and the long-poll fallback is not woken because care writes do
+      not move `bus.seq` (§9.4). (5) **the intent is checked at the document**:
+      two racing feeds produce exactly one `app.notifications` item, for the
+      caregiver who did not feed.
+      **Verified:** 8 tests — concurrent feed (one 200/one 409 `already_fed` with
+      the current day, one event, one intent for the other caregiver, one
+      activity entry); same key/body in flight (one commit and one replay, one
+      event); agent-first then route (the committed meal attributed to the thread
+      speaker with a `tool:` action id, the route's 409 naming who fed); route-
+      first then agent (the tool card is an error carrying the who/when refusal,
+      still one meal); **walk across SIGKILL** (child committed, killed, fresh app
+      finds the open walk, partner ends it); stale walk blocked then resolved by
+      an end and by a discard, with history kept; a partner SSE frame for a feed
+      and for a walk start; and the long-poll fallback waiting out its window
+      while two care writes land. The suite is 453/453.
+      **Not verified:** the two-client check is the server's frame, not a browser
+      render (P5-03 is the two-client E2E); the agent/route "race" is serialised
+      at the commit line rather than truly simultaneous (the guarantee is the
+      same, the interleaving is not driven); **the per-commit growth measurement
+      the P2-06 carried note asked for is still open** — `app.feeding` and
+      `app.walks` replace their whole list per write, and a delta/archive
+      threshold should be set from a measured series (P3 or P5-07); and no
+      care-rate limiter was added.
 - [ ] **P2-09** Feed reminder task skeleton (slot + delay; can land in Phase 4 if
       push is not ready).
 
