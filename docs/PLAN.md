@@ -2752,7 +2752,9 @@ the shared thread answers via a fake provider; a restart loses nothing.
       P2-08's, and intent **delivery** remains P4-05/P4-06.
       **Carried out:** extra feedings are not rate-limited and `app.feeding` is
       never pruned (§8.5), so the per-commit full re-parse grows with the log —
-      P2-08 should measure it and add a care limiter if needed. A wrong method
+      the measured cap/archive decision is **P5-07**'s (P2-01 already placed it
+      there) and a care limiter, if the measurement asks for one, belongs with
+      P4-05/P5-07. A wrong method
       on a served path still answers P1-09's 503 inventory sentence (now longer),
       not a 405. A client key replayed by the *other* caregiver with an
       identical body replays the first action (§7.3 hashes no actor), so P2-05
@@ -2940,9 +2942,9 @@ the shared thread answers via a fake provider; a restart loses nothing.
       carry `replayed`; the discard path is still P2-07's decision (this task
       only ends); and history is never pruned while both writers replace the
       whole list, so P2-08 should measure the per-commit delta and set §8.5's
-      archive threshold — the refactor that table-drives bootstrap's
-      create/repair/refuse path should also land before P3-01 adds four more
-      documents.
+      archive threshold (**P5-07**'s decision, from a measured series) — the
+      refactor that table-drives bootstrap's create/repair/refuse path should
+      also land before P3-01 adds four more documents.
 - [x] **P2-07** Walk HTTP + agent tools + UI: start, live timer, end form,
       stale-walk banner with end/discard; new start blocked until resolved.
       **Landed:** `GET /api/walks`, `POST /api/walks/start`, `/end`, `/discard`
@@ -3012,25 +3014,33 @@ the shared thread answers via a fake provider; a restart loses nothing.
       not move `bus.seq` (§9.4). (5) **the intent is checked at the document**:
       two racing feeds produce exactly one `app.notifications` item, for the
       caregiver who did not feed.
-      **Verified:** 8 tests — concurrent feed (one 200/one 409 `already_fed` with
-      the current day, one event, one intent for the other caregiver, one
-      activity entry); same key/body in flight (one commit and one replay, one
-      event); agent-first then route (the committed meal attributed to the thread
-      speaker with a `tool:` action id, the route's 409 naming who fed); route-
-      first then agent (the tool card is an error carrying the who/when refusal,
-      still one meal); **walk across SIGKILL** (child committed, killed, fresh app
-      finds the open walk, partner ends it); stale walk blocked then resolved by
-      an end and by a discard, with history kept; a partner SSE frame for a feed
-      and for a walk start; and the long-poll fallback waiting out its window
-      while two care writes land. The suite is 453/453.
-      **Not verified:** the two-client check is the server's frame, not a browser
-      render (P5-03 is the two-client E2E); the agent/route "race" is serialised
-      at the commit line rather than truly simultaneous (the guarantee is the
-      same, the interleaving is not driven); **the per-commit growth measurement
-      the P2-06 carried note asked for is still open** — `app.feeding` and
-      `app.walks` replace their whole list per write, and a delta/archive
-      threshold should be set from a measured series (P3 or P5-07); and no
-      care-rate limiter was added.
+      **Verified:** 9 tests — concurrent feed (one 200/one 409 `already_fed` with
+      the current day marking the slot fed, who fed, one event, the exact
+      §12.3 intent `fed|<date>|slot|slot-b|<other>` with a category-only title,
+      and one attributed activity entry); same key/body in flight (one commit and
+      one replay, one event); agent-first then route (the committed meal
+      attributed to the thread speaker with a `tool:` action id, the route's 409
+      naming who fed, the tool card visible); route-first then agent (the card is
+      an error carrying the who/when refusal); a route and an agent run set going
+      together in one tick (exactly one surface reports success); **walk across
+      SIGKILL** via `src/server/testing/walk-child.ts` (the child starts the real
+      app, commits the start over HTTP, writes an atomic readiness marker; the
+      parent asserts the exit signal was SIGKILL, reopens the app, finds the open
+      walk, ends it as the partner, and reopens once more to prove the *end* is
+      durable); stale walk blocked then resolved by an end and by a discard, with
+      the discarded record kept; a partner SSE frame for a feed and for a walk
+      start, each followed by the partner's own re-read showing the commit; and
+      the thread counter unchanged by two care writes (the long-poll fallback is
+      not woken). The suite is 454/454.
+      **Not verified:** the two-client check is the server frame plus a re-read,
+      not a browser render (P5-03 is the two-client E2E); a genuinely
+      simultaneous tool/route commit needs a tool-execution seam (the app-level
+      runs overlap, the commits serialise) — the guarantee proven is "one meal,
+      whichever surface wins"; a SIGKILL at an HTTP *ack* boundary other than the
+      walk start, and the launcher/tunnel restart, are P5-01's matrix; and
+      **per-commit growth is still unmeasured**: `app.feeding`/`app.walks` replace
+      their whole list per write, and the cap/archive decision (with any care
+      limiter) is P5-07's, from a measured series.
 - [ ] **P2-09** Feed reminder task skeleton (slot + delay; can land in Phase 4 if
       push is not ready).
 
