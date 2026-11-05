@@ -922,7 +922,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.growth` | Measurements (weight, height, note, who, when) | Several per day, the day's latest is its reading; kg to the gram, cm to a tenth; the chart series is derived in local-date order, never stored; the target weight is `app.puppy`'s field (P1-11), never copied |
 | `app.training` | Milestones + status | Starter catalog (build-side, stable `catalog:` ids) + `custom:<uuid>` entries; `not_started`/`practicing`/`mastered`; `masteredAt` iff mastered; untouched milestones have no record |
 | `app.calendar` | Appointments | UTC instant + household timezone; reminder offsets; status |
-| `app.showers` | Shower history | Date, shampoo, notes; next due from interval |
+| `app.showers` | Shower history | A household-local date with the record; shampoo and notes are one line each; the next due date is **derived** from the latest shower plus `app.household.settings.showerIntervalDays`, never stored; append-only, two showers a day allowed, repeated ids refused |
 | `app.notifications` | Per-user in-app items + push outbox | Dedupe key, read state, delivery state |
 | `app.activity` | Last N human-readable events | Built by domain functions, not the LLM |
 | `app.approvals` | Pending high-impact actions | Proposed by the agent; confirmed by a human; expiry |
@@ -934,7 +934,8 @@ slots (P2-01 adds the feed events and moves that document to version 2); P2-02
 adds `app.notifications` with the committed intents a care action creates (P4-05
 adds the outbox and delivery fields as version 2); P3-01 adds `app.growth` with
 the measurement history; P3-04 adds `app.training` with the milestone states
-and the household's own entries (the catalog lives in the build). Each
+and the household's own entries (the catalog lives in the build); P3-06 adds
+`app.showers` with the shower history. Each
 value carries `schemaVersion: 1` and its Pi Durable document version is 1; a
 future change increments both and adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
@@ -1243,7 +1244,7 @@ changes rarely.
 | `start_walk` | low | One open walk; returns existing if already open; stale conflict after 8h |
 | `end_walk` | low | Observations; same actionId replays success; a different actionId on an already-ended walk is 409 |
 | `log_measurement` | low | Weight/height; actionId dedupe |
-| `log_shower` | low | Date/notes; actionId dedupe |
+| `log_shower` | low | Shampoo/notes text; the household-local date, who and when come from the server (§8.4), never an argument; actionId dedupe |
 | `update_milestone` | low | Status/note; records who/when; actionId dedupe |
 | `add_milestone` | low | A milestone of the household's own; unique title; actionId dedupe (P3-05) |
 | `create_appointment` | low | Creates appointment + **system-conversation-owned** reminder tasks in one commit |
@@ -3550,13 +3551,85 @@ process kill; both clients see the same state; the partner notification
       is named for its action (`/api/training/milestone`). The loader's 401/error
       branches are one helper shared by growth and the board, so P3-07 does not
       make a third copy.
-- [ ] **P3-06** `app.showers` doc/service: log, history, next due.
-- [ ] **P3-07** Shower HTTP + agent tools + UI. **Carried out of P3-05:** the
+- [x] **P3-06** `app.showers` doc/service: log, history, next due. **Landed:**
+      `src/shared/showers.ts` (the shape and its parsers, the field parser, the
+      history order, `lastShower`, `showerStatus`, `ShowerView`, the text bounds
+      and `SHOWER_RULE`), `Shower`/`Showers` and `SHOWERS_SCHEMA_VERSION` in
+      `src/shared/domain.ts`, `ShowersDoc`/`parseShowers` in
+      `src/server/domain/docs.ts`, `src/server/domain/showers.ts`
+      (`readShowers`, `showerView`, `readShowerView`, `logShower`), and
+      bootstrap creating/repairing
+      `app.showers` (with the missing-household and malformed-document
+      refusals); `app.showers` also joins `PROFILE_KINDS` so a commit publishes
+      the care frame's signal. HTTP, tools and the card are P3-07.
+      Decisions: (1) **the date is stored with the record**, derived at write
+      time in the household zone (§8.4) — a due date is a calendar question, and
+      re-deriving it from `at` after a zone change would re-date history (the
+      growth precedent). (2) **the next due date is derived, never stored**: the
+      latest shower's local date plus `app.household.settings.showerIntervalDays`
+      (the plan's one source for the interval). "Latest" is the greatest stored
+      **local date** (ties by instant), not the greatest instant: after a
+      westward zone change those can disagree, and the calendar is what a due
+      date means. `showerStatus` returns the last shower, the due date, the
+      signed day count and `due` (`today >= nextDue`), so "due today" and
+      "overdue" are one comparison. The arithmetic is on calendar dates, so a
+      DST change inside the interval cannot add or lose a day. (3) **the interval
+      is whole days**: the household setting accepts any positive finite number;
+      the derivation rounds it (floor of one), so a due date stays a date.
+      (4) **no uniqueness per day**: a shower is an observation, not a claim
+      (contrast a feed); a second rinse is legitimate and needs no conflict. The
+      only document rule is a unique id (and, per P3-05's lesson, a state list
+      re-parsed inside the commit as a backstop). (5) **no `rev`**: every write is
+      the same append, so there is nothing to compare-and-swap; the idempotency
+      key covers the double-tap. (6) **one commit per shower**: the record, one
+      activity line and the key; the writer seeds an empty `createdAt`, as every
+      sibling does, so a boot-less write cannot wedge the next boot. (7) **the
+      shampoo stays off the activity line** (caregiver free text) and on the
+      record; the feed says who logged a shower and when, which is what a
+      partner reads at a glance.
+      **Verified:** 15 new tests in `test/showers.test.ts` — the shape (the
+      stored local date, the §9.2 fence, text bounds and control characters,
+      instants, the action id, unknown keys), the field parser (trim, empty as
+      absent, refusals), the list (two showers a day allowed, a repeated id
+      refused, schema/instant/malformed), the derived due date (latest by
+      calendar date, due exactly on the interval, one day early/late, no history,
+      the interval's one boundary rule in the settings parser (a fraction, zero,
+      NaN and an out-of-range value refused), the view built from the
+      household's zone and clock (23:30Z is the next day in Paris and the due
+      date counts from it), a zone change not re-dating history, the interval
+      spanning a DST change, a future-dated shower never due, and `showerStatus`
+      refusing an unvalidated interval or a due date that is not a calendar
+      date), the history order (newest first, same day by instant), the service
+      (one commit with the household-local date at 23:30Z, trimmed text, replay,
+      key conflict, a refused shape writing nothing and not burning its key, the
+      household fallback actor, a missing document unavailable rather than
+      empty), boot repair + the malformed and partial-restore refusals, and the
+      history surviving a reopen. The suite is 565/565 and `npm run typecheck`
+      passes.
+      **Not verified:** no route, agent tool or card yet (P3-07), so nothing has
+      logged a shower from a browser or the model; the DST assertion is calendar
+      arithmetic plus a household-zone `today`, not a browser rendering; nothing
+      archives the history (P5-07 measures growth, and should include this
+      document's per-commit re-parse of the whole list); and no phone has run it.
+- [ ] **P3-07** Shower HTTP + agent tools + UI. **Carried out of P3-06:** the
+      tool names are the §10.1/§10.2 ones — `log_shower` and `list_showers` — not
+      the task text's `get_shower_status`, and the read takes **no date
+      argument**: the route and the tool derive the household-local today from
+      the server clock (the task text's from/to range would be an argument the
+      domain refuses). `showerStatus` needs the interval, so the route/tool read
+      `app.household.settings.showerIntervalDays` alongside the history and pass
+      it in; the agent's copy renders `showerStatus`'s due date in the household
+      zone (P3-05's lesson: dates are local, never the stored UTC instant).
+      **Carried out of P3-05:** the
       shower history is unbounded, so unlike the milestone board a write answer
       must not adopt the whole collection — re-read the history instead (P5-07
       is measuring exactly this growth). Reuse the Pup screen's `readCareView`
       loader and its `loadSeq`/`careSeq` pattern; the per-row editor is not the
-      shape to copy (showers are append-only history plus a log form).
+      shape to copy (showers are append-only history plus a log form). Remove
+      `showers` from `NOT_TRACKED` and add the summary line to `get_context`
+      (the live signal is already in place); put the model copy in a
+      `shower-text.ts` sibling; and put the "recent few" cap in one client
+      module, the way P3-05 put the note/title caps in `web/training.js`.
 - [ ] **P3-08** Tests: trend fixtures, milestone attribution, shower interval.
       **Carried out of P3-05:** the app/tool fixtures (`startApp` + `toolApi`)
       are now copied verbatim in the feed, walk, growth and training test files;

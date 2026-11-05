@@ -1,7 +1,7 @@
 // The session documents PLAN §8.1 assigns to P1-08 (household, puppy, activity,
 // commands), plus the care documents later phases added (`app.feeding` with the
 // meal slots and feed events, `app.notifications`, `app.walks`, `app.growth`,
-// `app.training`), and their parsers.
+// `app.training`, `app.showers`), and their parsers.
 //
 // The doc `version` and the value's `schemaVersion` start at 1. A shape change
 // increments both and adds `migrate(value, fromVersion)`; the parsers below then
@@ -45,6 +45,8 @@ import {
   NOTIFICATIONS_SCHEMA_VERSION,
   OPAQUE_ID_PATTERN,
   PUPPY_SCHEMA_VERSION,
+  SHOWER_INTERVAL_MAX_DAYS,
+  SHOWERS_SCHEMA_VERSION,
   WALKS_SCHEMA_VERSION,
   type Activity,
   type ActivityEntry,
@@ -53,6 +55,7 @@ import {
   type FeedReminderRef,
   type Feeding,
   type Growth,
+  type Showers,
   type Training,
   type Household,
   type HouseholdSettings,
@@ -66,6 +69,7 @@ import {
 import { SLOT_ID_LIMIT, parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
 import { parseGrowthMeasurements } from "../../shared/growth.ts";
 import { parseTrainingList } from "../../shared/training.ts";
+import { parseShowerList } from "../../shared/showers.ts";
 import { parseNotificationIntents } from "../../shared/notifications.ts";
 import { parseWalkList } from "../../shared/walks.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
@@ -138,6 +142,11 @@ export function emptyGrowth(): Growth {
 /** The milestone board: the catalog is the build's, this document the household's. */
 export function emptyTraining(): Training {
   return { schemaVersion: TRAINING_SCHEMA_VERSION, states: [], custom: [], createdAt: "" };
+}
+
+/** The shower history: append-only, with the next due date derived elsewhere. */
+export function emptyShowers(): Showers {
+  return { schemaVersion: SHOWERS_SCHEMA_VERSION, showers: [], createdAt: "" };
 }
 
 /** No committed notification intents yet. */
@@ -259,6 +268,15 @@ export const TrainingDoc = defineDoc<Training>({
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
+/** The shower history (P3-06). */
+export const ShowersDoc = defineDoc<Showers>({
+  kind: "app.showers",
+  version: 1,
+  scope: "session",
+  initial: emptyShowers,
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
 /** Committed notification intents (P2-02 writes them; P4-05 adds delivery). */
 export const NotificationsDoc = defineDoc<Notifications>({
   kind: "app.notifications",
@@ -341,7 +359,15 @@ function parseSettings(value: unknown): HouseholdSettings | undefined {
     if (!isNonNegativeInteger(offset)) return undefined;
     offsets.push(offset);
   }
-  if (typeof showerIntervalDays !== "number" || !Number.isFinite(showerIntervalDays) || showerIntervalDays <= 0) {
+  // A whole number of days: the due date is a calendar date, so the one place
+  // that decides the interval's domain is the document parser (no second
+  // rounding rule downstream).
+  if (
+    typeof showerIntervalDays !== "number" ||
+    !Number.isSafeInteger(showerIntervalDays) ||
+    showerIntervalDays < 1 ||
+    showerIntervalDays > SHOWER_INTERVAL_MAX_DAYS
+  ) {
     return undefined;
   }
   if (!isNonNegativeNumber(agentBudgetUsd)) return undefined;
@@ -581,6 +607,21 @@ export function parseTraining(value: unknown): Training | undefined {
   const parsed = parseTrainingList({ states: record.states, custom: record.custom });
   if (!parsed) return undefined;
   return { schemaVersion: TRAINING_SCHEMA_VERSION, states: parsed.states, custom: parsed.custom, createdAt: record.createdAt };
+}
+
+/**
+ * `app.showers`: the shower history. The list invariants (unique ids, the §9.2
+ * pairing, the text bounds) live in `shared/showers.ts`, so the service
+ * validates a draft with the same rules the document uses. Order and repeated
+ * days are deliberately not rules.
+ */
+export function parseShowers(value: unknown): Showers | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== SHOWERS_SCHEMA_VERSION) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  const showers = parseShowerList(record.showers);
+  if (!showers) return undefined;
+  return { schemaVersion: SHOWERS_SCHEMA_VERSION, showers, createdAt: record.createdAt };
 }
 
 /**

@@ -35,6 +35,7 @@ const PROFILE_KINDS = new Set([
   "app.walks",
   "app.growth",
   "app.training",
+  "app.showers",
 ]);
 
 export interface ProfileStateOptions {

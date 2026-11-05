@@ -101,6 +101,7 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
       "app.household",
       "app.notifications",
       "app.puppy",
+      "app.showers",
       "app.training",
       "app.walks",
     ]);
