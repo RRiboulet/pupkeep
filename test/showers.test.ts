@@ -173,6 +173,22 @@ test("the next due date is the latest shower plus the household interval, by dat
   assert.equal(showerStatus(history, 22, "2026-10-29").daysUntilDue, 2);
 });
 
+test("the interval crosses a month end and a leap day by calendar days", () => {
+  const history = (localDate: string) => ({ showers: [shower({ localDate })] });
+  // 31 January + 21 days is 21 February: February 2026 has 28 days, so a month
+  // subtraction would be three days short.
+  const january = showerStatus(history("2026-01-31"), 21, "2026-02-10");
+  assert.equal(january.nextDue, "2026-02-21");
+  assert.equal(january.daysUntilDue, 11);
+  // A one-day interval steps into the next month, not onto the 32nd.
+  assert.equal(showerStatus(history("2026-01-31"), 1, "2026-01-31").nextDue, "2026-02-01");
+  // 2028 is a leap year: 28 February + 1 is the 29th, + 2 is 1 March.
+  assert.equal(showerStatus(history("2028-02-28"), 1, "2028-02-29").nextDue, "2028-02-29");
+  assert.equal(showerStatus(history("2028-02-28"), 2, "2028-03-01").nextDue, "2028-03-01");
+  // A shower on the leap day itself counts 21 days forward normally.
+  assert.equal(showerStatus(history("2028-02-29"), 21, "2028-03-21").nextDue, "2028-03-21");
+});
+
 test("showerStatus refuses an unvalidated interval or a due date that is not a date", () => {
   const history = { showers: [shower()] };
   assert.throws(() => showerStatus(history, Number.NaN, TODAY), /not a shower interval/);

@@ -14,19 +14,13 @@
 //     a cached meal.
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
-import { createModels, fauxProvider } from "@earendil-works/pi-ai";
-import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
-import { dataStores } from "../src/server/config.ts";
-import { createLogger } from "../src/server/log.ts";
+import { SESSION_COOKIE } from "../src/server/auth.ts";
 import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
 import type { FeedEvent, MealSlot } from "../src/shared/domain.ts";
 import type { FeedWriteView, MealDayView } from "../src/shared/feeding.ts";
 import type { PuppyProfile } from "../src/shared/profile.ts";
+import { startTestApp, type TestApp } from "./support/app.ts";
 
 const SLOTS: MealSlot[] = [
   { id: "slot-b", label: "Breakfast", timeLocal: "07:00", active: true },
@@ -35,62 +29,24 @@ const SLOTS: MealSlot[] = [
   { id: "slot-off", label: "Lunch", timeLocal: "12:00", active: false },
 ];
 
-interface Fixture {
-  dir: string;
-  app: AppHandle;
-  url: string;
-  alexCookie: string;
-  samCookie: string;
-}
+type Fixture = TestApp & { alexCookie: string; samCookie: string };
 
 async function startFixture(options: { now?: () => number } = {}): Promise<Fixture> {
-  const dir = await mkdtemp(join(tmpdir(), "pupkeep-feed-routes-"));
-  const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
-  const models = createModels();
-  models.setProvider(faux.provider);
-
-  const stores = dataStores(dir);
-  await stores.config.ensure();
-  const samToken = newToken();
-  const now = "2026-10-29T10:00:00.000Z";
-  const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
-  await stores.config.update((current) => ({
-    ...current,
-    members: [
-      { id: "owner", role: "owner", displayName: "Alex", createdAt: now, sessions: [] },
-      {
-        id: "partner",
-        role: "member",
-        displayName: "Sam",
-        createdAt: now,
-        sessions: [{ tokenHash: hashToken(samToken), createdAt: now, expiresAt: expires }],
-      },
-    ],
-  }));
-
-  const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models, ...(options.now ? { now: options.now } : {}) },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
-  );
-  assert.ok(result.ok, "the app must start");
-  const auth = new Auth({ config: stores.config });
-  const ownerToken = await auth.mintOwner("http://127.0.0.1").then((m) => m.token);
-  const alexCookie = await auth.login(ownerToken).then((l) => l.token);
-  const fixture = { dir, app: result.app, url: result.app.url, alexCookie, samCookie: samToken };
+  const base = await startTestApp({
+    prefix: "pupkeep-feed-routes-",
+    ...(options.now === undefined ? {} : { now: options.now }),
+    partner: true,
+  });
+  const fixture: Fixture = { ...base, alexCookie: base.cookies.owner, samCookie: base.cookies.partner! };
 
   // The schedule is P1-14's write, over its own route: this test wants a real
   // `app.feeding`, not a hand-written document.
-  const schedule = await mutate(fixture, "PATCH", "/api/feeding/slots", alexCookie, {
+  const schedule = await mutate(fixture, "PATCH", "/api/feeding/slots", fixture.alexCookie, {
     body: { rev: 0, slots: SLOTS },
     key: "schedule-1",
   });
   assert.equal(schedule.status, 200, "the meal schedule must be storable");
   return fixture;
-}
-
-async function stop(fixture: Fixture): Promise<void> {
-  await fixture.app.close();
-  await rm(fixture.dir, { recursive: true, force: true });
 }
 
 function cookieFor(token: string): string {
@@ -204,7 +160,7 @@ test("the day view is the local date's active slots, the feed that claimed one, 
     assert.equal(sam.day.extras.length, 1);
     assert.equal(sam.day.events.length, 2);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -230,7 +186,7 @@ test("a second caregiver on a fed slot is a 409 with who/when and the current da
     const day = await getDay(fixture, fixture.alexCookie);
     assert.equal(day.day.events.length, 1, "the conflict wrote no second event");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -254,7 +210,7 @@ test("the same key and body replays as success; the same key with another body i
     const day = await getDay(fixture, fixture.alexCookie);
     assert.equal(day.day.events.length, 1);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -284,7 +240,7 @@ test("an unknown or inactive slot, and a malformed body, are refused without wri
     const day = await getDay(fixture, fixture.alexCookie);
     assert.equal(day.day.events.length, 0, "every refusal left the day untouched");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -339,7 +295,7 @@ test("the feed routes need a session, an origin, the request header, JSON and a 
     const day = await getDay(fixture, fixture.alexCookie);
     assert.equal(day.day.events.length, 0);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -351,8 +307,11 @@ test("the day is derived in the household's zone, not from the UTC date", async 
   const instant = new Date("2026-10-29T23:30:00.000Z");
   const fixture = await startFixture({ now: () => instant.getTime() });
   try {
+    // The fixture set the zone (UTC) through the same route, so read the
+    // revision it left rather than assuming the boot value.
+    const current = await careView(fixture, fixture.alexCookie);
     const zone = await mutate(fixture, "PATCH", "/api/household", fixture.alexCookie, {
-      body: { rev: 0, timezone: "Europe/Paris" },
+      body: { rev: current.household.rev, timezone: "Europe/Paris" },
       key: "zone-1",
     });
     assert.equal(zone.status, 200);
@@ -372,7 +331,7 @@ test("the day is derived in the household's zone, not from the UTC date", async 
     assert.equal(conflict.status, 409);
     assert.equal((await json<{ day: MealDayView }>(conflict)).day.localDate, "2026-10-30");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -388,7 +347,7 @@ test("a feed leaves the meal-schedule revision alone, so an open wizard is not i
     assert.equal(after.meals.rev, before.meals.rev, "rev is the schedule's, not the meal log's");
     assert.deepEqual(after.meals.slots, before.meals.slots);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -404,7 +363,7 @@ test("the same key on /fed and /extra is a key conflict, not a replay or a secon
     const day = await getDay(fixture, fixture.alexCookie);
     assert.equal(day.day.events.length, 1, "the refused extra wrote nothing");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -418,7 +377,7 @@ test("an empty optional field may be null, and a slot id is whitespace-trimmed",
     assert.equal(written.feed.amount, undefined);
     assert.equal(written.feed.note, undefined);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -432,6 +391,6 @@ test("an over-long note is refused by the domain, not silently truncated", async
     const day = await getDay(fixture, fixture.alexCookie);
     assert.equal(day.day.events.length, 0);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });

@@ -21,21 +21,25 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ConversationId, ToolExecutionApi } from "@earendil-works/pi-durable";
-import { SESSION_COOKIE, Auth } from "../src/server/auth.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
+import { SESSION_COOKIE } from "../src/server/auth.ts";
 import { watchProfileState } from "../src/server/agent/state.ts";
 import { createShowerTools } from "../src/server/agent/shower-tools.ts";
-import { dataStores, emptyConfig } from "../src/server/config.ts";
+import { emptyConfig } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
-import { ActivityDoc, HouseholdDoc, ShowersDoc, parseShowers } from "../src/server/domain/docs.ts";
+import { ActivityDoc, ShowersDoc, parseShowers } from "../src/server/domain/docs.ts";
 import { openHarness } from "../src/server/harness.ts";
 import { createLogger } from "../src/server/log.ts";
 import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
 import { SHAMPOO_LIMIT, SHOWER_RULE, type ShowerView } from "../src/shared/showers.ts";
 import type { Shower } from "../src/shared/domain.ts";
-import type { Household } from "../src/shared/domain.ts";
 import type { PuppyProfile } from "../src/shared/profile.ts";
+import {
+  conversationIdOf,
+  resultText,
+  startTestApp,
+  toolApi,
+  type TestApp,
+} from "./support/app.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -47,70 +51,16 @@ const T0 = new Date("2026-10-24T22:30:00.000Z");
 /** 25 October + the default 21-day interval, in calendar dates, across the DST change. */
 const NEXT_DUE = "2026-11-15";
 
-interface Fixture {
-  dir: string;
-  app: AppHandle;
-  url: string;
-  alexCookie: string;
-  profile: () => Promise<PuppyProfile>;
-}
+type Fixture = TestApp & { alexCookie: string };
 
+/** The DST case needs a zone that changes offset inside the interval. */
 async function startShowerApp(): Promise<Fixture> {
-  const dir = await mkdtemp(join(tmpdir(), "pupkeep-shower-routes-"));
-  const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
-  const models = createModels();
-  models.setProvider(faux.provider);
-
-  const stores = dataStores(dir);
-  await stores.config.ensure();
-  const createdAt = "2026-10-23T10:00:00.000Z";
-  await stores.config.update((current) => ({
-    ...current,
-    members: [{ id: "owner", role: "owner", displayName: "Alex", createdAt, sessions: [] }],
-  }));
-
-  const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models, now: () => T0.getTime() },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
-  );
-  assert.ok(result.ok, "the app must start");
-  const auth = new Auth({ config: stores.config });
-  const ownerToken = await auth.mintOwner("http://127.0.0.1").then((m) => m.token);
-  const alexCookie = await auth.login(ownerToken).then((l) => l.token);
-  const fixture: Fixture = {
-    dir,
-    app: result.app,
-    url: result.app.url,
-    alexCookie,
-    profile: async () => {
-      const response = await fetch(`${result.app.url}/api/puppy`, {
-        headers: { Cookie: `${SESSION_COOKIE}=${alexCookie}` },
-      });
-      assert.equal(response.status, 200);
-      return (await response.json()) as PuppyProfile;
-    },
-  };
-  // The DST case needs a zone that changes offset inside the interval; the
-  // container's own zone is whatever the host chose.
-  const current = await fixture.profile();
-  const patched = await fetch(`${result.app.url}/api/household`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
-      Cookie: `${SESSION_COOKIE}=${alexCookie}`,
-      Origin: result.app.url,
-      "Idempotency-Key": "tz-setup",
-    },
-    body: JSON.stringify({ rev: current.household.rev, timezone: "Europe/Paris" }),
+  const base = await startTestApp({
+    prefix: "pupkeep-shower-routes-",
+    now: T0.getTime(),
+    timezone: "Europe/Paris",
   });
-  assert.equal(patched.status, 200, "the household timezone is set for the fixture");
-  return fixture;
-}
-
-async function stop(fixture: Fixture): Promise<void> {
-  await fixture.app.close();
-  await rm(fixture.dir, { recursive: true, force: true });
+  return { ...base, alexCookie: base.cookies.owner };
 }
 
 interface MutateOptions {
@@ -143,38 +93,8 @@ async function getShowers(fixture: Fixture, token = fixture.alexCookie): Promise
   return { status: response.status, body: (await response.json()) as ShowerView };
 }
 
-/** Committed reads and one commit for a tool, with a fixed task id and a memo. */
-function toolApi(
-  fixture: Fixture,
-  conversationId: number,
-  taskId = "task-1",
-  memos = new Map<string, unknown>(),
-): ToolExecutionApi {
-  const api = {
-    taskId,
-    conversationId: conversationId as ConversationId,
-    now: () => T0.getTime(),
-    snapshot: (token: never, ctx: never) => fixture.app.app.snapshot(token, ctx),
-    commit: (change: never, ctx: never) => fixture.app.app.commit(change, ctx),
-    memo: async (name: string, candidateOrContext: unknown, maybeContext?: unknown) => {
-      if (maybeContext === undefined) return memos.get(name);
-      if (!memos.has(name)) memos.set(name, candidateOrContext);
-      return memos.get(name);
-    },
-  };
-  return api as unknown as ToolExecutionApi;
-}
-
 function showerTools() {
   return new Map((createShowerTools().tools ?? []).map((tool) => [tool.name, tool]));
-}
-
-function resultText(result: { output?: unknown }): string {
-  return (result.output as { text: string }[])[0]!.text;
-}
-
-async function conversationIdOf(fixture: Fixture): Promise<number> {
-  return (await fixture.app.app.snapshot(HouseholdDoc, context))!.conversationId;
 }
 
 async function committedShowers(fixture: Fixture): Promise<readonly Shower[]> {
@@ -205,7 +125,7 @@ test("GET /api/showers answers the empty view, and needs a session", async () =>
     });
     assert.equal(response.headers.get("cache-control"), "no-store");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -240,7 +160,7 @@ test("POST /api/showers commits one shower and answers a bounded record", async 
     assert.equal(activity?.entries.at(-1)?.summary, "Alex logged a shower");
     assert.equal(activity?.entries.at(-1)?.summary.includes("Oatmeal"), false, "the shampoo stays off the feed");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -272,7 +192,7 @@ test("a repeated key with the same body replays, and a different body is the key
     assert.equal(((await conflict.json()) as { error: string }).error, "idempotency_conflict");
     assert.equal((await committedShowers(fixture)).length, 1);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -323,7 +243,7 @@ test("a second shower on the same day is legitimate, and a refused shape writes 
     assert.equal(retried.status, 200);
     assert.equal(((await retried.json()) as ShowerWriteAnswer).replayed, false);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -352,7 +272,7 @@ test("the shower routes need a session, an origin, the request header, JSON and 
     assert.match(((await noKey.json()) as { error: string }).error, /Idempotency-Key/);
     assert.deepEqual((await committedShowers(fixture)), []);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -454,7 +374,7 @@ test("the UI route and the agent tool append the same shower, apart from provena
     assert.equal(agent.byLabel, "Household", "a model-less tool call is the household fallback (§9.2)");
     assert.notEqual(ui.id, agent.id);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -502,6 +422,6 @@ test("a DST-boundary day renders the same next-due date from the route and the t
     assert.equal(after.body.status.nextDue, NEXT_DUE);
     assert.equal(after.body.history.length, 2);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });

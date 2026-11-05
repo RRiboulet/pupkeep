@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env bin/pupkeep.js",
-    "test": "node --test",
+    "test": "node --test \"test/**/*.test.ts\" \"test/**/*.test.js\"",
     "typecheck": "tsc --noEmit",
     "backup": "node scripts/backup.ts",
     "restore": "node scripts/restore.ts"

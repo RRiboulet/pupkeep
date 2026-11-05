@@ -18,10 +18,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { SESSION_COOKIE, Auth } from "../src/server/auth.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
+import { SESSION_COOKIE } from "../src/server/auth.ts";
 import { watchProfileState } from "../src/server/agent/state.ts";
-import { dataStores, emptyConfig } from "../src/server/config.ts";
+import { emptyConfig } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
 import { ActivityDoc } from "../src/server/domain/docs.ts";
 import { MEASUREMENT_RULE } from "../src/shared/growth.ts";
@@ -30,58 +29,16 @@ import { createLogger } from "../src/server/log.ts";
 import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
 import type { GrowthView } from "../src/shared/growth.ts";
 import type { PuppyProfile } from "../src/shared/profile.ts";
+import { startTestApp, type TestApp } from "./support/app.ts";
 
 const context = BACKGROUND_CONTEXT;
 const T0 = new Date("2026-10-30T08:00:00.000Z");
 
-interface Fixture {
-  dir: string;
-  app: AppHandle;
-  url: string;
-  alexCookie: string;
-  profile: () => Promise<PuppyProfile>;
-}
+type Fixture = TestApp & { alexCookie: string };
 
 async function startGrowthApp(): Promise<Fixture> {
-  const dir = await mkdtemp(join(tmpdir(), "pupkeep-growth-routes-"));
-  const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
-  const models = createModels();
-  models.setProvider(faux.provider);
-
-  const stores = dataStores(dir);
-  await stores.config.ensure();
-  const createdAt = "2026-10-29T10:00:00.000Z";
-  await stores.config.update((current) => ({
-    ...current,
-    members: [{ id: "owner", role: "owner", displayName: "Alex", createdAt, sessions: [] }],
-  }));
-
-  const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models, now: () => T0.getTime() },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
-  );
-  assert.ok(result.ok, "the app must start");
-  const auth = new Auth({ config: stores.config });
-  const ownerToken = await auth.mintOwner("http://127.0.0.1").then((m) => m.token);
-  const alexCookie = await auth.login(ownerToken).then((l) => l.token);
-  return {
-    dir,
-    app: result.app,
-    url: result.app.url,
-    alexCookie,
-    profile: async () => {
-      const response = await fetch(`${result.app.url}/api/puppy`, {
-        headers: { Cookie: `${SESSION_COOKIE}=${alexCookie}` },
-      });
-      assert.equal(response.status, 200);
-      return (await response.json()) as PuppyProfile;
-    },
-  };
-}
-
-async function stop(fixture: Fixture): Promise<void> {
-  await fixture.app.close();
-  await rm(fixture.dir, { recursive: true, force: true });
+  const base = await startTestApp({ prefix: "pupkeep-growth-routes-", now: T0.getTime() });
+  return { ...base, alexCookie: base.cookies.owner };
 }
 
 interface MutateOptions {
@@ -146,7 +103,7 @@ test("GET /api/growth answers the series, the trend and its copy, and needs a se
     const patchedProfile = ((await patched.json()) as { profile: PuppyProfile }).profile;
     assert.equal(patchedProfile.today, (await fixture.profile()).today, "the PATCH answer uses the process clock");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -173,10 +130,11 @@ test("logging a weight is one commit, replayed by the same key, and refused for 
     assert.match(logged.growth.lines[1]!.text, /not veterinary advice/);
 
     // The commit is the measurement, one activity line and the idempotency
-    // record; the note is stored on the record, not in the feed.
+    // record; the note is stored on the record, not in the feed. (The fixture's
+    // zone confirmation is its own setup line.)
     const activity = await fixture.app.app.snapshot(ActivityDoc, context);
     assert.deepEqual(
-      activity?.entries.map((entry) => entry.summary),
+      activity?.entries.filter((entry) => entry.kind === "growth.measurement").map((entry) => entry.summary),
       ["Alex logged a weight of 4.25 kg"],
     );
 
@@ -197,7 +155,7 @@ test("logging a weight is one commit, replayed by the same key, and refused for 
     assert.equal(((await conflict.json()) as { error: string }).error, "idempotency_conflict");
     assert.equal((await getGrowth(fixture)).body.points.length, 1);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -224,9 +182,15 @@ test("an invalid measurement is refused with the rule and writes nothing", async
 
     assert.deepEqual((await getGrowth(fixture)).body.points, []);
     const activity = await fixture.app.app.snapshot(ActivityDoc, context);
-    assert.deepEqual(activity?.entries, [], "a refused measurement writes nothing");
+    // The fixture's own zone confirmation is setup, not this write: a refused
+    // measurement adds no measurement line and no command key.
+    assert.equal(
+      activity?.entries.some((entry) => entry.kind === "growth.measurement"),
+      false,
+      "a refused measurement writes nothing",
+    );
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -255,7 +219,7 @@ test("the growth routes need a session, an origin, the request header, JSON and 
     assert.match(((await noKey.json()) as { error: string }).error, /Idempotency-Key/);
     assert.deepEqual((await getGrowth(fixture)).body.points, []);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 

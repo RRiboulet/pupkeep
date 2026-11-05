@@ -7,110 +7,33 @@
 // stale, already-ended, nothing open).
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
-import type { ConversationId, ToolExecutionApi } from "@earendil-works/pi-durable";
-import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
 import { createWalkTools } from "../src/server/agent/walk-tools.ts";
 import { createProfileTools } from "../src/server/agent/tools.ts";
-import { dataStores } from "../src/server/config.ts";
-import { createLogger } from "../src/server/log.ts";
-import { ActivityDoc, HouseholdDoc } from "../src/server/domain/docs.ts";
+import { ActivityDoc } from "../src/server/domain/docs.ts";
 import { readWalks } from "../src/server/domain/walks.ts";
+import {
+  conversationIdOf as sharedConversationId,
+  resultText,
+  startTestApp,
+  toolApi,
+  type TestApp,
+} from "./support/app.ts";
 
 const context = BACKGROUND_CONTEXT;
 const T0 = Date.parse("2026-10-30T08:00:00.000Z");
 
-interface Fixture {
-  dir: string;
-  app: AppHandle;
-  url: string;
-  alexCookie: string;
-  samCookie: string;
-}
+type Fixture = TestApp;
 
-async function startWalkToolApp(): Promise<Fixture> {
-  const dir = await mkdtemp(join(tmpdir(), "pupkeep-walk-tools-"));
-  const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
-  faux.setResponses([() => fauxAssistantMessage("Done.")]);
-  const models = createModels();
-  models.setProvider(faux.provider);
-
-  const stores = dataStores(dir);
-  await stores.config.ensure();
-  const samToken = newToken();
-  const createdAt = "2026-10-29T10:00:00.000Z";
-  const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
-  await stores.config.update((current) => ({
-    ...current,
-    members: [
-      { id: "owner", role: "owner", displayName: "Alex", createdAt, sessions: [] },
-      {
-        id: "partner",
-        role: "member",
-        displayName: "Sam",
-        createdAt,
-        sessions: [{ tokenHash: hashToken(samToken), createdAt, expiresAt: expires }],
-      },
-    ],
-  }));
-
-  const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
-  );
-  assert.ok(result.ok, "the app must start");
-  const auth = new Auth({ config: stores.config });
-  const ownerToken = await auth.mintOwner("http://127.0.0.1").then((m) => m.token);
-  const alexCookie = await auth.login(ownerToken).then((l) => l.token);
-  return { dir, app: result.app, url: result.app.url, alexCookie, samCookie: samToken };
-}
-
-async function stop(fixture: Fixture): Promise<void> {
-  await fixture.app.close();
-  await rm(fixture.dir, { recursive: true, force: true });
-}
-
-function toolApi(
-  fixture: Fixture,
-  conversationId: number,
-  taskId: string | number = "task-1",
-  memos = new Map<string, unknown>(),
-  nowMs = T0,
-): ToolExecutionApi {
-  const api = {
-    taskId,
-    conversationId: conversationId as ConversationId,
-    now: () => nowMs,
-    snapshot: (token: never, ctx: never) => fixture.app.app.snapshot(token, ctx),
-    commit: (change: never, ctx: never) => fixture.app.app.commit(change, ctx),
-    memo: async (name: string, candidateOrContext: unknown, maybeContext?: unknown) => {
-      if (maybeContext === undefined) return memos.get(name);
-      if (!memos.has(name)) memos.set(name, candidateOrContext);
-      return memos.get(name);
-    },
-  };
-  return api as unknown as ToolExecutionApi;
-}
-
-async function sharedConversationId(fixture: Fixture): Promise<number> {
-  const household = await fixture.app.app.snapshot(HouseholdDoc, context);
-  return household!.conversationId;
+function startWalkToolApp(): Promise<Fixture> {
+  return startTestApp({ prefix: "pupkeep-walk-tools-", now: T0 });
 }
 
 function tools() {
   const walk = createWalkTools().tools ?? [];
   const profile = createProfileTools().tools ?? [];
   return new Map([...walk, ...profile].map((tool) => [tool.name, tool]));
-}
-
-function resultText(result: { output?: unknown }): string {
-  return (result.output as { text: string }[])[0]!.text;
 }
 
 test("start_walk and end_walk commit through the thread with the speaker attributed", async () => {
@@ -163,7 +86,7 @@ test("start_walk and end_walk commit through the thread with the speaker attribu
     assert.equal(again.isError, true);
     assert.match(resultText(again), /^Not ended: "Household" already ended this walk at/);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -188,7 +111,7 @@ test("a start on an open walk or a stale one is a refusal with the walk describe
     assert.match(resultText(stale), /has had a walk open for over 8 hours/);
     assert.equal((await readWalks(fixture.app.app, context)).walks.length, 1, "a refusal writes nothing");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -206,7 +129,7 @@ test("an invalid observation is refused with the rule, and nothing is ended", as
     assert.match(resultText(invalid), /^Not ended: a walk's observations are optional/);
     assert.equal((await readWalks(fixture.app.app, context)).walks[0]?.endedAt, undefined);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -228,6 +151,6 @@ test("get_context reports the open walk and no longer lists walks as untracked",
     // Growth left that list with P3-03 and showers with P3-07; appointments stay named.
     assert.match(after, /Not tracked by this build yet: appointments$/m);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });

@@ -11,80 +11,37 @@
 //   * the shared mutation guards (session, origin, request header, JSON, key).
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
-import { createModels, fauxProvider } from "@earendil-works/pi-ai";
-import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
-import { dataStores } from "../src/server/config.ts";
-import { createLogger } from "../src/server/log.ts";
+import { SESSION_COOKIE } from "../src/server/auth.ts";
 import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
 import { WALK_STALE_AFTER_MS } from "../src/shared/walks.ts";
 import type { Walk } from "../src/shared/domain.ts";
+import { startTestApp, type TestApp } from "./support/app.ts";
 
 const T0 = new Date("2026-10-30T08:00:00.000Z");
 
-interface Fixture {
-  dir: string;
-  app: AppHandle;
-  url: string;
+type Fixture = TestApp & {
   alexCookie: string;
   samCookie: string;
   /** Advance the app's clock (the routes read it, not the wall clock). */
   setNow: (date: Date) => void;
-}
+};
 
 async function startWalkApp(): Promise<Fixture> {
-  const dir = await mkdtemp(join(tmpdir(), "pupkeep-walk-routes-"));
-  const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
-  const models = createModels();
-  models.setProvider(faux.provider);
-
-  const stores = dataStores(dir);
-  await stores.config.ensure();
-  const samToken = newToken();
-  const createdAt = "2026-10-29T10:00:00.000Z";
-  const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
-  await stores.config.update((current) => ({
-    ...current,
-    members: [
-      { id: "owner", role: "owner", displayName: "Alex", createdAt, sessions: [] },
-      {
-        id: "partner",
-        role: "member",
-        displayName: "Sam",
-        createdAt,
-        sessions: [{ tokenHash: hashToken(samToken), createdAt, expiresAt: expires }],
-      },
-    ],
-  }));
-
   let current = T0;
-  const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models, now: () => current.getTime() },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
-  );
-  assert.ok(result.ok, "the app must start");
-  const auth = new Auth({ config: stores.config });
-  const ownerToken = await auth.mintOwner("http://127.0.0.1").then((m) => m.token);
-  const alexCookie = await auth.login(ownerToken).then((l) => l.token);
+  const base = await startTestApp({
+    prefix: "pupkeep-walk-routes-",
+    now: () => current.getTime(),
+    partner: true,
+  });
   return {
-    dir,
-    app: result.app,
-    url: result.app.url,
-    alexCookie,
-    samCookie: samToken,
-    setNow: (date) => {
+    ...base,
+    alexCookie: base.cookies.owner,
+    samCookie: base.cookies.partner!,
+    setNow: (date: Date) => {
       current = date;
     },
   };
-}
-
-async function stop(fixture: Fixture): Promise<void> {
-  await fixture.app.close();
-  await rm(fixture.dir, { recursive: true, force: true });
 }
 
 function cookieFor(token: string): string {
@@ -144,7 +101,7 @@ test("GET /api/walks answers the open walk, the server clock and the stale windo
     const after = await getWalks(fixture, fixture.samCookie);
     assert.equal(after.body.open?.id, startedBody.walk.id, "the partner sees the same open walk");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -167,7 +124,7 @@ test("a second start is a 409 with the open walk; past eight hours it is walk_st
     assert.equal(((await stale.json()) as { error: string }).error, "walk_stale");
     assert.equal((await getWalks(fixture, fixture.alexCookie)).body.open?.id, walk.id, "still one walk");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -203,7 +160,7 @@ test("ending a walk records observations, replays, and refuses a different actio
     assert.equal(conflict.walk.endedByLabel, "Sam", "who ended it, not just a sentence");
     assert.match(conflict.message, /"Sam" already ended this walk/);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -257,7 +214,7 @@ test("closing a walk needs the id the form showed; discard marks a stale walk", 
     assert.equal(missing.status, 409);
     assert.equal(((await missing.json()) as { error: string }).error, "walk_missing");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -282,6 +239,6 @@ test("the walk routes need a session, an origin, the request header, JSON and a 
     assert.equal(badBody.status, 409);
     assert.equal((await getWalks(fixture, fixture.alexCookie)).body.open, null);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });

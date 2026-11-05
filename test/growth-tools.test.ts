@@ -12,115 +12,37 @@
 //     untracked.
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxProvider } from "@earendil-works/pi-ai";
-import type { ConversationId, ToolExecutionApi } from "@earendil-works/pi-durable";
-import { SESSION_COOKIE, Auth } from "../src/server/auth.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
 import { createGrowthTools } from "../src/server/agent/growth-tools.ts";
 import { createProfileTools } from "../src/server/agent/tools.ts";
-import { dataStores } from "../src/server/config.ts";
-import { ActivityDoc, CommandsDoc, HouseholdDoc } from "../src/server/domain/docs.ts";
+import { ActivityDoc, CommandsDoc } from "../src/server/domain/docs.ts";
 import { readGrowth } from "../src/server/domain/growth.ts";
-import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
-import { createLogger } from "../src/server/log.ts";
+import {
+  conversationIdOf as sharedConversationId,
+  resultText,
+  startTestApp,
+  toolApi,
+  type TestApp,
+} from "./support/app.ts";
 
 const context = BACKGROUND_CONTEXT;
 /** 23:30Z is already the next day in Paris: a UTC date would answer 29 October. */
 const NOW_MS = Date.parse("2026-10-29T23:30:00.000Z");
 const TODAY = "2026-10-30";
 
-interface Fixture {
-  dir: string;
-  app: AppHandle;
-  url: string;
-  alexCookie: string;
+type Fixture = TestApp;
+
+/** A zone where 23:30Z is already tomorrow, so the local date is not a guess. */
+function startGrowthToolsApp(): Promise<Fixture> {
+  return startTestApp({ prefix: "pupkeep-growth-tools-", now: NOW_MS, timezone: "Europe/Paris" });
 }
 
-async function startGrowthToolsApp(): Promise<Fixture> {
-  const dir = await mkdtemp(join(tmpdir(), "pupkeep-growth-tools-"));
-  const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
-  const models = createModels();
-  models.setProvider(faux.provider);
-
-  const stores = dataStores(dir);
-  await stores.config.ensure();
-  const createdAt = "2026-10-29T10:00:00.000Z";
-  await stores.config.update((current) => ({
-    ...current,
-    members: [{ id: "owner", role: "owner", displayName: "Alex", createdAt, sessions: [] }],
-  }));
-
-  const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models, now: () => NOW_MS },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
-  );
-  assert.ok(result.ok, "the app must start");
-  const auth = new Auth({ config: stores.config });
-  const ownerToken = await auth.mintOwner("http://127.0.0.1").then((m) => m.token);
-  const alexCookie = await auth.login(ownerToken).then((l) => l.token);
-
-  // A zone where 23:30Z is already tomorrow, so the local date is not a guess.
-  const zone = await fetch(`${result.app.url}/api/household`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
-      "Idempotency-Key": "zone-1",
-      Cookie: `${SESSION_COOKIE}=${alexCookie}`,
-      Origin: result.app.url,
-    },
-    body: JSON.stringify({ rev: 0, timezone: "Europe/Paris" }),
-  });
-  assert.equal(zone.status, 200, "the household zone is set for this fixture");
-  return { dir, app: result.app, url: result.app.url, alexCookie };
-}
-
-async function stop(fixture: Fixture): Promise<void> {
-  await fixture.app.close();
-  await rm(fixture.dir, { recursive: true, force: true });
-}
-
-/** Committed reads, one commit, a fixed task id, an in-memory memo and a pinned clock. */
-function toolApi(
-  fixture: Fixture,
-  conversationId: number,
-  taskId: string | number = "task-1",
-  memos = new Map<string, unknown>(),
-  nowMs = NOW_MS,
-): ToolExecutionApi {
-  const api = {
-    taskId,
-    conversationId: conversationId as ConversationId,
-    now: () => nowMs,
-    snapshot: (token: never, ctx: never) => fixture.app.app.snapshot(token, ctx),
-    commit: (change: never, ctx: never) => fixture.app.app.commit(change, ctx),
-    memo: async (name: string, candidateOrContext: unknown, maybeContext?: unknown) => {
-      if (maybeContext === undefined) return memos.get(name);
-      if (!memos.has(name)) memos.set(name, candidateOrContext);
-      return memos.get(name);
-    },
-  };
-  return api as unknown as ToolExecutionApi;
-}
-
-async function sharedConversationId(fixture: Fixture): Promise<number> {
-  const household = await fixture.app.app.snapshot(HouseholdDoc, context);
-  return household!.conversationId;
-}
-
+/** The surface's tools plus the one context tool. */
 function tools() {
   const growth = createGrowthTools().tools ?? [];
   const profile = createProfileTools().tools ?? [];
   return new Map([...growth, ...profile].map((tool) => [tool.name, tool]));
-}
-
-function resultText(result: { output?: unknown }): string {
-  return (result.output as { text: string }[])[0]!.text;
 }
 
 test("get_growth reports an empty series, the copy and the disclaimer", async () => {
@@ -134,7 +56,7 @@ test("get_growth reports an empty series, the copy and the disclaimer", async ()
     assert.match(text, /No weight logged yet\./);
     assert.match(text, /not veterinary advice/);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -190,7 +112,7 @@ test("log_measurement commits one weight as the speaker, reports it, and replays
     assert.match(resultText(replay), /\(already logged; nothing new was written\)/);
     assert.equal((await readGrowth(fixture.app.app, context)).measurements.length, 1, "no second measurement");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -212,7 +134,7 @@ test("an invalid weight is refused with the rule and writes nothing", async () =
       [],
     );
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -235,6 +157,6 @@ test("get_context reports the latest weight and no longer lists growth as untrac
     assert.match(resultText(reported), /Latest weight: 4\.2 kg on 2026-10-30$/m);
     assert.doesNotMatch(resultText(reported), /Not tracked by this build yet: .*growth/);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });

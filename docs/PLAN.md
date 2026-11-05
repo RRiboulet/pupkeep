@@ -3689,11 +3689,75 @@ process kill; both clients see the same state; the partner notification
       /api/showers` still transfers the whole history on every care signal (the
       five-row cap is display-only), and the unbounded growth — including
       P3-06's per-commit re-parse — is P5-07's measurement.
-- [ ] **P3-08** Tests: trend fixtures, milestone attribution, shower interval.
-      **Carried out of P3-05:** the app/tool fixtures (`startApp` + `toolApi`)
-      are now copied verbatim in the feed, walk, growth and training test files;
-      P3-08 should extract them into a `test/support/` helper rather than add a
-      fifth copy.
+- [x] **P3-08** Tests: trend fixtures, milestone attribution, shower interval.
+      **Landed:** `test/support/app.ts` — one harness for the care-surface
+      suites (`startTestApp` with a pinned clock, an optional partner session,
+      an optional household zone and a scripted faux provider; `toolApi`,
+      `conversationIdOf`, `resultText`). The ten suites that had copied it
+      (`feed-tools`, `walk-tools`, `growth-tools`, `training-tools`,
+      `shower-tools`, `growth-routes`, `training-routes`, `shower-routes`,
+      `walk-routes`, `feeding-routes`) now wrap it; `profile`, `setup` and
+      `multiplayer` keep their own boot because their extra wiring (a real
+      conversation script, the wizard, restart/removal sequences) is not the
+      shared shape. `test/dual-path.test.ts` — one test per care surface (feed,
+      walk, growth, milestones, showers) that boots two identical apps on one
+      clock, applies the same intent over HTTP and through the tool, and
+      compares the committed care document **as serialized JSON after removing
+      only the §7.3/§9.2 provenance** (record id, action id, source, actor),
+      which the test asserts separately so neither channel can drift into the
+      other. Feed covers both a scheduled meal and the `slotId: null` extra;
+      milestones cover both a status change and a household custom entry;
+      walk, growth and showers cover their single write. A real-thread milestone
+      run as the **partner** proves the speaker attribution (`byUserId`/
+      `byLabel`, `source`, `tool:` key, the activity line) — the first test in
+      the repo where a second caregiver's turn writes.
+      `test/showers.test.ts` gains the month-end and leap-day interval case
+      (31 January + 21 → 21 February; 28 February 2028 + 1 → 29 February).
+      The named P3-02 trend cases were already pinned by `growth-trend.test.ts`
+      (every branch on both sides of its threshold, and stale never rendered as
+      steady), and the milestone who/when, undo-as-its-own-activity and
+      household-fallback cases by `training.test.ts`; P3-08 adds the gate-level
+      run rather than a second copy.
+      Decisions: (1) **provenance is named, not normalised away**: the dual-path
+      comparison removes a per-surface list of fields the plan says may differ
+      by channel, then compares the serialized payload; keeping `catalog:` ids
+      (domain data) and every stored instant in the comparison is what makes the
+      test meaningful. (2) **the fixture clock is pinned everywhere**: the feed
+      suite previously left the app on the wall clock while the tool used a fixed
+      instant, which forced two `Date.now()` workarounds in tests — the pinned
+      clock is what the HTTP route prunes command records against, so the
+      workarounds are gone and every expected value derives from `T0`. (3)
+      **the fixture sets the household zone itself** (UTC unless the caller names
+      one) through the real PATCH route: before this, a suite that did not name a
+      zone inherited the host's, so `08:00` assertions only held on a UTC host.
+      The one test that later wants Paris reads the revision the fixture left.
+      (4) **`npm test` names the suite files with a nested glob** (`node --test
+      "test/**/*.test.ts" "test/**/*.test.js"`): Node's directory-wide default
+      runs `test/support/app.ts` as one empty passing test, and a non-nested
+      pattern would silently skip a future `test/phase4/…` file. `test/ci.test.ts`
+      pins the patterns. (5) **the harness owns its seams**: `toolApi` and
+      `conversationIdOf` take the fixture and default to its clock, so the
+      per-suite delegating wrappers and `stop` aliases are gone; a partner is
+      created only where a test uses it.
+      **Verified:** `npm run typecheck`; the suite is 595/595, including 6 new
+      dual-path tests (5 surfaces + attribution) and the month-end interval.
+      **Reviewed and repaired (adversarial + complexity):** the harness now sets
+      the zone (the host-dependence the review found), a failing post-boot step
+      closes the app and removes its directory instead of leaking both, the
+      fixture's member instant precedes every pinned clock, `until` lives in the
+      harness (one budget), every dual-path surface asserts the actor provenance
+      it removes (not only feed and walk), the attribution test drives the
+      partner rather than the owner, the two unpaired write branches (extra
+      feeding, custom milestone) are compared, and the nested glob keeps future
+      subdirectory suites discovered. `test/ci.test.ts` now pins the exact
+      command and asserts every `*.test.*` file under `test/` is named so the
+      patterns discover it: a pattern that matches nothing is a green zero-test
+      run, which is the one way this change could have hidden a suite.
+      **Not verified:** no browser or phone (the dual-path comparison is at the
+      document level, not the rendered card); the "scripted interleaving" is the
+      one real-thread run — multi-tab races stay P2-08's and P5-01's; the support
+      harness deliberately does not model restarts, removal or the wizard, which
+      keep their own suites.
 
 **Gate G3:** UI and agent produce identical domain results; all logs attributed.
 
