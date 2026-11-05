@@ -12,63 +12,26 @@
 //     result and read the same board.
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
-import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { SESSION_COOKIE, Auth } from "../src/server/auth.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
-import { dataStores } from "../src/server/config.ts";
+import { SESSION_COOKIE } from "../src/server/auth.ts";
 import { readTraining, readTrainingView } from "../src/server/domain/training.ts";
 import { HouseholdDoc } from "../src/server/domain/docs.ts";
 import { createTrainingTools } from "../src/server/agent/training-tools.ts";
-import { createLogger } from "../src/server/log.ts";
 import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
 import { MILESTONE_NOOP_RULE, MILESTONE_TITLE_RULE, type MilestoneView } from "../src/shared/training.ts";
-import type { ConversationId, ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Household } from "../src/shared/domain.ts";
+import { resultText, startTestApp, toolApi, type TestApp } from "./support/app.ts";
 
 const context = BACKGROUND_CONTEXT;
 
 const T0 = new Date("2026-10-30T08:00:00.000Z");
 
-interface Fixture {
-  dir: string;
-  app: AppHandle;
-  url: string;
-  alexCookie: string;
-}
+type Fixture = TestApp & { alexCookie: string };
 
 async function startTrainingApp(): Promise<Fixture> {
-  const dir = await mkdtemp(join(tmpdir(), "pupkeep-training-routes-"));
-  const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
-  const models = createModels();
-  models.setProvider(faux.provider);
-
-  const stores = dataStores(dir);
-  await stores.config.ensure();
-  const createdAt = "2026-10-29T10:00:00.000Z";
-  await stores.config.update((current) => ({
-    ...current,
-    members: [{ id: "owner", role: "owner", displayName: "Alex", createdAt, sessions: [] }],
-  }));
-
-  const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models, now: () => T0.getTime() },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
-  );
-  assert.ok(result.ok, "the app must start");
-  const auth = new Auth({ config: stores.config });
-  const ownerToken = await auth.mintOwner("http://127.0.0.1").then((m) => m.token);
-  const alexCookie = await auth.login(ownerToken).then((l) => l.token);
-  return { dir, app: result.app, url: result.app.url, alexCookie };
-}
-
-async function stop(fixture: Fixture): Promise<void> {
-  await fixture.app.close();
-  await rm(fixture.dir, { recursive: true, force: true });
+  const base = await startTestApp({ prefix: "pupkeep-training-routes-", now: T0.getTime() });
+  return { ...base, alexCookie: base.cookies.owner };
 }
 
 interface MutateOptions {
@@ -104,28 +67,8 @@ function row(rows: readonly MilestoneView[], id: string): MilestoneView {
 }
 
 /** Committed reads and one commit for a tool, with a fixed task id and a memo. */
-function toolApi(fixture: Fixture, conversationId: number, taskId = "task-1", memos = new Map<string, unknown>()): ToolExecutionApi {
-  const api = {
-    taskId,
-    conversationId: conversationId as ConversationId,
-    now: () => T0.getTime(),
-    snapshot: (token: never, ctx: never) => fixture.app.app.snapshot(token, ctx),
-    commit: (change: never, ctx: never) => fixture.app.app.commit(change, ctx),
-    memo: async (name: string, candidateOrContext: unknown, maybeContext?: unknown) => {
-      if (maybeContext === undefined) return memos.get(name);
-      if (!memos.has(name)) memos.set(name, candidateOrContext);
-      return memos.get(name);
-    },
-  };
-  return api as unknown as ToolExecutionApi;
-}
-
 function trainingTools() {
   return new Map((createTrainingTools().tools ?? []).map((tool) => [tool.name, tool]));
-}
-
-function resultText(result: { output?: unknown }): string {
-  return (result.output as { text: string }[])[0]!.text;
 }
 
 // --- the board --------------------------------------------------------------
@@ -144,7 +87,7 @@ test("GET /api/training answers the board, and needs a session", async () => {
     });
     assert.equal(response.headers.get("cache-control"), "no-store");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -182,7 +125,7 @@ test("a status change is one commit, replayed by the same key, and the answer is
     assert.equal(conflict.status, 409);
     assert.equal(((await conflict.json()) as { error: string }).error, "idempotency_conflict");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -213,7 +156,7 @@ test("a note is set with text and cleared with an explicit null, not an absent k
     assert.equal(cleared.status, 200);
     assert.equal(row(((await cleared.json()) as { milestones: MilestoneView[] }).milestones, "catalog:sit").note, undefined);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -238,7 +181,7 @@ test("an unknown milestone is a 409 carrying the board; a no-op change is refuse
     assert.equal(((await noop.json()) as { error: string }).error, MILESTONE_NOOP_RULE);
     assert.deepEqual((await readTraining(fixture.app.app, context)).states, []);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -265,7 +208,7 @@ test("a custom milestone is added once, and a duplicate title is refused", async
     assert.equal(((await duplicate.json()) as { error: string }).error, MILESTONE_TITLE_RULE);
     assert.equal((await readTraining(fixture.app.app, context)).custom.length, 1);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -293,7 +236,7 @@ test("the milestone routes need a session, an origin, the request header, JSON a
     assert.equal(badStatus.status, 409);
     assert.deepEqual((await readTraining(fixture.app.app, context)).states, []);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -336,7 +279,7 @@ test("the UI route and the agent tool change the same document and read the same
     // The tool's text reports the same board the route serves.
     assert.match(resultText(viaTool), /Milestones: \d+ of \d+ mastered, 1 practicing/);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -373,7 +316,7 @@ test("the same input through the route and the tool differs only in provenance",
     // The route's answer and the tool's text read the same board, one status each.
     assert.match(resultText(viaTool), /id "catalog:stay", "Stay", mastered /);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -391,6 +334,6 @@ test("an unknown milestone through the tool is a refusal, not a crash", async ()
     assert.equal(result.isError, true);
     assert.match(resultText(result), /^Not changed: that milestone is not on the board/);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });

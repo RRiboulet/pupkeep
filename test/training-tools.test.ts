@@ -13,89 +13,33 @@
 //     list.
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxProvider } from "@earendil-works/pi-ai";
-import type { ConversationId, ToolExecutionApi } from "@earendil-works/pi-durable";
-import { SESSION_COOKIE, Auth } from "../src/server/auth.ts";
-import { startApp, type AppHandle } from "../src/server/app.ts";
 import { createProfileTools } from "../src/server/agent/tools.ts";
 import { createTrainingTools } from "../src/server/agent/training-tools.ts";
-import { dataStores } from "../src/server/config.ts";
-import { HouseholdDoc } from "../src/server/domain/docs.ts";
 import { readTraining } from "../src/server/domain/training.ts";
 import { trainingBoardText } from "../src/server/agent/training-text.ts";
-import { createLogger } from "../src/server/log.ts";
+import {
+  conversationIdOf,
+  resultText,
+  startTestApp,
+  toolApi,
+  type TestApp,
+} from "./support/app.ts";
 
 const context = BACKGROUND_CONTEXT;
 const NOW_MS = Date.parse("2026-10-30T08:00:00.000Z");
 
-interface Fixture {
-  dir: string;
-  app: AppHandle;
-  url: string;
-}
+type Fixture = TestApp;
 
-async function startToolsApp(): Promise<Fixture> {
-  const dir = await mkdtemp(join(tmpdir(), "pupkeep-training-tools-"));
-  const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
-  const models = createModels();
-  models.setProvider(faux.provider);
-  const stores = dataStores(dir);
-  await stores.config.ensure();
-  await stores.config.update((current) => ({
-    ...current,
-    members: [
-      { id: "owner", role: "owner", displayName: "Alex", createdAt: "2026-10-29T10:00:00.000Z", sessions: [] },
-    ],
-  }));
-  const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models, now: () => NOW_MS },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
-  );
-  assert.ok(result.ok, "the app must start");
-  // Mint a session so the app's own auth path is exercised; the tools do not use it.
-  const auth = new Auth({ config: stores.config });
-  await auth.mintOwner("http://127.0.0.1");
-  return { dir, app: result.app, url: result.app.url };
-}
-
-async function stop(fixture: Fixture): Promise<void> {
-  await fixture.app.close();
-  await rm(fixture.dir, { recursive: true, force: true });
-}
-
-function toolApi(fixture: Fixture, conversationId: number, taskId = "task-1", memos = new Map<string, unknown>()): ToolExecutionApi {
-  const api = {
-    taskId,
-    conversationId: conversationId as ConversationId,
-    now: () => NOW_MS,
-    snapshot: (token: never, ctx: never) => fixture.app.app.snapshot(token, ctx),
-    commit: (change: never, ctx: never) => fixture.app.app.commit(change, ctx),
-    memo: async (name: string, candidateOrContext: unknown, maybeContext?: unknown) => {
-      if (maybeContext === undefined) return memos.get(name);
-      if (!memos.has(name)) memos.set(name, candidateOrContext);
-      return memos.get(name);
-    },
-  };
-  return api as unknown as ToolExecutionApi;
-}
-
-async function conversationIdOf(fixture: Fixture): Promise<number> {
-  return (await fixture.app.app.snapshot(HouseholdDoc, context))!.conversationId;
+function startToolsApp(): Promise<Fixture> {
+  return startTestApp({ prefix: "pupkeep-training-tools-", now: NOW_MS });
 }
 
 function tools() {
   return new Map(
     [...(createTrainingTools().tools ?? []), ...(createProfileTools().tools ?? [])].map((tool) => [tool.name, tool]),
   );
-}
-
-function resultText(result: { output?: unknown }): string {
-  return (result.output as { text: string }[])[0]!.text;
 }
 
 test("list_milestones reports the board by status, with every id update_milestone needs", async () => {
@@ -111,7 +55,7 @@ test("list_milestones reports the board by status, with every id update_mileston
     assert.match(text, /id "catalog:come", "Come when called"/);
     assert.doesNotMatch(text, /Mastered:|Practicing:/, "empty groups are not printed");
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -168,7 +112,7 @@ test("update_milestone commits as the speaker, replays on the same task, and cle
     assert.match(resultText(cleared), /id "catalog:sit", "Sit", mastered \d{4}-\d{2}-\d{2}/);
     assert.doesNotMatch(resultText(cleared), /id "catalog:sit", "Sit", note "waits by the door"/);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -201,7 +145,7 @@ test("add_milestone adds a custom entry, and a duplicate title is refused", asyn
     assert.match(resultText(duplicate), /^Not added: a custom milestone needs a title/);
     assert.equal((await readTraining(fixture.app.app, context)).custom.length, 1);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });
 
@@ -240,6 +184,6 @@ test("get_context summarises the milestones and no longer calls them untracked",
     assert.match(reported, /Milestones: 0 of \d+ mastered, 1 practicing \(practicing "Stay"\)/);
     assert.match(reported, /Not tracked by this build yet: appointments$/m);
   } finally {
-    await stop(fixture);
+    await fixture.stop();
   }
 });

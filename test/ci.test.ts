@@ -3,7 +3,7 @@
 // on every pull request, whatever the change touches.
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 const workflowPath = new URL("../.github/workflows/ci.yml", import.meta.url);
@@ -24,10 +24,28 @@ test("application CI typechecks and runs the test suite on every pull request", 
   assert.match(workflow, /^\s+permissions:\n\s+contents: read$/m);
 });
 
-test("npm test is the Node test runner, so CI runs the same suite as local work", async () => {
+test("npm test is the Node test runner over the suite files, so CI runs the same suite as local work", async () => {
   const manifest = JSON.parse(await readFile(packagePath, "utf8")) as {
     scripts: Record<string, string>;
   };
-  assert.equal(manifest.scripts.test, "node --test");
+  // The runner is Node's own, and the patterns cover every `*.test.*` file in
+  // `test/` recursively. The support helpers (`test/support/`) are deliberately
+  // not tests: Node's directory-wide default would run them as one empty
+  // passing file. A pattern that matches nothing is a *green zero-test* run, so
+  // the discovery invariant below is what keeps a renamed or moved suite from
+  // silently dropping out.
+  assert.equal(manifest.scripts.test, 'node --test "test/**/*.test.ts" "test/**/*.test.js"');
   assert.equal(manifest.scripts.typecheck, "tsc --noEmit");
+
+  const testFiles = (
+    await readdir(new URL("../test", import.meta.url), { recursive: true, withFileTypes: true })
+  ).filter((entry) => entry.isFile() && entry.name.includes(".test."));
+  assert.ok(testFiles.length > 20, "the suite is discovered at all");
+  for (const file of testFiles) {
+    assert.match(
+      file.name,
+      /\.test\.(ts|js)$/,
+      `${file.name} must be named *.test.ts or *.test.js so the npm test patterns discover it`,
+    );
+  }
 });
