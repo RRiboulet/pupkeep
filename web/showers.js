@@ -8,12 +8,14 @@
 // "recent few" cap (the history is unbounded), the request body, and the
 // household-local copy for a due date. Dates arrive as `YYYY-MM-DD` strings that
 // were already computed in the household zone by the server, so nothing here
-// re-derives one from an instant or from the device's zone (§8.4).
+// re-derives one from an instant or from the device's zone (§8.4); the text for
+// one is `clock.js`'s `dateText`, the shell's one formatter for a stored local
+// date.
 //
 // It imports no Preact and touches no DOM, like `meals.js`, `walks.js`,
 // `growth-chart.js` and `training.js`.
 
-import { localTimeText } from "./clock.js";
+import { dateText, localTimeText } from "./clock.js";
 
 /** The document's caps, mirrored here because the shell has no build step. */
 export const SHAMPOO_MAX = 80;
@@ -21,28 +23,6 @@ export const NOTES_MAX = 280;
 
 /** The card shows the recent few; the history itself is a count, not a list. */
 export const RECENT_SHOWERS = 5;
-
-/**
- * One formatter for a stored local date. `Date.UTC` plus a UTC formatter reads
- * the three numbers back unchanged: formatting `new Date("2026-11-15")` in a
- * zone behind UTC would otherwise show the 14th.
- */
-const DATE_FORMAT = new Intl.DateTimeFormat("en-GB", {
-  day: "numeric",
-  month: "short",
-  year: "numeric",
-  timeZone: "UTC",
-});
-
-/** `2026-11-15` → `15 Nov 2026`; an unparseable value is shown as it arrived. */
-export function dateText(localDate) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(localDate ?? ""));
-  if (match === null) return String(localDate ?? "");
-  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  const at = new Date(Date.UTC(year, month - 1, day));
-  if (Number.isNaN(at.getTime())) return String(localDate);
-  return DATE_FORMAT.format(at);
-}
 
 /**
  * The request body. Both fields are optional, so an empty draft is a valid
@@ -70,9 +50,7 @@ export function earlierCount(history, max = RECENT_SHOWERS) {
 
 /** "every 21 days", the server setting's own phrasing. */
 export function intervalText(days) {
-  if (!Number.isFinite(days)) return "";
-  const whole = Math.round(days);
-  return whole === 1 ? "every day" : `every ${whole} days`;
+  return days === 1 ? "every day" : `every ${days} days`;
 }
 
 /**
@@ -104,13 +82,19 @@ export function lastShowerText(status) {
 /**
  * The one line under a shower: who logged it, and the household-local time of
  * the stored instant. The date itself is the stored local date, not re-derived.
+ *
+ * Named `showerMetaText` rather than `rowMetaText` because `web/training.js`
+ * already exports a row meta line for a different shape.
  */
-export function rowMetaText(row, timezone) {
+export function showerMetaText(row, timezone) {
   const parts = [];
   if (row?.byLabel) parts.push(`by ${row.byLabel}`);
   if (typeof row?.at === "string") {
     const at = new Date(row.at);
-    if (!Number.isNaN(at.getTime())) parts.push(`at ${localTimeText(row.at, timezone)}`);
+    const time = Number.isNaN(at.getTime()) ? "" : localTimeText(row.at, timezone);
+    // `localTimeText` answers a sentence for an unusable zone; only a real
+    // clock time belongs after "at".
+    if (/^\d{2}:\d{2}$/.test(time)) parts.push(`at ${time}`);
   }
   return parts.join(" ");
 }

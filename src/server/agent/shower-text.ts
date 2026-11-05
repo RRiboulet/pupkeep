@@ -46,9 +46,10 @@ export function showerStatusText(view: ShowerView): string {
   const interval = `Interval: ${showerIntervalText(view.intervalDays)}.`;
   const { last } = view.status;
   if (last === null) return `Showers: none logged yet. ${interval}`;
+  const due = duePhrase(view.status);
   return (
-    `Showers: last ${last.localDate} by ${JSON.stringify(last.byLabel)}, ` +
-    `${duePhrase(view.status)}. ${interval}`
+    `Showers: last ${last.localDate} by ${JSON.stringify(last.byLabel)}` +
+    `${due === "" ? "" : `, ${due}`}. ${interval}`
   );
 }
 
@@ -92,5 +93,8 @@ export function showerSummaryText(view: ShowerView): string {
   const interval = showerIntervalText(view.intervalDays);
   const { last } = view.status;
   if (last === null) return `Showers: none logged yet (${interval})`;
-  return `Showers: last ${last.localDate}, ${duePhrase(view.status)}, ${interval}`;
+  const due = duePhrase(view.status);
+  return due === ""
+    ? `Showers: last ${last.localDate}, ${interval}`
+    : `Showers: last ${last.localDate}, ${due}, ${interval}`;
 }

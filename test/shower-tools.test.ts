@@ -22,7 +22,7 @@ import { startApp, type AppHandle } from "../src/server/app.ts";
 import { createProfileTools } from "../src/server/agent/tools.ts";
 import { createShowerTools } from "../src/server/agent/shower-tools.ts";
 import { dataStores } from "../src/server/config.ts";
-import { HouseholdDoc } from "../src/server/domain/docs.ts";
+import { HouseholdDoc, ShowersDoc } from "../src/server/domain/docs.ts";
 import { logShower, readShowers } from "../src/server/domain/showers.ts";
 import { createLogger } from "../src/server/log.ts";
 import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
@@ -203,6 +203,38 @@ test("log_shower refuses text the document would not store, and writes nothing",
     assert.equal(result.isError, true);
     assert.equal(resultText(result), `Not logged: ${SHOWER_RULE}. Nothing was written.`);
     assert.deepEqual((await readShowers(fixture.app.app, context)).showers, []);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("log_shower still reports the committed shower when the post-write status read fails", async () => {
+  const fixture = await startToolsApp();
+  try {
+    const log = tools().get("log_shower");
+    assert.ok(log);
+    const conversationId = await conversationIdOf(fixture);
+    const base = toolApi(fixture, conversationId, "task-partial");
+    let committed = false;
+    const flaky = {
+      ...base,
+      commit: async (change: never, ctx: never) => {
+        const result = await (base as unknown as { commit: (c: never, x: never) => Promise<unknown> }).commit(change, ctx);
+        committed = true;
+        return result;
+      },
+      // After the commit, make `app.showers` unreadable: the answer must lose
+      // its status line, never the fact that the shower was logged.
+      snapshot: async (token: never, ctx: never) =>
+        committed && token === ShowersDoc
+          ? undefined
+          : (base as unknown as { snapshot: (t: never, c: never) => Promise<unknown> }).snapshot(token, ctx),
+    } as unknown as ToolExecutionApi;
+
+    const result = await log.execute({ shampoo: "Oatmeal" }, flaky, context);
+    assert.equal(result.isError, undefined, "a committed write is not reported as a failed call");
+    assert.equal(resultText(result), 'Logged a shower on 2026-10-25 by "Household".');
+    assert.equal((await readShowers(fixture.app.app, context)).showers.length, 1, "the commit is durable");
   } finally {
     await stop(fixture);
   }

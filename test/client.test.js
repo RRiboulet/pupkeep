@@ -28,15 +28,15 @@ const { CHART_SIZE, chartGeometry, daysBetweenLocalDates, formatKg, measurementR
   await import("../web/growth-chart.js");
 const { boardGroups, customMilestone, noteUpdate, rowMetaText, statusUpdate } = await import("../web/training.js");
 const { Showers } = await import("../web/views/showers.js");
+const { dateText } = await import("../web/clock.js");
 const {
-  dateText,
   dueText,
   earlierCount,
   intervalText,
   lastShowerText,
   recentShowers,
-  rowMetaText: showerMetaText,
   showerBody,
+  showerMetaText,
 } = await import("../web/showers.js");
 
 function profileOf({
@@ -1131,6 +1131,10 @@ test("the shower card's body, due copy and recent-few cap are pure and household
   assert.equal(dateText("2026-11-15"), "15 Nov 2026");
   assert.equal(dateText("not-a-date"), "not-a-date");
   assert.equal(dateText(null), "");
+  // A day that does not exist and a year `Date.UTC` would remap are shown as
+  // they arrived, never as a different date.
+  assert.equal(dateText("2026-02-31"), "2026-02-31");
+  assert.equal(dateText("0001-01-01"), "0001-01-01");
 
   // Empty text is absent, padded text is trimmed: the same draft must replay.
   assert.deepEqual(showerBody({ shampoo: "  Oatmeal ", notes: "   " }), { shampoo: "Oatmeal" });
@@ -1159,6 +1163,8 @@ test("the shower card's body, due copy and recent-few cap are pure and household
     showerMetaText({ byLabel: "Alex", at: "2026-10-29T23:30:00.000Z" }, "Europe/Paris"),
     "by Alex at 00:30",
   );
+  // An unusable zone must not produce "at at an unknown time".
+  assert.equal(showerMetaText({ byLabel: "Alex", at: "2026-10-29T23:30:00.000Z" }, "Not/AZone"), "by Alex");
 });
 
 test("logging a shower sends a bounded body and asks for a re-read instead of adopting a collection", async () => {
@@ -1211,4 +1217,54 @@ test("a refused shower shows the domain's rule and keeps the key for a same-body
   assert.match(card.state.error, /one line each/);
   assert.equal(card.state.pending.key, pendingKey, "the key stays with the body it belongs to");
   assert.equal(card.state.message, null);
+});
+
+test("a failed re-read after a successful log is not reported as a failed log", async () => {
+  const card = new Showers({
+    request: async () => ({ status: 200, ok: true, body: { shower: { id: "s-1" }, replayed: false } }),
+    // The parent's loader rejects: the commit already succeeded, so this must
+    // not become a red "Could not log the shower" beside "Logged."
+    onLogged: async () => {
+      throw new Error("the re-read failed");
+    },
+    view: showerView(),
+    timezone: "Europe/Paris",
+    error: null,
+  });
+  card.setState = (patch) => Object.assign(card.state, patch);
+
+  await card.save({ preventDefault() {} });
+  assert.equal(card.state.message, "Logged.");
+  assert.equal(card.state.error, null, "the write succeeded; the read owns its own error");
+  assert.equal(card.state.busy, false);
+});
+
+/** Any string in the vnode tree contains `needle` (a render smoke test, no DOM). */
+function vnodeText(node, needle) {
+  if (typeof node === "string") return node.includes(needle);
+  if (Array.isArray(node)) return node.some((child) => vnodeText(child, needle));
+  if (node && typeof node === "object") {
+    if (vnodeText(node.props?.children, needle)) return true;
+    // htm keeps the text of an element in its children; attributes are not copy.
+    return false;
+  }
+  return false;
+}
+
+test("the card shows a stale-history warning, and still offers the log form", () => {
+  const card = new Showers({
+    request: async () => ({ status: 200, ok: true, body: showerView() }),
+    view: showerView(),
+    timezone: "Europe/Paris",
+    error: "Could not load the shower history. Try again in a moment.",
+  });
+  card.setState = (patch) => Object.assign(card.state, patch);
+
+  const withView = card.render();
+  assert.ok(vnodeText(withView, "Could not load the shower history"), "a failed re-read is visible, not swallowed");
+
+  // The form is its own commit, so a read failure does not take logging away.
+  const withoutView = new Showers({ request: async () => ({}), view: null, error: "nope", timezone: "Europe/Paris" });
+  withoutView.setState = (patch) => Object.assign(withoutView.state, patch);
+  assert.ok(vnodeText(withoutView.render(), "Log shower"), "the form is shown while the read is unavailable");
 });

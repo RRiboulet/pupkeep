@@ -3618,8 +3618,8 @@ process kill; both clients see the same state; the partner notification
       status line, the bounded report, the `get_context` summary);
       `get_context`'s shower line, with `NOT_TRACKED` now only `appointments`;
       `web/showers.js` (the pure half: body, the mirrored text caps, the
-      `RECENT_SHOWERS` cap, the household-local date and due copy, the row meta)
-      and `web/views/showers.js` (the card: one "log a shower" action, the status
+      `RECENT_SHOWERS` cap, the due copy, the shower meta) and
+      `web/views/showers.js` (the card: one "log a shower" action, the status
       line, a log form, the recent five and the count of what is not shown),
       mounted on Pup after the board and re-read on `careSeq` through its own
       `showersSeq`; precache v7; §10.1's `get_context` row names the shower
@@ -3627,20 +3627,26 @@ process kill; both clients see the same state; the partner notification
       Decisions: (1) **the write's answer is bounded** — `{ shower, replayed }`,
       never the history — so the card asks Pup to re-read `GET /api/showers`
       instead of adopting a collection (P3-05's carried note; P5-07 measures the
-      growth). (2) **no second date arithmetic**: the route, the tool and the card
-      all use P3-06's `daysUntilDue`, and the card's due copy is `dueText` in
-      `web/showers.js`; a stored local date is rendered with a UTC-pinned
-      `Intl` formatter, so a zone behind UTC cannot show the previous day.
-      (3) **the card never renders the whole history**: the recent five plus a
-      count, because the list is unbounded; `list_showers` bounds its report at
-      20 rows and then says how many are older. (4) **a route/tool answer is the
-      committed record**, read back through `readShowerView`, so the model and
-      the card cannot disagree about the last shower or the due date; free text
-      (shampoo, note, label) is JSON-quoted in model context and the copy reports
-      state only — no care advice. (5) **the card's form is optional text**: the
-      primary action is a shower with no details, and blank text is absent, not
-      an empty string (P3-06's parser). (6) The `get_context` line reads the
-      shower view rather than deriving a second one from the profile projection.
+      growth). A log therefore costs one extra read in the tab that logged it
+      (`onLogged` plus the care frame): that is the price of immediate feedback
+      that still works when the stream is flapping. (2) **no second date
+      arithmetic**: the route, the tool and the card all use P3-06's
+      `daysUntilDue`; a stored local date is rendered by `clock.js`'s one
+      `dateText` (UTC-pinned, so a zone behind UTC cannot show the previous day),
+      and one test (`test/shower-copy.test.js`) pins the model's and the card's
+      copy to the same classification. (3) **the card never renders the whole
+      history**: the recent five plus a count, because the list is unbounded;
+      `list_showers` bounds its report at 20 rows and then says how many are
+      older. (4) **a route/tool answer is the committed record**, read back
+      through `readShowerView`, so the model and the card cannot disagree about
+      the last shower or the due date; free text (shampoo, note, label) is
+      JSON-quoted in model context and the copy reports state only — no care
+      advice. (5) **the card's form is optional text**: the primary action is a
+      shower with no details, blank text is absent, not an empty string (P3-06's
+      parser), and the form stays available when the read failed (logging is its
+      own commit). (6) The `get_context` line reads the shower view rather than
+      deriving a second one from the profile projection: the builder needs the
+      household document's interval, which the projection does not carry.
       **Verified:** 8 new route tests (`test/shower-routes.test.ts`) — the empty
       read, one commit and a bounded answer, the household-local date at 22:30Z,
       the activity line without the shampoo, replay, key conflict, a second
@@ -3648,18 +3654,41 @@ process kill; both clients see the same state; the partner notification
       key, the shared guards, the care frame (signal, no data, live read), Gate
       G3 (the route and the tool append the same record apart from provenance)
       and the DST-boundary parity (25 October in Paris → due 15 November from
-      both paths); 6 tool tests (`test/shower-tools.test.ts`) — the empty and the
+      both paths); 7 tool tests (`test/shower-tools.test.ts`) — the empty and the
       populated report, the `tool:` key and `agent` source, the memo and the
-      household fallback, a replay, a refusal, the 20-row bound with a crafted
-      shampoo JSON-quoted, and `get_context`; 3 client tests (the pure body/due/
+      household fallback, a replay, a refusal, a committed shower still reported
+      when the post-write read fails, the 20-row bound with a crafted shampoo
+      JSON-quoted, and `get_context`; 3 copy-drift tests
+      (`test/shower-copy.test.js`) — the card's caps are the document's caps, the
+      model and the card classify every due state alike, and a status without a
+      due date leaves no dangling clause; 5 client tests (the pure body/due/
       recent-few/copy helpers, the bounded write + parent re-read, a refusal
-      keeping its key) plus the updated care-signal test; the pwa precache count.
-      The suite is 582/582 and `npm run typecheck` passes.
+      keeping its key, a rejected re-read not reported as a failed log, and the
+      render carrying the stale-history warning while the form stays) plus the
+      updated care-signal test; the pwa precache count. The suite is 588/588 and
+      `npm run typecheck` passes.
+      **Reviewed and repaired (adversarial + complexity):** a failed re-read
+      after a successful log was invisible (the card showed stale history with
+      no warning) — the load error is now its own alert; `log_shower` threw
+      after the commit if the post-write status read failed, which the model
+      could retry as a second shower under a new task key — it now answers the
+      record without the status line; `await onLogged()` sat inside the write's
+      `try`, so a future rejecting loader would have been reported as a failed
+      log with the key already cleared — the refresh is now caught separately;
+      `list_showers` read the household twice (status from one snapshot, clock
+      from another) — one read feeds both; the stored-local-date formatter moved
+      into `clock.js`, where the shell's one-formatter claim lives; the caps and
+      the due vocabulary are now pinned against the server's by a test; the
+      date formatter round-trips instead of silently normalising an impossible
+      day; and the timezone fallback can no longer print "at an unknown time"
+      twice.
       **Not verified:** no browser render of the card, so the layout, the focus
       order after a log and the `role="status"` announcement are data-level
-      assertions only; no phone has run it; the history's unbounded growth (both
-      the per-commit re-parse from P3-06 and the read this card re-fetches) is
-      left to P5-07.
+      assertions only; no phone has run it; the Today screen's "log shower"
+      quick action (§13.1) is not added, like P3-03's "log weight"; `GET
+      /api/showers` still transfers the whole history on every care signal (the
+      five-row cap is display-only), and the unbounded growth — including
+      P3-06's per-commit re-parse — is P5-07's measurement.
 - [ ] **P3-08** Tests: trend fixtures, milestone attribution, shower interval.
       **Carried out of P3-05:** the app/tool fixtures (`startApp` + `toolApi`)
       are now copied verbatim in the feed, walk, growth and training test files;

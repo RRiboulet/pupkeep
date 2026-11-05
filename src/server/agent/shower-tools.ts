@@ -32,7 +32,7 @@ import {
 import { SHAMPOO_LIMIT, SHOWER_NOTES_LIMIT } from "../../shared/showers.ts";
 import { DomainConflictError, UnavailableError } from "../domain/errors.ts";
 import { readHousehold } from "../domain/household.ts";
-import { logShower, readShowerView, type ShowerOutcome } from "../domain/showers.ts";
+import { logShower, readShowerView, readShowers, showerView, type ShowerOutcome } from "../domain/showers.ts";
 import { showerReportText, showerStatusText } from "./shower-text.ts";
 import { refused, speakerSeam, text } from "./tool-kit.ts";
 
@@ -48,19 +48,19 @@ export function createShowerTools(): Extension<ToolRegistration> {
     parameters: Type.Object({}),
     execute: async (_args, api, context: Context) => {
       const now = new Date(api.now());
-      let view;
-      let timezone;
+      let report;
       try {
-        [view, timezone] = await Promise.all([
-          readShowerView(api, context, now),
-          readHousehold(api, context).then((household) => household.timezone),
-        ]);
+        // One household read feeds both the derived status and the rendered
+        // clock, so a timezone change cannot make one answer inconsistent.
+        const household = await readHousehold(api, context);
+        const view = showerView(household, await readShowers(api, context), now);
+        report = showerReportText(view, household.timezone);
       } catch (error) {
         // Not ready is a sentence, not a failed task (the feeding tools' rule).
         if (!(error instanceof UnavailableError)) throw error;
         return refused("The shower history is not available yet; retry after boot.");
       }
-      return text(showerReportText(view, timezone));
+      return text(report);
     },
   });
 
@@ -102,12 +102,18 @@ export function createShowerTools(): Extension<ToolRegistration> {
         return refused("Not logged: this call reused an idempotency key for a different shower. Nothing was written.");
       }
 
-      const view = await readShowerView(api, context, now);
+      // The write already committed; a failed read must not report it as a
+      // failed log (a retry would be a new task key and a second shower).
+      let status = "";
+      try {
+        status = `\n${showerStatusText(await readShowerView(api, context, now))}`;
+      } catch (error) {
+        if (!(error instanceof UnavailableError)) throw error;
+      }
       const shower = outcome.shower;
       const replay = outcome.kind === "replayed" ? " (already logged; nothing new was written)" : "";
       return text(
-        `Logged a shower on ${shower.localDate} by ${JSON.stringify(shower.byLabel)}${replay}.\n` +
-          showerStatusText(view),
+        `Logged a shower on ${shower.localDate} by ${JSON.stringify(shower.byLabel)}${replay}.${status}`,
       );
     },
   });

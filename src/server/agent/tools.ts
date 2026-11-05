@@ -135,7 +135,10 @@ export function createProfileTools(): Extension<ToolRegistration> {
         if (!(error instanceof TrainingUnavailableError)) throw error;
       }
       // §10.1's shower status: the last shower and the next due date. One
-      // unreadable document must not cost the model every other section.
+      // unreadable document must not cost the model every other section. The
+      // view builder needs the household document (its timezone and the
+      // interval setting), which the profile projection does not carry; one
+      // read of the small document is cheaper than a second derivation.
       let showers = "Showers: unavailable (retry after boot)";
       try {
         showers = showerSummaryText(await readShowerView(api, context, now));

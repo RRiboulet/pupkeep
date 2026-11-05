@@ -20,18 +20,18 @@
 import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
 import { NetworkError, requestJson } from "../client.js";
+import { dateText } from "../clock.js";
 import { pendingSave } from "../profile-form.js";
 import {
   NOTES_MAX,
   SHAMPOO_MAX,
-  dateText,
   dueText,
   earlierCount,
   intervalText,
   lastShowerText,
   recentShowers,
-  rowMetaText,
   showerBody,
+  showerMetaText,
 } from "../showers.js";
 
 const html = htm.bind(h);
@@ -88,8 +88,13 @@ export class Showers extends Component {
         message: result.body?.replayed ? "Already logged." : "Logged.",
       });
       // The history is unbounded: re-read it rather than adopting a collection
-      // from the write's answer.
-      await this.props.onLogged?.();
+      // from the write's answer. A re-read failure is not a failed log — the
+      // commit already succeeded, and the parent shows the read's own error.
+      try {
+        await this.props.onLogged?.();
+      } catch {
+        // The parent owns the read's error state.
+      }
     } catch (error) {
       // A transport failure may still have committed; keeping `pending` makes
       // the retry a replay (it is cleared only on success).
@@ -112,6 +117,10 @@ export class Showers extends Component {
         <p class="placeholder" role="status" aria-live="polite">
           ${view === null ? (loadError ?? "Loading the shower history…") : (this.state.message ?? "")}
         </p>
+        <!-- A failed re-read after a success must say the list may be stale. -->
+        ${view !== null && loadError
+          ? html`<p class="notice notice--error" role="alert">${loadError}</p>`
+          : null}
 
         ${view === null
           ? null
@@ -175,7 +184,7 @@ export class Showers extends Component {
                           <li class="shower" key=${row.id}>
                             <div class="shower__head">
                               <span class="shower__date">${dateText(row.localDate)}</span>
-                              <span class="shower__meta">${rowMetaText(row, timezone)}</span>
+                              <span class="shower__meta">${showerMetaText(row, timezone)}</span>
                             </div>
                             ${row.shampoo ? html`<p class="shower__detail">Shampoo: ${row.shampoo}</p>` : null}
                             ${row.notes ? html`<p class="shower__note">${row.notes}</p>` : null}
