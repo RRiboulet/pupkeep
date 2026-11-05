@@ -919,7 +919,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.puppy` | Name, birthday, breed, sex, target weight, revision | One puppy; birthday is a local date; age computed; the shower interval is `app.household.settings.showerIntervalDays` (one source) |
 | `app.feeding` | Meal slots (P1-14), feed events (P2-01) | One normal feed per slot per local date; extra feeds have no slot; at least one active slot once a schedule exists |
 | `app.walks` | One open walk + history | One open walk at a time; duration from server timestamps |
-| `app.growth` | Measurements (weight, height, note, who, when) | Ascending history; optional target weight |
+| `app.growth` | Measurements (weight, height, note, who, when) | Several per day, the day's latest is its reading; kg to the gram, cm to a tenth; the chart series is derived in local-date order, never stored; the target weight is `app.puppy`'s field (P1-11), never copied |
 | `app.training` | Milestones + status | Starter catalog + custom; `not_started`/`practicing`/`mastered` |
 | `app.calendar` | Appointments | UTC instant + household timezone; reminder offsets; status |
 | `app.showers` | Shower history | Date, shampoo, notes; next due from interval |
@@ -932,7 +932,8 @@ defines `checkpointWhen` (do not use `() => false` forever).
 P1-08 defines the first four documents; P1-14 adds `app.feeding` with the meal
 slots (P2-01 adds the feed events and moves that document to version 2); P2-02
 adds `app.notifications` with the committed intents a care action creates (P4-05
-adds the outbox and delivery fields as version 2). Each
+adds the outbox and delivery fields as version 2); P3-01 adds `app.growth` with
+the measurement history. Each
 value carries `schemaVersion: 1` and its Pi Durable document version is 1; a
 future change increments both and adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
@@ -1075,6 +1076,9 @@ or "Household" and the confirming human.
   `slotId` per `localDate`; extra feeds have `slotId = NULL`. Both are document
   invariants (P2-01); the parser refuses a stored double feed rather than
   repairing it.
+- Growth history: keep all; the same archive path and measured threshold as
+  walks, with the cap decision in P5-07. A weight series is the chart's only
+  source, so nothing is pruned before that measurement exists.
 - Walk history: keep all; same archive path. After 8 hours a walk is **stale**:
   the banner offers end/discard; `start_walk` returns a stale conflict until it
   is resolved. No auto-close; the record keeps the real timestamps and the UI
@@ -3149,9 +3153,71 @@ process kill; both clients see the same state; the partner notification
 
 ### Phase 3 — Growth, milestones, showers
 
-- [ ] **P3-01** `app.growth` doc/service: measurements, target weight, trend.
+- [x] **P3-01** `app.growth` doc/service: measurements, target weight, trend.
+      **Landed:** `src/shared/growth.ts` (the measurement shape, the write-field
+      parser, `growthSeries`, `latestMeasurement`, `formatWeightKg`, the
+      precision rules and `MEASUREMENT_RULE`), `GrowthMeasurement`/`Growth` and
+      `GROWTH_SCHEMA_VERSION` in `src/shared/domain.ts`, `GrowthDoc`/`parseGrowth`
+      in `src/server/domain/docs.ts`, `src/server/domain/growth.ts`
+      (`readGrowth`, `logMeasurement`), and bootstrap creating/repairing
+      `app.growth` (with the missing-household and malformed-document refusals).
+      Decisions: (1) **several measurements per day, the day's latest is the
+      day's reading.** Weighing twice is legitimate (the vet at 10:00, home at
+      20:00) and a second log must not be the kind of 409 a feed gets: a feed
+      *claims* a meal, a weight only observes. `growthSeries` collapses a day to
+      its latest `at` for the chart and P3-02's windows, and the full list keeps
+      every record, so nothing a caregiver logged disappears. `(localDate)`
+      is therefore not a document uniqueness rule; the id is. (2) **one unit per
+      number, grams as grams.** `weightKg` holds kilograms rounded to whole
+      grams (≤3 dp) and `heightCm` centimetres rounded to a tenth; a caregiver
+      entering grams sees the conversion in P3-03's UI, and the domain never
+      guesses a unit from a string or converts silently. The *stored* precision
+      is a parser invariant (4.2374 is refused in a document, rounded on write),
+      so `app.growth` only holds a weight somebody could have typed; an exact
+      half-gram tie rounds by IEEE-754, a sub-milligram distinction no scale
+      reports and the stored-shape rule still refuses a non-gram value. The bounds
+      are §8's typo bounds: above 0 and at most 200 for both. (3) **the trend is
+      derived, never stored**: `growthSeries` sorts by the stored `localDate`,
+      never by re-deriving a date from `at`, so a backward clock or a zone move
+      cannot reorder history (P2-01's rule), and there is no interpolation,
+      filling or smoothing — a series is a statement about what was logged.
+      (4) **the target weight is not in this document**: it is a human-edited
+      field of `app.puppy` with its own revision (P1-11), and copying it here
+      would create a second source of truth. P3-02/P3-03 read it from the
+      profile. (5) **no `rev`**: every write is the same append, so there is
+      nothing to compare-and-swap; the idempotency key (`app.commands`, §7.3)
+      covers the double-tap. (6) **one commit per measurement**: the record, one
+      activity line and the key, or nothing; the appended list is re-parsed
+      inside the commit as a backstop, as `logFeed` does, and a refused input
+      does not burn the key. (7) The §9.2 actor is resolved inside the commit
+      and stored on the record (`byUserId`/`byLabel`), so a replay keeps the
+      original attribution. (8) `heightCm` is stored and parsed but no view uses
+      it yet: §8.1 names it as a measurement field, and P3-02's trend is weight
+      only.
+      **Verified:** 12 new tests in `test/growth.test.ts` — the shape (gram and
+      tenth precision, bounds, the §9.2 fence, the note bounds, unknown keys, a
+      zone-less instant), the write parser (rounding, an empty note as absent,
+      refusals) and `formatWeightKg`, several measurements a day with the
+      latest-wins series, a backward-clock append keeping local-date order, a
+      duplicate id refused, one commit (record + activity + key), replay vs key
+      conflict, the household-local date at 23:30Z, an invalid measurement
+      writing nothing and not burning its key, the household fallback actor, a
+      missing document being unavailable rather than empty, the target weight
+      staying on `app.puppy`, boot repairing a pre-P3-01 database and refusing a
+      malformed one, a household-less database carrying growth refused rather
+      than reset, and a measurement surviving a reopen. The suite is 482/482 and
+      `npm run typecheck` passes. Bootstrap's document lists and the setup
+      migration test were updated.
+      **Not verified:** no route, agent tool or UI (P3-03), so nothing has
+      logged a measurement from a browser or the model yet; the trend windows,
+      advice copy and target progress are P3-02; nothing prunes growth history
+      (P5-07 measures it, as for feeds and walks); and no phone has run it.
 - [ ] **P3-02** Trend/advice rules: 7/14/30-day, weight loss, rapid gain, stale,
-      target; disclaimers; tests.
+      target; disclaimers; tests. **Carried out of P3-01:** the windows read
+      `growthSeries` (one point per household-local day, the day's latest
+      measurement); "no measurement in N days" is a *date* question on that
+      series, not `latestMeasurement()`'s instant question — after a timezone
+      change the two can disagree, and the stale rule must not.
 - [ ] **P3-03** Growth HTTP + agent tools + UI chart.
 - [ ] **P3-04** `app.training` doc/service: starter milestone catalog, custom,
       status/note/who/when.

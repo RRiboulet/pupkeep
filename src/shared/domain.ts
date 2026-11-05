@@ -30,6 +30,8 @@ export const COMMANDS_SCHEMA_VERSION = 1 as const;
  */
 export const FEEDING_SCHEMA_VERSION = 2 as const;
 export const NOTIFICATIONS_SCHEMA_VERSION = 1 as const;
+/** Growth measurements (P3-01): one append-only list, no revision. */
+export const GROWTH_SCHEMA_VERSION = 1 as const;
 /**
  * Version 2 adds `discarded` (P2-07): a stale walk can be resolved by ending it
  * or by discarding it, and the history must keep the difference. A version-1
@@ -225,6 +227,54 @@ export type Walks = {
   schemaVersion: typeof WALKS_SCHEMA_VERSION;
   /** Append order; a reader sorts by `startedAt` where it needs chronology. */
   walks: Walk[];
+  createdAt: string;
+};
+
+/**
+ * One growth measurement (PLAN §8.1, §8.3, §8.4). A caregiver logs a weight
+ * (and, optionally, a height and a note); the day's **latest** measurement is
+ * the day's reading, while every record is kept.
+ *
+ * `weightKg` is kilograms with gram precision and `heightCm` centimetres with
+ * a tenth: one unit each, stored as numbers. A caregiver who weighs in grams
+ * sees the conversion in the UI (P3-03); the domain never guesses a unit from a
+ * string, and never silently changes one.
+ */
+export type GrowthMeasurement = {
+  id: string;
+  /**
+   * `YYYY-MM-DD` in the household zone, derived from `at` at write time
+   * (§8.4). Stored because a household that moves zones must not have its
+   * history re-dated, exactly as a feed event's is.
+   */
+  localDate: string;
+  /** UTC instant, ISO with a trailing `Z`; the server's clock. */
+  at: string;
+  /** Kilograms, rounded to whole grams; above 0 and at most 200. */
+  weightKg: number;
+  /** Centimetres, rounded to a tenth; optional, above 0 and at most 200. */
+  heightCm?: number;
+  /** Free text, one line, JSON-quoted wherever it is displayed. */
+  note?: string;
+  /** Config member id, or `null` for the household fallback (§9.2). */
+  byUserId: string | null;
+  /** Display label, resolved through `app.household` at write time. */
+  byLabel: string;
+  source: "ui" | "agent";
+  /** HTTP idempotency key or the agent tool's task id (§7.3). */
+  actionId: string;
+};
+
+/**
+ * `app.growth`: the measurement history (P3-01). Append-only; never pruned in
+ * v1 (§8.5), and derived views (`growthSeries`) are computed from it, never
+ * stored. The **target** weight is not here: it is a human-edited field of
+ * `app.puppy` (P1-11) and copying it would create a second source of truth.
+ */
+export type Growth = {
+  schemaVersion: typeof GROWTH_SCHEMA_VERSION;
+  /** Append order; a reader sorts by `at`/`localDate` where it needs chronology. */
+  measurements: GrowthMeasurement[];
   createdAt: string;
 };
 

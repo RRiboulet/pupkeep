@@ -1,7 +1,7 @@
 // The session documents PLAN §8.1 assigns to P1-08 (household, puppy, activity,
-// commands), plus the care documents Phase 1/2 added (`app.feeding` with the
-// meal slots and feed events, `app.notifications`, `app.walks`), and their
-// parsers.
+// commands), plus the care documents later phases added (`app.feeding` with the
+// meal slots and feed events, `app.notifications`, `app.walks`, `app.growth`),
+// and their parsers.
 //
 // The doc `version` and the value's `schemaVersion` start at 1. A shape change
 // increments both and adds `migrate(value, fromVersion)`; the parsers below then
@@ -39,6 +39,7 @@ import {
   DEFAULT_HOUSEHOLD_NAME,
   DEFAULT_HOUSEHOLD_SETTINGS,
   FEEDING_SCHEMA_VERSION,
+  GROWTH_SCHEMA_VERSION,
   HOUSEHOLD_SCHEMA_VERSION,
   NOTIFICATIONS_SCHEMA_VERSION,
   OPAQUE_ID_PATTERN,
@@ -50,6 +51,7 @@ import {
   type Commands,
   type FeedReminderRef,
   type Feeding,
+  type Growth,
   type Household,
   type HouseholdSettings,
   isIsoInstant,
@@ -60,6 +62,7 @@ import {
   type Walks,
 } from "../../shared/domain.ts";
 import { SLOT_ID_LIMIT, parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
+import { parseGrowthMeasurements } from "../../shared/growth.ts";
 import { parseNotificationIntents } from "../../shared/notifications.ts";
 import { parseWalkList } from "../../shared/walks.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
@@ -122,6 +125,11 @@ export function emptyCommands(): Commands {
 /** A fresh schedule: no slots until first-run setup writes them, no meals yet. */
 export function emptyFeeding(): Feeding {
   return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: 0, slots: [], events: [], createdAt: "" };
+}
+
+/** No measurements yet; the target weight lives on `app.puppy` (P1-11). */
+export function emptyGrowth(): Growth {
+  return { schemaVersion: GROWTH_SCHEMA_VERSION, measurements: [], createdAt: "" };
 }
 
 /** No committed notification intents yet. */
@@ -222,6 +230,15 @@ export const FeedingDoc = defineDoc<Feeding>({
     if (!parsed) throw new Error("app.feeding version 1 does not migrate to a valid version 2");
     return parsed;
   },
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/** The measurement history (P3-01). */
+export const GrowthDoc = defineDoc<Growth>({
+  kind: "app.growth",
+  version: 1,
+  scope: "session",
+  initial: emptyGrowth,
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -518,6 +535,20 @@ export function parseFeeding(value: unknown): Feeding | undefined {
   const events = parseFeedEvents(record.events);
   if (!events) return undefined;
   return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: record.rev, slots, events, createdAt: record.createdAt };
+}
+
+/**
+ * `app.growth`: the measurement history. The list invariants (unique ids, gram
+ * precision, the §9.2 pairing) live in `shared/growth.ts`, so the service
+ * validates a draft with the same rules the document uses.
+ */
+export function parseGrowth(value: unknown): Growth | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== GROWTH_SCHEMA_VERSION) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  const measurements = parseGrowthMeasurements(record.measurements);
+  if (!measurements) return undefined;
+  return { schemaVersion: GROWTH_SCHEMA_VERSION, measurements, createdAt: record.createdAt };
 }
 
 /**
