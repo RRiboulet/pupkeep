@@ -1,7 +1,7 @@
 // The session documents PLAN §8.1 assigns to P1-08 (household, puppy, activity,
 // commands), plus the care documents later phases added (`app.feeding` with the
-// meal slots and feed events, `app.notifications`, `app.walks`, `app.growth`),
-// and their parsers.
+// meal slots and feed events, `app.notifications`, `app.walks`, `app.growth`,
+// `app.training`), and their parsers.
 //
 // The doc `version` and the value's `schemaVersion` start at 1. A shape change
 // increments both and adds `migrate(value, fromVersion)`; the parsers below then
@@ -41,6 +41,7 @@ import {
   FEEDING_SCHEMA_VERSION,
   GROWTH_SCHEMA_VERSION,
   HOUSEHOLD_SCHEMA_VERSION,
+  TRAINING_SCHEMA_VERSION,
   NOTIFICATIONS_SCHEMA_VERSION,
   OPAQUE_ID_PATTERN,
   PUPPY_SCHEMA_VERSION,
@@ -52,6 +53,7 @@ import {
   type FeedReminderRef,
   type Feeding,
   type Growth,
+  type Training,
   type Household,
   type HouseholdSettings,
   isIsoInstant,
@@ -63,6 +65,7 @@ import {
 } from "../../shared/domain.ts";
 import { SLOT_ID_LIMIT, parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
 import { parseGrowthMeasurements } from "../../shared/growth.ts";
+import { parseTrainingList } from "../../shared/training.ts";
 import { parseNotificationIntents } from "../../shared/notifications.ts";
 import { parseWalkList } from "../../shared/walks.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
@@ -130,6 +133,11 @@ export function emptyFeeding(): Feeding {
 /** No measurements yet; the target weight lives on `app.puppy` (P1-11). */
 export function emptyGrowth(): Growth {
   return { schemaVersion: GROWTH_SCHEMA_VERSION, measurements: [], createdAt: "" };
+}
+
+/** The milestone board: the catalog is the build's, this document the household's. */
+export function emptyTraining(): Training {
+  return { schemaVersion: TRAINING_SCHEMA_VERSION, states: [], custom: [], createdAt: "" };
 }
 
 /** No committed notification intents yet. */
@@ -239,6 +247,15 @@ export const GrowthDoc = defineDoc<Growth>({
   version: 1,
   scope: "session",
   initial: emptyGrowth,
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/** The milestone board (P3-04). */
+export const TrainingDoc = defineDoc<Training>({
+  kind: "app.training",
+  version: 1,
+  scope: "session",
+  initial: emptyTraining,
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -549,6 +566,21 @@ export function parseGrowth(value: unknown): Growth | undefined {
   const measurements = parseGrowthMeasurements(record.measurements);
   if (!measurements) return undefined;
   return { schemaVersion: GROWTH_SCHEMA_VERSION, measurements, createdAt: record.createdAt };
+}
+
+/**
+ * `app.training`: the household's milestone states and custom entries. The list
+ * invariants (stable-id prefixes, unique ids/titles, `masteredAt` iff mastered,
+ * the §9.2 pairing) live in `shared/training.ts`, so the service validates a
+ * draft with the same rules the document uses.
+ */
+export function parseTraining(value: unknown): Training | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== TRAINING_SCHEMA_VERSION) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  const parsed = parseTrainingList({ states: record.states, custom: record.custom });
+  if (!parsed) return undefined;
+  return { schemaVersion: TRAINING_SCHEMA_VERSION, states: parsed.states, custom: parsed.custom, createdAt: record.createdAt };
 }
 
 /**

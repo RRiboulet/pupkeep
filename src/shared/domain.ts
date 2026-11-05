@@ -32,6 +32,8 @@ export const FEEDING_SCHEMA_VERSION = 2 as const;
 export const NOTIFICATIONS_SCHEMA_VERSION = 1 as const;
 /** Growth measurements (P3-01): one append-only list, no revision. */
 export const GROWTH_SCHEMA_VERSION = 1 as const;
+/** Milestones (P3-04): the build's catalog plus the household's own. */
+export const TRAINING_SCHEMA_VERSION = 1 as const;
 /**
  * Version 2 adds `discarded` (P2-07): a stale walk can be resolved by ending it
  * or by discarding it, and the history must keep the difference. A version-1
@@ -275,6 +277,74 @@ export type Growth = {
   schemaVersion: typeof GROWTH_SCHEMA_VERSION;
   /** Append order; a reader sorts by `at`/`localDate` where it needs chronology. */
   measurements: GrowthMeasurement[];
+  createdAt: string;
+};
+
+/** §8.1's three states; `mastered` is "done" and carries its own instant. */
+export const MILESTONE_STATUSES = ["not_started", "practicing", "mastered"] as const;
+export type MilestoneStatus = (typeof MILESTONE_STATUSES)[number];
+
+/**
+ * One milestone in the build's starter checklist (P3-04). The id is **stable**:
+ * the household's progress is keyed by it, so renaming a title or reordering the
+ * list never orphans progress, and removing an entry leaves its state in the
+ * document in case a later build brings the id back. The checklist is a
+ * checklist — no curriculum, no schedule, no advice.
+ */
+export type MilestoneCatalogEntry = { id: string; title: string };
+
+/**
+ * The household's state for one milestone id (P3-04). Only milestones that were
+ * actually touched have a record; an untouched one reads as `not_started`.
+ *
+ * `masteredAt` exists **iff** the status is `mastered` (a parser invariant): a
+ * milestone cannot stay "done at" while it is practising, and undoing is a real
+ * commit — the activity feed keeps who un-did it and when, so nothing is
+ * silently deleted.
+ */
+export type MilestoneState = {
+  /** A catalog id or a custom id; see `shared/training.ts` for the prefixes. */
+  id: string;
+  status: MilestoneStatus;
+  /** One line of caregiver text; JSON-quoted wherever it is shown. */
+  note?: string;
+  /** UTC instant of the last change. */
+  updatedAt: string;
+  byUserId: string | null;
+  byLabel: string;
+  /** The commit that produced this state (§7.3). */
+  actionId: string;
+  /** `ui` from the route, `agent` from a tool (§9.2 rule 3). */
+  source: "ui" | "agent";
+  /** Present exactly when `status` is `mastered`. */
+  masteredAt?: string;
+};
+
+/** A milestone the household added itself (P3-04). */
+export type CustomMilestone = {
+  /** `custom:` + an opaque id (generated as a uuid): never a catalog id. */
+  id: string;
+  title: string;
+  createdAt: string;
+  byUserId: string | null;
+  byLabel: string;
+  /** The commit that added it. */
+  actionId: string;
+  /** `ui` from the route, `agent` from a tool (§9.2 rule 3). */
+  source: "ui" | "agent";
+};
+
+/**
+ * `app.training`: the milestone board (P3-04). The catalog lives in the build;
+ * this document holds only what the household changed — its states and its own
+ * milestones.
+ */
+export type Training = {
+  schemaVersion: typeof TRAINING_SCHEMA_VERSION;
+  /** Per-milestone state in first-touched order; unique ids. */
+  states: MilestoneState[];
+  /** Custom milestones, creation order; unique ids and titles. */
+  custom: CustomMilestone[];
   createdAt: string;
 };
 

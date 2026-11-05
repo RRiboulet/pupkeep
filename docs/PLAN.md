@@ -920,7 +920,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.feeding` | Meal slots (P1-14), feed events (P2-01) | One normal feed per slot per local date; extra feeds have no slot; at least one active slot once a schedule exists |
 | `app.walks` | One open walk + history | One open walk at a time; duration from server timestamps |
 | `app.growth` | Measurements (weight, height, note, who, when) | Several per day, the day's latest is its reading; kg to the gram, cm to a tenth; the chart series is derived in local-date order, never stored; the target weight is `app.puppy`'s field (P1-11), never copied |
-| `app.training` | Milestones + status | Starter catalog + custom; `not_started`/`practicing`/`mastered` |
+| `app.training` | Milestones + status | Starter catalog (build-side, stable `catalog:` ids) + `custom:<uuid>` entries; `not_started`/`practicing`/`mastered`; `masteredAt` iff mastered; untouched milestones have no record |
 | `app.calendar` | Appointments | UTC instant + household timezone; reminder offsets; status |
 | `app.showers` | Shower history | Date, shampoo, notes; next due from interval |
 | `app.notifications` | Per-user in-app items + push outbox | Dedupe key, read state, delivery state |
@@ -933,7 +933,8 @@ P1-08 defines the first four documents; P1-14 adds `app.feeding` with the meal
 slots (P2-01 adds the feed events and moves that document to version 2); P2-02
 adds `app.notifications` with the committed intents a care action creates (P4-05
 adds the outbox and delivery fields as version 2); P3-01 adds `app.growth` with
-the measurement history. Each
+the measurement history; P3-04 adds `app.training` with the milestone states
+and the household's own entries (the catalog lives in the build). Each
 value carries `schemaVersion: 1` and its Pi Durable document version is 1; a
 future change increments both and adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
@@ -3377,8 +3378,90 @@ process kill; both clients see the same state; the partner notification
       left open past midnight still shows yesterday's day count until it
       refetches (visibility-triggered refresh is not implemented); and the
       series' size in the growth payload is P5-07's measurement.
-- [ ] **P3-04** `app.training` doc/service: starter milestone catalog, custom,
-      status/note/who/when.
+- [x] **P3-04** `app.training` doc/service: starter milestone catalog, custom,
+      status/note/who/when. **Landed:** `src/shared/training.ts` (the catalog,
+      the shapes and their parsers, `milestoneView`, the rule sentences and the
+      id prefixes), `MilestoneStatus`/`MilestoneState`/
+      `CustomMilestone`/`Training` and `TRAINING_SCHEMA_VERSION` in
+      `src/shared/domain.ts`, `TrainingDoc`/`parseTraining` in
+      `src/server/domain/docs.ts`, `src/server/domain/training.ts`
+      (`readTraining`, `updateMilestone`, `addCustomMilestone`), and bootstrap
+      creating/repairing `app.training` (with the missing-household and
+      malformed-document refusals). The catalog is eight neutral skill names in
+      reading order; HTTP, tools and the board are P3-05.
+      Decisions: (1) **the catalog lives in the build, the state in the
+      document.** Ids are `catalog:<slug>` and stable, so a title edit or a
+      reorder cannot rewrite what a household recorded, and a **removed** entry
+      leaves its state in the document untouched (the board hides it — there is
+      no title to show — and a later build that brings the id back shows the
+      progress again). That is the todo's "a catalog edit does not orphan a
+      household's progress", made a parser rule. (2) **a custom milestone is
+      `custom:<uuid>`**, so it can never collide with a catalog id, and a title
+      must not duplicate any milestone the board already shows (the catalog's or
+      another custom one, case-insensitively): two identically titled rows with
+      different ids would make "which one did we master?" ambiguous. (3) **"done"
+      is a fact with an instant and an actor.** `masteredAt` exists iff the
+      status is `mastered` (the parser refuses either half), and undoing is an
+      ordinary status change with its own activity line — never a delete, so the
+      feed keeps who un-did it and when. (4) **an untouched milestone has no
+      record**; the board reads it as `not_started`. Only a caregiver's change
+      writes. (5) **a status change and a note change are one writer**: absent
+      note keeps, `null`/empty clears, text replaces; a note-only edit on an
+      untouched milestone is a note edit, not a "status set to not started"
+      (the summary distinguishes them). (6) **each change is one commit** — state,
+      activity, key — and the appended state list is re-parsed inside the commit
+      as a backstop, as `logFeed` does; an unknown milestone and a duplicate
+      title are typed `DomainConflictError`s that roll the key back and reach the
+      route as their sentences. (7) **the catalog is a checklist, not a
+      curriculum**: no schedule, no age, no "should", no advice — pinned by a
+      test over the titles, which is this task's guardrail.
+      (8) **`source: "ui" | "agent"` is stored on every state and custom entry
+      now**, as §9.2 rule 3 names it (`Walk` omits it; `GrowthMeasurement` has
+      it). Adding it later would cost a document version bump, so the new
+      document carries it from the start; a custom milestone has **no note of
+      its own** — one note per milestone, on the state, is the simpler truth.
+      (9) **a call that changes nothing is refused** (`MILESTONE_NOOP_RULE`)
+      rather than writing a state and an activity line that claim a change: a
+      clear on a milestone with no note, or the same text again, is not an
+      action. An explicit status re-assert *is* one (it restamps who/when) and
+      reads as the status, never as a note edit. (10) **the writer seeds
+      `createdAt`** when a boot-less session left it empty, as every sibling
+      writer does — otherwise one write would leave a document the next boot
+      refuses. (11) **`app.training` joins `PROFILE_KINDS`** so a milestone
+      change publishes the care frame's signal (`careSeq`); the board itself is
+      re-read by its own route, like growth and the day's meals.
+      **Verified:** 19 new tests in `test/training.test.ts` — the catalog (stable
+      ids, unique titles, the no-advice sweep), the state shape (`masteredAt` iff
+      mastered both ways, the §9.2 fence, note bounds and control characters,
+      instants, the action id), the custom shape (prefix, title bounds,
+      duplicates against the catalog and each other) and the list rules (unique
+      ids; a custom state without its entry refused; a **retired catalog state
+      accepted** and hidden from the board), the board (catalog order, untouched
+      as not_started, custom last, counts), the document parser (schema, instant,
+      malformed) and `emptyTraining`; then the service over a real harness: one
+      commit (state + activity + key), practising → mastered → undone as three
+      real commits with `masteredAt` set and cleared, notes set/kept/cleared with
+      their own summaries, an unknown milestone refused with nothing written and
+      no key burnt, an empty and a no-op change refused (a clear with no note),
+      a status re-assert allowed with a status sentence, replay vs key
+      conflict, a custom milestone added and then mastered, duplicate titles
+      refused (a custom and the catalog's "Sit") without burning their keys, the household fallback actor, a missing document
+      unavailable rather than empty, boot repair + the malformed and
+      partial-restore refusals, and the board surviving a reopen. The suite is
+      530/530 and `npm run typecheck` passes.
+      **Not verified:** no route, agent tool or board yet (P3-05), so nothing has
+      changed a milestone from a browser or the model; the catalog's wording is a
+      product choice a reviewer may revisit; nothing archives the state list
+      (P5-07 measures growth, as for the other histories); and no phone has shown
+      the board. **Carried out to P3-05:** the board's counts and the
+      `get_context` summary belong in `agent/training-text.ts` next to the
+      sentence they feed; the route's body parser must **not** collapse `null`
+      to absent (a null note means *clear*, unlike the feed and measurement
+      parsers); `MilestoneUnknownError` reaches the route as a 409 sentence, and
+      the route should answer with the board; and there is no `rev` — a status
+      cell is last-write-wins with its own who/when, and both events stay in the
+      activity feed (a deliberate deviation from §7.4's compare-and-swap, which
+      protects a read-modify-write payload this document does not have).
 - [ ] **P3-05** Milestone HTTP + agent tools + UI board.
 - [ ] **P3-06** `app.showers` doc/service: log, history, next due.
 - [ ] **P3-07** Shower HTTP + agent tools + UI.
