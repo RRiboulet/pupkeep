@@ -886,6 +886,9 @@ async function handleMealSlotsUpdate(
     actionId: `http:${key}`,
     rev,
     slots,
+    // Since P2-09 this write also picks the day it arms reminders for and the
+    // grace cutoff, so it must use the process clock the day view reads.
+    now: new Date(deps.now?.() ?? Date.now()),
   });
   await respondToCareWrite(deps, res, outcome, "meal schedule");
 }

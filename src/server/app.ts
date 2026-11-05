@@ -49,6 +49,7 @@ import { watchProfileState, type ProfileStateWatch } from "./agent/state.ts";
 import { createFeedTools } from "./agent/feed-tools.ts";
 import { createWalkTools } from "./agent/walk-tools.ts";
 import { createProfileTools } from "./agent/tools.ts";
+import { createReminders } from "./reminders/feed-reminder.ts";
 import {
   configureSharedThread,
   readHousehold,
@@ -225,6 +226,22 @@ export async function listenHttp(
   };
 }
 
+/**
+ * The extensions every server process installs: the care tools the agent may
+ * call and the reminder tasks. They ship with the app, never with a
+ * conversation: a registry the phone's process does not build is a registry the
+ * agent cannot call, and a task kind it does not install can never run.
+ */
+export function installAppExtensions(registry: Registry<ToolRegistration>): void {
+  registry.install(createProfileTools());
+  registry.install(createFeedTools());
+  registry.install(createWalkTools());
+  // P2-09: the feeding reminder task definition. Installing it is what lets a
+  // task armed by the meal schedule sleep and wake; the hidden system
+  // conversation owns it and never selects an extension of its own (§9.1).
+  registry.install(createReminders());
+}
+
 async function defaultBootstrap(input: BootstrapInput): Promise<BootstrapResult> {
   // config.json is the auth authority and the seed for profiles; the launcher
   // ensures it exists before spawning the server. A missing config here is a
@@ -332,9 +349,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   // The care tools ship with the app, never with a conversation: a registry the
   // phone's process does not build is a registry the agent cannot call.
   const registry = options.registry ?? createRegistry<ToolRegistration>();
-  registry.install(createProfileTools());
-  registry.install(createFeedTools());
-  registry.install(createWalkTools());
+  installAppExtensions(registry);
 
   const parked = new Map<string, ParkedTask>();
   const report = (error: unknown, info: ReportInfo): void => {

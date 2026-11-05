@@ -30,6 +30,7 @@ import {
 import {
   DEFAULT_HOUSEHOLD_NAME,
   DEFAULT_HOUSEHOLD_SETTINGS,
+  HOUSEHOLD_SCHEMA_VERSION,
   type Household,
 } from "../src/shared/domain.ts";
 
@@ -232,9 +233,12 @@ test("config must have one or two active members", async () => {
 test("an unknown household schemaVersion is refused instead of reset", async () => {
   await withHarness(async (opened) => {
     await bootstrapSession(opened.harness, { config: config(owner), context, now });
+    // One version past this build's, so the literal does not need editing on
+    // every household schema bump.
+    const unknown = HOUSEHOLD_SCHEMA_VERSION + 1;
     await opened.harness.commit(async (tx) => {
       const draft = await tx.doc(HouseholdDoc);
-      (draft as unknown as { schemaVersion: number }).schemaVersion = 3;
+      (draft as unknown as { schemaVersion: number }).schemaVersion = unknown;
     }, context);
 
     await assert.rejects(
@@ -242,7 +246,7 @@ test("an unknown household schemaVersion is refused instead of reset", async () 
       /app\.household is not a shape/,
     );
     const stored = await opened.harness.snapshot(HouseholdDoc, context);
-    assert.equal((stored as unknown as { schemaVersion: number }).schemaVersion, 3);
+    assert.equal((stored as unknown as { schemaVersion: number }).schemaVersion, unknown);
   });
 });
 
