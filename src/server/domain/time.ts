@@ -11,6 +11,8 @@
 // module; it holds the date arithmetic they and the profile (age) share.
 
 import type { PuppyAge } from "../../shared/profile.ts";
+import { isLocalDate } from "../../shared/profile.ts";
+import { isLocalTime } from "../../shared/feeding.ts";
 
 const FORMATTERS = new Map<string, Intl.DateTimeFormat>();
 
@@ -53,6 +55,78 @@ export function localTimeAt(instant: Date, timezone: string): string {
 }
 
 const DAY_MS = 86_400_000;
+
+/**
+ * The zone's offset from UTC at one instant, in milliseconds (positive east).
+ * `Intl` formats the instant in the zone; reading those parts as if they were
+ * UTC and subtracting the instant is the offset. Milliseconds are dropped
+ * deliberately: the formatter only reports whole seconds.
+ */
+function zoneOffsetMs(instant: number, timezone: string): number {
+  const parts = formatter(timezone, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(instant));
+  const get = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((part) => part.type === type)?.value ?? "0");
+  const whole = Math.floor(instant / 1000) * 1000;
+  return Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second")) - whole;
+}
+
+/**
+ * The instant at which the household clock reads `timeLocal` on `localDate`
+ * (§8.4: meal slots are wall-clock times in the household zone). One slot time
+ * therefore moves with the household through a DST change instead of staying a
+ * fixed UTC instant.
+ *
+ * The two awkward cases resolve the way `Temporal`'s `compatible` disambiguation
+ * does, which is what a caregiver expects from a wall clock:
+ *   * **ambiguous** (the hour a fall-back repeats): the **earlier** occurrence,
+ *     so a reminder is not delayed by an hour;
+ *   * **nonexistent** (the hour a spring-forward skips): shifted **forward** by
+ *     the gap — 02:30 on the transition day is 03:30 on the new clock. The
+ *     reminder still happens that morning instead of vanishing.
+ * Both are pinned by Europe/Paris fixtures in `test/reminders.test.ts`.
+ */
+export function instantAtLocalWallClock(localDate: string, timeLocal: string, timezone: string): Date {
+  if (!isLocalDate(localDate)) throw new Error(`not a local date: ${localDate}`);
+  if (!isLocalTime(timeLocal)) throw new Error(`not a wall-clock time: ${timeLocal}`);
+  const [year, month, day] = localDate.split("-").map(Number) as [number, number, number];
+  const [hour, minute] = timeLocal.split(":").map(Number) as [number, number];
+  // `Date.UTC` maps years 0–99 to 1900–1999; `setUTCFullYear` does not. The
+  // armer only ever passes today's date, but Phases 3–4 will pass appointment
+  // dates, so the conversion must not silently move a year.
+  const at = new Date(0);
+  at.setUTCFullYear(year, month - 1, day);
+  at.setUTCHours(hour, minute, 0, 0);
+  const wall = at.getTime();
+
+  // A day either side of the wall time captures both offsets around a
+  // transition; a candidate is real when it formats back to the same wall time.
+  const offsets = new Set([
+    zoneOffsetMs(wall - DAY_MS, timezone),
+    zoneOffsetMs(wall, timezone),
+    zoneOffsetMs(wall + DAY_MS, timezone),
+  ]);
+  const wallText = `${localDate} ${timeLocal}`;
+  const matches = [...offsets]
+    .map((offset) => wall - offset)
+    .filter((instant) => `${localDateAt(new Date(instant), timezone)} ${localTimeAt(new Date(instant), timezone)}` === wallText)
+    .sort((a, b) => a - b);
+  // One match is the ordinary case; two are an ambiguous hour, where the first
+  // (earliest) is the one a wall clock shows first.
+  if (matches.length > 0) return new Date(matches[0]!);
+
+  // No match: the wall time falls in the skipped hour. `wall - offsetAfter` is
+  // the instant one gap later on the new clock, which is the documented rule.
+  const guess = wall - zoneOffsetMs(wall, timezone);
+  return new Date(wall - zoneOffsetMs(guess, timezone));
+}
 
 /** Whole days from one local date to another; negative when `to` is earlier. */
 export function daysBetween(from: string, to: string): number {

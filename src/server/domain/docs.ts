@@ -1,17 +1,24 @@
 // The session documents PLAN §8.1 assigns to P1-08 (household, puppy, activity,
-// commands), plus P1-14's `app.feeding` (the meal slots), and their parsers.
+// commands), plus the care documents Phase 1/2 added (`app.feeding` with the
+// meal slots and feed events, `app.notifications`, `app.walks`), and their
+// parsers.
 //
 // The doc `version` and the value's `schemaVersion` start at 1. A shape change
 // increments both and adds `migrate(value, fromVersion)`; the parsers below then
 // accept the current shape only, because a migrated value is what the Session
-// hands them. Three migrations exist so far:
+// hands them. Five migrations exist so far:
 //   * `app.puppy` moved to version 2 when P1-11 added `rev`, and `migrate`
 //     fills `rev: 0` for a version-1 document;
 //   * `app.household` moved to version 2 when P1-14 added `rev` and
 //     `timezoneConfirmedAt`, and `migrate` fills `rev: 0` and leaves the zone
 //     unconfirmed so first-run setup asks for it;
 //   * `app.feeding` moved to version 2 when P2-01 added the feed events, and
-//     `migrate` adds `events: []` while keeping the slots and the revision.
+//     `migrate` adds `events: []` while keeping the slots and the revision;
+//   * `app.walks` moved to version 2 when P2-07 added the discard marker, and
+//     `migrate` only restamps a version-1 document;
+//   * `app.household` moved to version 3 when P2-09 added `feedReminders`, the
+//     ids of the feeding reminders the meal schedule armed; `migrate` adds the
+//     empty list on top of the version-2 fields.
 // A phone that ran an older build therefore keeps its household and profile
 // instead of failing boot.
 //
@@ -34,12 +41,14 @@ import {
   FEEDING_SCHEMA_VERSION,
   HOUSEHOLD_SCHEMA_VERSION,
   NOTIFICATIONS_SCHEMA_VERSION,
+  OPAQUE_ID_PATTERN,
   PUPPY_SCHEMA_VERSION,
   WALKS_SCHEMA_VERSION,
   type Activity,
   type ActivityEntry,
   type CommandRecord,
   type Commands,
+  type FeedReminderRef,
   type Feeding,
   type Household,
   type HouseholdSettings,
@@ -50,7 +59,7 @@ import {
   type PuppySex,
   type Walks,
 } from "../../shared/domain.ts";
-import { parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
+import { SLOT_ID_LIMIT, parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
 import { parseNotificationIntents } from "../../shared/notifications.ts";
 import { parseWalkList } from "../../shared/walks.ts";
 import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
@@ -85,6 +94,7 @@ export function emptyHousehold(): Household {
     systemConversationId: 0,
     createdAt: "",
     settings: { ...DEFAULT_HOUSEHOLD_SETTINGS, appointmentReminderOffsetsMin: [...DEFAULT_HOUSEHOLD_SETTINGS.appointmentReminderOffsetsMin] },
+    feedReminders: [],
   };
 }
 
@@ -125,24 +135,27 @@ export function emptyWalks(): Walks {
 
 export const HouseholdDoc = defineDoc<Household>({
   kind: "app.household",
-  version: 2,
+  version: 3,
   scope: "session",
   initial: emptyHousehold,
-  // A version-1 document (P1-08) predates `rev` and the timezone confirmation.
-  // The captured zone is kept but stays unconfirmed, because nobody has checked
-  // it: boot must not invent a confirmation. The roster is not revised either.
+  // A version-1 document (P1-08) predates `rev` and the timezone confirmation:
+  // the captured zone is kept but stays unconfirmed, because nobody has checked
+  // it. A version-2 document (P1-14) only lacks the reminder ids. In both cases
+  // boot must not invent a confirmation, and the roster is not revised.
   migrate(value, fromVersion) {
-    if (fromVersion !== 1) {
+    if (fromVersion !== 1 && fromVersion !== 2) {
       throw new Error(`app.household has no migration from version ${fromVersion}`);
     }
     const migrated = {
       ...(value as unknown as Record<string, unknown>),
       schemaVersion: HOUSEHOLD_SCHEMA_VERSION,
-      rev: 0,
-      timezoneConfirmedAt: null,
+      ...(fromVersion === 1 ? { rev: 0, timezoneConfirmedAt: null } : {}),
+      feedReminders: [],
     };
     const parsed = parseHousehold(migrated);
-    if (!parsed) throw new Error("app.household version 1 does not migrate to a valid version 2");
+    if (!parsed) {
+      throw new Error(`app.household version ${fromVersion} does not migrate to a valid version 3`);
+    }
     return parsed;
   },
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
@@ -341,6 +354,8 @@ export function parseHousehold(value: unknown): Household | undefined {
   if (!isIsoInstant(record.createdAt)) return undefined;
   const settings = parseSettings(record.settings);
   if (!settings) return undefined;
+  const feedReminders = parseFeedReminderRefs(record.feedReminders);
+  if (!feedReminders) return undefined;
   return {
     schemaVersion: HOUSEHOLD_SCHEMA_VERSION,
     rev: record.rev,
@@ -352,7 +367,44 @@ export function parseHousehold(value: unknown): Household | undefined {
     systemConversationId: record.systemConversationId,
     createdAt: record.createdAt,
     settings,
+    feedReminders,
   };
+}
+
+/**
+ * The armed-reminder list (§12.2). Two refs for one `(slotId, localDate)` would
+ * make "which task is this slot's reminder?" ambiguous, and a repeated task id
+ * could not be cancelled twice; both are refused. The list is deliberately not
+ * capped: it only ever holds what the schedule armed (one per active slot, and
+ * past days are pruned by the next write), so a cap could turn a legitimate
+ * household into a document boot refuses.
+ */
+export function parseFeedReminderRefs(value: unknown): FeedReminderRef[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const refs: FeedReminderRef[] = [];
+  const taskIds = new Set<number>();
+  const keys = new Set<string>();
+  for (const item of value) {
+    const record = asRecord(item);
+    if (!record) return undefined;
+    // Unknown keys are refused rather than ignored, as for a meal slot: a typo
+    // is visible and a future field cannot slip into the document unvalidated.
+    if (Object.keys(record).some((key) => !["taskId", "slotId", "localDate", "dueAt"].includes(key))) {
+      return undefined;
+    }
+    const { taskId, slotId, localDate, dueAt } = record;
+    if (!isPositiveInteger(taskId)) return undefined;
+    if (typeof slotId !== "string" || slotId === "" || slotId.length > SLOT_ID_LIMIT) return undefined;
+    if (!OPAQUE_ID_PATTERN.test(slotId)) return undefined;
+    if (!isLocalDate(localDate)) return undefined;
+    if (!isNonNegativeInteger(dueAt)) return undefined;
+    const key = `${slotId}|${localDate}`;
+    if (taskIds.has(taskId) || keys.has(key)) return undefined;
+    taskIds.add(taskId);
+    keys.add(key);
+    refs.push({ taskId, slotId, localDate, dueAt });
+  }
+  return refs;
 }
 
 export function parsePuppy(value: unknown): Puppy | undefined {

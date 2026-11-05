@@ -14,10 +14,12 @@ import type { JsonValue } from "@earendil-works/chord";
 import type { NotificationIntentCategory } from "./notifications.ts";
 
 /**
- * Version 2 adds `rev` and `timezoneConfirmedAt` (P1-14); a version-1 document
- * migrates on read, so a phone that ran P1-08 keeps its household.
+ * Version 2 adds `rev` and `timezoneConfirmedAt` (P1-14); version 3 adds
+ * `feedReminders`, the persisted ids of the feeding reminders the schedule
+ * armed (P2-09). Older documents migrate on read, so a phone that ran P1-08 or
+ * P1-14 keeps its household, members and settings.
  */
-export const HOUSEHOLD_SCHEMA_VERSION = 2 as const;
+export const HOUSEHOLD_SCHEMA_VERSION = 3 as const;
 /** Version 2 adds `rev` (P1-11); a version-1 document migrates on read. */
 export const PUPPY_SCHEMA_VERSION = 2 as const;
 export const ACTIVITY_SCHEMA_VERSION = 1 as const;
@@ -69,6 +71,35 @@ export type Household = {
   systemConversationId: number;
   createdAt: string;
   settings: HouseholdSettings;
+  /**
+   * The feeding reminders currently armed in the hidden system conversation
+   * (§12.2). Persisted so a reschedule can find the task it must replace, and
+   * so P4-04's planner can tell "missing" from "already there" without
+   * scanning transcripts. Only today's (and a future day's) reminders are kept;
+   * the schedule write prunes past days. Arming is not a human edit of the
+   * household, so it never bumps `rev`.
+   */
+  feedReminders: FeedReminderRef[];
+};
+
+/**
+ * One armed feeding reminder: the durable task, the slot and day it belongs
+ * to, and the instant it is due. `dueAt` is epoch milliseconds on the harness
+ * clock, exactly as the task's input holds it — a slot time is wall-clock
+ * (§8.4) and only this converted instant may be scheduled.
+ *
+ * The pair `(slotId, localDate)` is the identity: one reminder per slot and
+ * day. A rescheduled slot gets a new task and a new ref, and the old task
+ * no-ops when it wakes (§12.2).
+ */
+export type FeedReminderRef = {
+  /** Pi Durable task id; the task is owned by the system conversation. */
+  taskId: number;
+  slotId: string;
+  /** `YYYY-MM-DD` in the household zone: the day the reminder is for. */
+  localDate: string;
+  /** Slot time + `settings.feedReminderDelayMin`, epoch ms. */
+  dueAt: number;
 };
 
 /**

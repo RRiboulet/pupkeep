@@ -952,7 +952,10 @@ third is P2-01's `app.feeding` feed events: schema 2, document version 2, and
 that set its meal times keeps them. The fourth is P2-07's walk discard:
 `app.walks` moves to schema 2 and document version 2, and `migrate` only restamps
 a version-1 document, because the new `discarded` marker is optional and every
-stored walk is still valid.
+stored walk is still valid. The fifth is P2-09's `app.household.feedReminders`:
+schema 3 and document version 3, and `migrate` adds the empty list — on top of
+`rev`/`timezoneConfirmedAt` for a version-1 document — so a phone that ran
+P1-08 or P1-14 keeps its members, settings and confirmed zone.
 
 ### 8.2 Host-side data
 
@@ -3041,8 +3044,104 @@ the shared thread answers via a fake provider; a restart loses nothing.
       **per-commit growth is still unmeasured**: `app.feeding`/`app.walks` replace
       their whole list per write, and the cap/archive decision (with any care
       limiter) is P5-07's, from a measured series.
-- [ ] **P2-09** Feed reminder task skeleton (slot + delay; can land in Phase 4 if
-      push is not ready).
+- [x] **P2-09** Feed reminder task skeleton (slot + delay; can land in Phase 4 if
+      push is not ready). **Landed:** `src/server/reminders/feed-reminder.ts`
+      (the `app.feed.reminder` task, the pure `feedReminderDecision`, the
+      grace/sleep constants and `createReminders()`), `src/server/reminders/schedule.ts`
+      (the pure `planFeedReminders` and `armFeedReminders`, which creates the
+      tasks inside the caller's commit), `src/server/domain/time.ts`
+      (`instantAtLocalWallClock`), `app.household.feedReminders` as schema 3
+      (document version 3, migrate from 1 and 2), the `updateMealSlots` commit
+      arming today's reminders, and `installAppExtensions()` in
+      `src/server/app.ts`. The task is owned by the hidden system conversation
+      (`ownership: {kind:"conversation"}`, `background: true`), never by a tool.
+      Decisions: (1) **the schedule write is the arming point**, not a planner:
+      `updateMealSlots` creates the day's reminder tasks in the same commit as
+      the slots, so a reschedule re-arms and a save either has both or neither.
+      Re-arming tomorrow, boot reconciliation and the "no duplicate planner" rule
+      stay P4-04, which can reuse `armFeedReminders` and the persisted refs. (2) **the ref is
+      `(taskId, slotId, localDate, dueAt)` in `app.household`** (§8.1's
+      "reminder task IDs"): `(slotId, localDate)` is the identity, `dueAt`
+      detects a move, and an arm with the same due instant **reuses** the task,
+      so saving the same schedule twice cannot double every reminder. A ref is
+      a shortcut, not a lock: a same-day A→B→A edit can arm a second task with
+      the same input and both decide `due`; delivery stays exactly-once because
+      the §12.3 dedupe key is authoritative, and P4-04's reconciliation can
+      prune the orphan. (3) **the task has two phases**: `wait` sleeps to the due
+      instant in ≤6 h chunks (§8.5) and `check` decides, so there is no work
+      after a sleep that a crash could run twice. Its terminal result is the
+      decision (`due`/`fed`/`rescheduled`/`late`), because **delivery is
+      P4-05/P4-06**: when it lands, a definition version 2 writes the intents
+      before the terminal commit and the input/checkpoint shape is unchanged.
+      `check` computes that decision from committed snapshots immediately before
+      the terminal commit — the decision is advisory (it writes nothing), and
+      the delivery phase must re-verify the slot inside **its own** commit, so a
+      feed or reschedule that commits in between cannot be delivered stale. (4) **the
+      skip rules are one pure function**, used by the task and testable without
+      a harness: the slot was removed/deactivated/moved (`rescheduled`), it was
+      fed for that local date (`fed`), or the wake is past a two-hour grace
+      window (`late`). `planFeedReminders` applies the same window at arming
+      time, so a phone that boots at noon does not fire the morning's missed
+      reminders in a burst. (5) **a wall-clock slot becomes one instant with a
+      documented DST rule** (`Temporal`'s `compatible` disambiguation: an
+      ambiguous hour takes the earlier occurrence; a skipped hour moves forward
+      by the gap), pinned by Europe/Paris fixtures for 29 March and 25 October
+      2026. The conversion lives in `domain/time.ts` so Phases 3–4 share it
+      rather than re-deriving local time. (6) **arming does not bump
+      `app.household.rev`**: `rev` guards the human-editable fields, and a
+      reminder the app armed must not invalidate a partner's open wizard. (7) A
+      household without its system conversation refuses the write instead of
+      arming a task against conversation 0. (8) **the reminder cannot call a
+      model**: it never asks for its conversation's agent, and the boot rule that
+      clears a model from the system conversation (P1-08) is asserted again
+      after arming. (9) **the wake check only reads**: `runtime.snapshot()`, not
+      `tx.doc()`, because acquiring a missing document inside a commit *creates*
+      it — a stray reminder after a partial restore must not commit an empty
+      `app.household` with no conversations, which boot would then refuse. A
+      missing document is a stale arm like any other. (10) **a timezone change
+      leaves today's arms stale** until the next schedule write or P4-04's
+      planner: the task recomputes its slot in the new zone, finds a different
+      instant and skips rather than reminding at the old zone's time. Re-arming
+      on a zone change belongs to the planner that owns reconciliation. (11)
+      **arming takes the household draft its caller holds**, never a second
+      `tx.doc()`: the same create-on-read hazard as (9), which P4-04 would
+      inherit by reusing the helper. The built ref list is re-parsed before it
+      is written, as `logFeed` does for its events, so a settings value that
+      would produce an unstorable `dueAt` rolls the save back instead of failing
+      the next boot. (12) The meal-schedule **route passes the process clock**
+      into the write (`deps.now`), because since this task that clock also picks
+      the day the reminders are armed for and the grace cutoff; the day view
+      already read it.
+      **Verified:** 16 new tests in `test/reminders.test.ts` — the wall-clock
+      conversion (ordinary, summer, the spring-forward gap, the fall-back
+      overlap, invalid input), the planner (active slots only, the household's
+      delay, a passed offset beyond grace skipped, inside grace kept, the
+      household-local date at 23:30Z), the decision (inclusive grace, fed before
+      late, removed/inactive/moved all stale), the ref parser and the version-2 →
+      3 migration, the schedule write arming two background tasks on the system
+      conversation with no owner and no model, re-saving the same schedule
+      reusing both tasks (two live tasks, never four), a moved slot arming a new
+      task while the old one commits `rescheduled` when it wakes, a save after
+      midnight dropping the previous day's refs and arming the new day's
+      instants, a timezone change (Paris → Lisbon) making the armed task
+      `rescheduled` with the next save re-arming the new instant, a renamed slot
+      keeping its task and reminding with the **current** label, a long wait
+      sleeping in two six-hour chunks with the scheduler re-arming each one, an
+      on-time wake committing `due` while **writing nothing** (household,
+      feeding, activity and notifications unchanged; delivery is P4), a fed slot
+      committing `fed` with the feeder's label, a wake past the window committing
+      `late` with no intent, a stray reminder with its documents gone committing
+      `rescheduled` **without creating them**, and `installAppExtensions()`
+      installing the task kind beside the care tools. The suite is 470/470 and
+      `npm run typecheck` passes.
+      **Not verified:** nothing is delivered — no push, no ntfy, no in-app item
+      (P4-05/P4-06); there is no daily planner and no boot reconciliation, so a
+      household that never edits its meal schedule has no reminder at all, and a
+      task lost while the database is restored is not recreated (P4-04); the
+      wake is driven by an injected harness clock and timer inside one process,
+      so a real kill-and-reopen across a sleep is left to Pi Durable's P1-07
+      guarantee rather than re-proven here; the DST fixtures are Europe/Paris
+      only; and no phone has run a reminder.
 
 **Gate G2:** exactly one feed event under concurrent requests; walk survives a
 process kill; both clients see the same state; the partner notification
@@ -3072,7 +3171,16 @@ process kill; both clients see the same state; the partner notification
       (`tx.createTask`, background, no model); task IDs persisted; reschedule/
       cancel; no tool-owned tasks.
 - [ ] **P4-04** Daily feed planner + feed reminder tasks; stale windows; no
-      duplicate planner; boot reconciliation; skip past offsets.
+      duplicate planner; boot reconciliation; skip past offsets. Builds on
+      P2-09's task, `planFeedReminders`/`armFeedReminders` and
+      `app.household.feedReminders`. **Carried out of P2-09:** the ref, not the
+      task table, is the identity, so a re-save inside a day reuses the ref by
+      due instant even if its task has already gone terminal — reconciliation
+      must read `getTask(ref.taskId).state` rather than assume a ref means a
+      live task; a timezone change leaves today's arms stale until the planner
+      re-runs; and P4-05 must decide what to do with `due` decisions a version-1
+      task committed before delivery existed (deliver them, or state that they
+      were never delivered).
 - [ ] **P4-05** `app.notifications` + outbox + Web Push + VAPID + service worker;
       server dedupe key authoritative. Inherits P2-02's version-1 document (the
       committed intents, the category-only title catalog and the dedupe key) and

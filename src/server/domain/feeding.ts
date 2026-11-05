@@ -14,9 +14,10 @@
 // A logged feed is one commit: the event, the activity entry, the notification
 // intents and the idempotency record land together or not at all (§7.2).
 //
-// The slots are wall-clock times in the household zone (§8.4). Nothing here
-// turns a slot into an instant: that is P4's planner, and it is where the DST
-// rules live. This module only stores what the household eats when.
+// The slots are wall-clock times in the household zone (§8.4). This module
+// stores what the household eats when; turning a slot into an instant is
+// `domain/time.ts`'s `instantAtLocalWallClock` (the one DST rule), and the
+// schedule write arms today's reminders with it in the same commit (P2-09).
 
 import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
@@ -29,6 +30,7 @@ import {
   notificationKey,
   parseNotificationIntents,
 } from "../../shared/notifications.ts";
+import { armFeedReminders } from "../reminders/schedule.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
 import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type WriteOutcome } from "./commands.ts";
@@ -93,13 +95,19 @@ export async function updateMealSlots(
         // document may never hold a schedule no reader can parse.
         const slots = parseMealSlots(input.slots);
         if (!slots) throw new DomainConflictError(MEAL_SCHEDULE_RULE);
-        const actor = await input.actor(tx, await tx.doc(HouseholdDoc));
+        const household = await tx.doc(HouseholdDoc);
+        const actor = await input.actor(tx, household);
         const draft = await tx.doc(FeedingDoc);
         if (draft.rev !== input.rev) throw new StaleRevisionError("the meal schedule changed since it was read");
 
         const first = draft.slots.length === 0;
         draft.slots = slots;
         draft.rev = input.rev + 1;
+
+        // P2-09: the same commit arms today's feeding reminders on the hidden
+        // system conversation (§12.2). A reschedule re-arms; an unchanged
+        // schedule reuses the tasks it already has.
+        await armFeedReminders(tx, household, slots, now);
 
         appendActivity(
           await tx.doc(ActivityDoc),
