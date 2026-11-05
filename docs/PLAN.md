@@ -3301,15 +3301,82 @@ process kill; both clients see the same state; the partner notification
       the stale rule are pinned against synthesised series, not a real logged
       history; and no phone has shown the panel.
 
-- [ ] **P3-03** Growth HTTP + agent tools + UI chart. **Carried out of P3-02:**
+- [x] **P3-03** Growth HTTP + agent tools + UI chart. **Carried out of P3-02:**
       the route ships the series (`growthSeries`) for the chart and the summary
-      text from `growthSummaryText` for the tool and the panel; the browser is
-      plain JS and does not import `src/shared/`, so displaying the slices means
-      rendering the summary's structured `windows` (or duplicating a rule, as
-      `web/meals.js` did for "overdue"). The summary is computed at fetch time,
-      so a Pup screen left open past midnight shows yesterday's stale day count
-      until it refetches — decide whether the panel refetches on visibility
-      (feeding solved the same problem by shipping `overdueAfterMin`).
+      text for the tool and the panel; the browser is plain JS and does not
+      import `src/shared/`, so displaying the slices means rendering the
+      summary's structured `windows` (or duplicating a rule, as `web/meals.js`
+      did for "overdue"). The summary is computed at fetch time, so a Pup screen
+      left open past midnight shows yesterday's stale day count until it
+      refetches. **Landed:** `GET /api/growth` (the committed series, P3-02's
+      summary and its roles copy) and `POST /api/growth` (log a weight:
+      Idempotency-Key, one commit, replay, the one key-conflict answer) in
+      `src/server/http.ts`; `readGrowthView`/`GrowthView` in
+      `src/server/domain/growth.ts` as the one builder behind the route, the
+      write answer and the tool; `get_growth` and `log_measurement` in
+      `src/server/agent/growth-tools.ts` (the plan's names; the task text's
+      `log_growth`/`get_growth_trend` were not used) with `growth-text.ts` for
+      the model-facing copy, and `get_context` now reports the latest weight
+      instead of listing growth as untracked; `web/growth-chart.js` (pure
+      geometry: time axis, gap segments, ticks, table rows) and P3-03's growth
+      card on the Pup screen (inline SVG, the P3-02 lines, the table, the
+      log-weight form), styled in `web/style.css`; `growth-chart.js` is in the
+      service-worker precache (VERSION v5). Decisions: (1) **growth is a signal,
+      not frame data.** P2-05 settled that the `profile` frame carries settings
+      state and views re-read their own document on `careSeq`; P3-03 follows it
+      — `app.growth` joins `PROFILE_KINDS` so a measurement bumps `careSeq`, and
+      the Pup screen re-reads `GET /api/growth` (one read per sequence, with a
+      local `loadSeq` so a slow read loses to a newer one or to the committed
+      POST answer). The frame carries no series, and the care read and
+      care-write answers stay three documents, not four. (2) **one view builder**
+      (`readGrowthView`) serves the route, the write answer and the tool, so the
+      chart, the model and the tests cannot disagree. (3) **the panel does not
+      re-implement P3-02's copy**: `GrowthView.lines` carries the note, the
+      target and the disclaimer with roles (`growthSummaryLines`), so the panel
+      styles by role, never by line index, and the text a tool prints is the
+      same lines joined. (4) **the chart is pure geometry plus SVG**:
+      `web/growth-chart.js` is Node-testable and computes a **time** axis (a
+      weekly series is spaced by its dates, not by index), marks a segment
+      crossing more than a day as a gap (dashed by CSS, captioned in words),
+      never interpolates or smooths, and labels the axis with the stored
+      household-local `localDate`s. One reading is centred; no reading draws a
+      placeholder, not an empty axis. (5) **the numbers also live in a table**
+      inside a `<details>`, so a screen-reader user is not dependent on the
+      picture, and every point carries its date and weight in an SVG `<title>`.
+      (6) **the route and the care read use the process clock** (`deps.now`):
+      P3-03 found that `GET /api/puppy` and the care-write answer still read the
+      wall clock, which would have let an injected clock's `today` disagree with
+      the growth staleness on the same screen. (7) **a number input's partial
+      value is refused, never dropped**: the form surfaces "the height is a
+      number of centimetres" instead of sending `NaN` (which JSON would turn
+      into "unset" and commit the weight without the height). (8) Client-side
+      unit formatting duplicates `formatWeightKg` in JS (`formatKg`) because the
+      shell has no build step — the same accepted duplication as `meals.js`'s
+      "overdue" rule; the PLAN records it so P3-05/P3-07 do not make it a third
+      copy silently.
+      **Verified:** 17 new tests — `test/growth-routes.test.ts` (the read shape
+      and `no-store`, the session requirement, one commit with the measurement
+      in the household day plus one activity line and the key, replay vs key
+      conflict, a refused measurement writing nothing, the mutation guards, the
+      profile PATCH answer agreeing with the GET about the day under the
+      process clock, and a measurement publishing a care **signal** while the
+      frame carries no growth data); `test/growth-tools.test.ts` (`get_growth`
+      empty and populated, the household-fallback attribution and the `tool:`
+      action id with the memo, replay, an invalid weight refused with the rule,
+      and `get_context`'s latest weight); `test/client.test.js` (a time axis
+      proved by an uneven three-point series — two points cannot tell time from
+      index — the gram-precision tick labels, the gap rule, the table, the
+      7/14/30 chips, the care-signal re-read with one request per sequence, a
+      slow read losing to a newer one, the domain's refusal sentence reaching
+      the form, and the refused partial height). The suite is 515/515 and
+      `npm run typecheck` passes.
+      **Not verified:** no browser or phone has drawn the chart (the SVG, the
+      chips and the table are exercised as data, not rendered in a DOM); the
+      Today screen's "log weight" quick action (§13.1) is not added yet; the
+      weight axis carries exactly three ticks and no finer grid; a Pup screen
+      left open past midnight still shows yesterday's day count until it
+      refetches (visibility-triggered refresh is not implemented); and the
+      series' size in the growth payload is P5-07's measurement.
 - [ ] **P3-04** `app.training` doc/service: starter milestone catalog, custom,
       status/note/who/when.
 - [ ] **P3-05** Milestone HTTP + agent tools + UI board.

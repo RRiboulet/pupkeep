@@ -27,6 +27,8 @@
 //   POST /api/walks/start        start a walk (Idempotency-Key → 409 when one is open)
 //   POST /api/walks/end          end the walk the form saw (Idempotency-Key)
 //   POST /api/walks/discard      discard a stale walk (Idempotency-Key)
+//   GET  /api/growth             the measurement series, the trend and its copy
+//   POST /api/growth             log a weight (Idempotency-Key)
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -83,6 +85,7 @@ import {
 } from "./domain/feeding.ts";
 import { updateHouseholdTimezone } from "./domain/household.ts";
 import { readProfile, updatePuppyProfile } from "./domain/profile.ts";
+import { logMeasurement, readGrowthView, type MeasurementOutcome } from "./domain/growth.ts";
 import {
   ThreadUnavailableError,
   labelFor,
@@ -490,14 +493,26 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/growth" && req.method === "GET") {
+      requireCare(session);
+      await handleGrowthRead(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/growth" && req.method === "POST") {
+      await handleGrowthWrite(deps, req, res, requireCare(session));
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
-        "route not served yet: the remaining care routes (meals, walks, growth, calendar) " +
+        "route not served yet: the remaining care routes (calendar, training, showers) " +
         "arrive with their phases; the profile is GET/PATCH /api/puppy, " +
         "the timezone PATCH /api/household, the meal schedule PATCH /api/feeding/slots, " +
         "today's meals GET /api/feeding/day, POST /api/feeding/fed, POST /api/feeding/extra, " +
-        "and walks GET /api/walks, POST /api/walks/start, POST /api/walks/end, POST /api/walks/discard",
+        "walks GET /api/walks, POST /api/walks/start, POST /api/walks/end, POST /api/walks/discard, " +
+        "and growth GET /api/growth, POST /api/growth",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -718,7 +733,7 @@ async function respondToCareWrite(
     sendKeyConflict(res);
     return;
   }
-  const profile = await readProfile(deps.thread.harness, deps.thread.context, new Date());
+  const profile = await readProfile(deps.thread.harness, deps.thread.context, new Date(deps.now?.() ?? Date.now()));
   if (outcome === "stale") {
     sendJson(res, 409, {
       error: "stale",
@@ -771,7 +786,10 @@ function requireOnlyKeys(body: Record<string, unknown>, allowed: readonly string
  * disagree about the household.
  */
 async function handleProfileRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
-  sendJson(res, 200, await readProfile(deps.thread.harness, deps.thread.context, new Date()));
+  // The process clock, not the wall clock: the care view's `today` and the
+  // growth summary's staleness derive from it, and an injected clock must move
+  // them together (P3-03).
+  sendJson(res, 200, await readProfile(deps.thread.harness, deps.thread.context, new Date(deps.now?.() ?? Date.now())));
 }
 
 /**
@@ -805,6 +823,9 @@ async function handleProfileUpdate(
     actionId: `http:${key}`,
     rev,
     patch,
+    // The process clock: the birthday check and the view this answer returns
+    // must agree with the reads (P3-03's clock fix).
+    now: new Date(deps.now?.() ?? Date.now()),
   });
 
   if (outcome.kind === "key-conflict") {
@@ -854,6 +875,8 @@ async function handleHouseholdUpdate(
     actionId: `http:${key}`,
     rev,
     timezone: record.timezone,
+    // `timezoneConfirmedAt` is a stamped instant; a test's clock must move it.
+    now: new Date(deps.now?.() ?? Date.now()),
   });
   await respondToCareWrite(deps, res, outcome, "timezone");
 }
@@ -1148,6 +1171,92 @@ async function handleWalkClose(
       now,
     }),
   );
+}
+
+// --- growth (P3-03) ----------------------------------------------------------
+
+/**
+ * The growth view is the Pup screen's **live read**: the `profile` frame is a
+ * signal, not data (P2-05), so a measurement bumps `careSeq` and the screen
+ * re-reads here. One builder (`readGrowthView`) serves this route, the POST
+ * answer and the agent tool.
+ */
+async function handleGrowthRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  sendJson(res, 200, await readGrowthView(deps.thread.harness, deps.thread.context, now));
+}
+
+interface MeasurementBody {
+  readonly weightKg: number;
+  readonly heightCm?: number;
+  readonly note?: string;
+}
+
+/**
+ * The body of a measurement. The values are the domain's to round and cap — a
+ * measurement the parser would refuse rolls the commit back — so only the shape
+ * is checked here, and a misspelt key is visible instead of ignored. `null` is
+ * how a form spells "left empty" and means "not set", not a conflict.
+ */
+function parseMeasurementBody(raw: unknown): MeasurementBody {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a measurement is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["weightKg", "heightCm", "note"]);
+  if (typeof record.weightKg !== "number") {
+    throw new ConflictError("a measurement needs a weight in kilograms");
+  }
+  if (record.heightCm !== undefined && record.heightCm !== null && typeof record.heightCm !== "number") {
+    throw new ConflictError("the height is a number of centimetres");
+  }
+  if (record.note !== undefined && record.note !== null && typeof record.note !== "string") {
+    throw new ConflictError("the note is text");
+  }
+  const heightCm = (record.heightCm as number | null | undefined) ?? undefined;
+  const note = (record.note as string | null | undefined) ?? undefined;
+  return {
+    weightKg: record.weightKg,
+    ...(heightCm !== undefined ? { heightCm } : {}),
+    ...(note !== undefined ? { note } : {}),
+  };
+}
+
+/**
+ * Log one weight. A measurement has no revision and no conflict: weighing twice
+ * is legitimate (P3-01). The same key and body is a replay, a different body is
+ * the one key-conflict answer, and every other refusal goes through the mapper.
+ * The answer carries the committed growth view, so the screen never merges a
+ * partial series.
+ */
+async function handleGrowthWrite(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = parseMeasurementBody(await readJsonBody(req));
+  const now = new Date(deps.now?.() ?? Date.now());
+
+  const outcome: MeasurementOutcome = await logMeasurement(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    weightKg: body.weightKg,
+    ...(body.heightCm !== undefined ? { heightCm: body.heightCm } : {}),
+    ...(body.note !== undefined ? { note: body.note } : {}),
+    source: "ui",
+    now,
+  });
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+
+  // One clock read for the write and the view, so the committed point and the
+  // series the answer carries are derived from the same instant (§8.4).
+  const growth = await readGrowthView(deps.thread.harness, deps.thread.context, now);
+  sendJson(res, 200, { growth, replayed: outcome.kind === "replayed" });
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

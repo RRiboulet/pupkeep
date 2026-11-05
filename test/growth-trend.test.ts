@@ -18,6 +18,7 @@ import {
   RAPID_GAIN_PCT,
   WEIGHT_LOSS_PCT,
   growthSummary,
+  growthSummaryLines,
   growthSummaryText,
   growthWindow,
   targetProgress,
@@ -277,12 +278,25 @@ test("the disclaimer says what it must, in words the test pins", () => {
   assert.match(GROWTH_DISCLAIMER, /not veterinary advice/);
 });
 
-test("the rendering is the note, the target and the disclaimer — no second quieter sentence", () => {
-  const text = growthSummaryText(summary(pair(5.0, 5.1), 10));
-  assert.deepEqual(text.split("\n"), [
-    "Weight is up 2.0% over 13 days (5 kg → 5.1 kg).",
-    "Target 10 kg — 4.9 kg to go.",
-    GROWTH_DISCLAIMER,
+test("the rendering is the note, the target and the disclaimer, with roles a panel can style", () => {
+  const here = summary(pair(5.0, 5.1), 10);
+  assert.deepEqual(growthSummaryLines(here), [
+    { role: "note", text: "Weight is up 2.0% over 13 days (5 kg → 5.1 kg)." },
+    { role: "target", text: "Target 10 kg — 4.9 kg to go." },
+    { role: "disclaimer", text: GROWTH_DISCLAIMER },
+  ]);
+  assert.equal(
+    growthSummaryText(here),
+    [
+      "Weight is up 2.0% over 13 days (5 kg → 5.1 kg).",
+      "Target 10 kg — 4.9 kg to go.",
+      GROWTH_DISCLAIMER,
+    ].join("\n"),
+  );
+  // No target: two lines, and the disclaimer is still last.
+  assert.deepEqual(growthSummaryLines(summary(pair(5.0, 5.1))), [
+    { role: "note", text: "Weight is up 2.0% over 13 days (5 kg → 5.1 kg)." },
+    { role: "disclaimer", text: GROWTH_DISCLAIMER },
   ]);
 });
 

@@ -360,3 +360,126 @@ a.button {
 .walk__who [role="timer"] {
   font-variant-numeric: tabular-nums;
 }
+
+/* --- Growth (P3-03) ------------------------------------------------------ */
+
+.growth-chart {
+  margin: 0 0 0.75rem;
+}
+
+.growth-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 15rem;
+}
+
+.growth-chart__plot {
+  fill: var(--bg);
+  stroke: #e4e0ec;
+}
+
+.growth-chart__grid {
+  stroke: #e4e0ec;
+  stroke-width: 1;
+}
+
+/* A gap between measurements is dashed, so a line across missing days never
+   reads as a measured stretch. The caption says so in words too. */
+.growth-chart__line {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.growth-chart__gap {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 5 5;
+}
+
+.growth-chart__dot {
+  fill: var(--accent);
+}
+
+.growth-chart__label {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.growth-chart__caption {
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.growth__windows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.growth__windows li {
+  padding: 0.1rem 0.6rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  border: 1px solid #e4e0ec;
+  border-radius: 999px;
+}
+
+.growth__window-days {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.growth__trend {
+  margin: 0.75rem 0 0;
+  font-weight: 600;
+}
+
+.growth__fineprint {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.growth__history {
+  margin-top: 0.9rem;
+}
+
+.growth__history summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.growth__table {
+  width: 100%;
+  margin-top: 0.5rem;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.growth__table th,
+.growth__table td {
+  padding: 0.3rem 0.4rem;
+  text-align: left;
+  border-bottom: 1px solid #e4e0ec;
+}
+
+.growth__table thead th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.growth__form {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e4e0ec;
+}
+
+.form__title {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}

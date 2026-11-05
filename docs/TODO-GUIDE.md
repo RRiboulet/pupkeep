@@ -6,10 +6,11 @@ and G1 is covered by the suite (`test/e2e.test.ts` is the slice end to end,
 P2-09 (`app.feeding`, the feed service, routes, tools and UI, the walk document,
 routes, tools and UI, the durability/multiplayer tests, and the feed reminder
 task skeleton); the daily feed planner and reminder delivery stay P4-04/P4-05.
-P3-01 (`app.growth` and its service) is on `main`; P3-02 (the trend and its
-copy) is on `feat/phase3-trend`, and the HTTP route, agent tool and chart are
-P3-03. P0-03/P0-08/P0-10 remain device-gated partner checks and do not block
-the host-side work.
+P3-01 (`app.growth` and its service) and P3-02 (the trend and its copy) are on
+`main`; P3-03 (growth HTTP, agent tools and the Pup chart) is on
+`feat/phase3-growth-surface`. P3-04/P3-06 (training and showers documents) are
+the next independent tasks. P0-03/P0-08/P0-10 remain device-gated partner checks
+and do not block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The
