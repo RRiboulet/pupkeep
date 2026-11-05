@@ -238,7 +238,7 @@ test("get_context summarises the milestones and no longer calls them untracked",
     );
     const reported = resultText(await getContext.execute({}, toolApi(fixture, conversationId), context));
     assert.match(reported, /Milestones: 0 of \d+ mastered, 1 practicing \(practicing "Stay"\)/);
-    assert.match(reported, /Not tracked by this build yet: appointments, showers/);
+    assert.match(reported, /Not tracked by this build yet: appointments$/m);
   } finally {
     await stop(fixture);
   }

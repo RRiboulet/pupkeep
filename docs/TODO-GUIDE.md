@@ -8,10 +8,12 @@ routes, tools and UI, the durability/multiplayer tests, and the feed reminder
 task skeleton); the daily feed planner and reminder delivery stay P4-04/P4-05.
 P3-01 (`app.growth`), P3-02 (the trend copy), P3-03 (growth HTTP, tools and the
 Pup chart), P3-04 (`app.training`) and P3-05 (milestone HTTP, tools and board)
-are on `main`; P3-06 (`app.showers` and its service) is on
-`feat/phase3-showers`. P3-07 (the shower surface) is the next task, then P3-08
-(the Phase 3 test slice). P0-03/P0-08/P0-10 remain device-gated partner checks
-and do not block the host-side work.
+are on `main`; P3-06 (`app.showers` and its service) is on `feat/phase3-showers`
+(PR #47, open) and P3-07 (shower HTTP, tools and the Pup card) is stacked on it
+in `feat/phase3-showers-surface`. With P3-07 landed the whole care surface is
+agent-accessible. P3-08 (the Phase 3 test slice) is the last task in the phase.
+P0-03/P0-08/P0-10 remain device-gated partner checks and do not block the
+host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The

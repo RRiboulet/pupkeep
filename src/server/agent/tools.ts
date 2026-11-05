@@ -13,7 +13,8 @@
 //     the model.
 //
 // `get_context` is the plan's one context tool. This build tracks the
-// household, the puppy profile, today's meals (P2-04's `feedingDayText`) and the
+// household, the puppy profile, today's meals (P2-04's `feedingDayText`), the
+// open walk, the latest weight, the milestone summary, the shower status and the
 // activity feed; the rest of §10.1's sections arrive with their phases, and
 // `Not tracked` in the answer says so explicitly so the model cannot report an
 // empty result as "nothing happened".
@@ -42,12 +43,14 @@ import { latestWeightText } from "./growth-text.ts";
 import { milestoneSummaryText } from "./training-text.ts";
 import { TrainingUnavailableError, readTrainingView } from "../domain/training.ts";
 import { GrowthUnavailableError, readGrowth } from "../domain/growth.ts";
+import { ShowersUnavailableError, readShowerView } from "../domain/showers.ts";
+import { showerSummaryText } from "./shower-text.ts";
 import { openWalkText } from "./walk-text.ts";
 import { refused, speakerSeam, text } from "./tool-kit.ts";
 
 
 /** §10.1 sections this build does not track yet. Remove one per phase. */
-const NOT_TRACKED = ["appointments", "showers"] as const;
+const NOT_TRACKED = ["appointments"] as const;
 
 /**
  * The name and breed are caregiver free text, so they are rendered as JSON
@@ -92,8 +95,9 @@ export function createProfileTools(): Extension<ToolRegistration> {
     name: "get_context",
     description:
       "Read the current household state: now, the household-local date, the caregivers, the puppy profile and age, " +
-      "today's meals and who fed each, the open walk, the latest weight, the milestone summary, and recent " +
-      "activity. Sections this build does not track are listed in the answer; say so instead of guessing.",
+      "today's meals and who fed each, the open walk, the latest weight, the milestone summary, the shower " +
+      "status, and recent activity. Sections this build does not track are listed in the answer; say so instead " +
+      "of guessing.",
     parameters: Type.Object({}),
     execute: async (_args, api, context) => {
       const now = new Date(api.now());
@@ -130,6 +134,14 @@ export function createProfileTools(): Extension<ToolRegistration> {
       } catch (error) {
         if (!(error instanceof TrainingUnavailableError)) throw error;
       }
+      // §10.1's shower status: the last shower and the next due date. One
+      // unreadable document must not cost the model every other section.
+      let showers = "Showers: unavailable (retry after boot)";
+      try {
+        showers = showerSummaryText(await readShowerView(api, context, now));
+      } catch (error) {
+        if (!(error instanceof ShowersUnavailableError)) throw error;
+      }
       const activity = await api.snapshot(ActivityDoc, context);
       const parsed = activity === undefined ? undefined : parseActivity(activity);
       // Names are free text too (an invite's display name), so they get the
@@ -158,6 +170,8 @@ export function createProfileTools(): Extension<ToolRegistration> {
           latestWeight,
           // §10.1's milestone summary: counts and what is being practised.
           milestones,
+          // §10.1's shower status: the last shower and the next due date.
+          showers,
           `Recent activity:\n${activityText(parsed ? recentActivity(parsed, 10) : [])}`,
           `Not tracked by this build yet: ${NOT_TRACKED.join(", ")}`,
         ].join("\n"),

@@ -3,13 +3,14 @@
 // This build owns the profile fields (name, birthday, breed, sex, target
 // weight), P3-03's growth chart (the committed series drawn as an inline SVG
 // over `growth-chart.js`'s pure geometry, the trend copy from P3-02, the target
-// distance and a form to log a weight) and P3-05's milestone board. Showers join
-// the screen with their own phase.
+// distance and a form to log a weight), P3-05's milestone board and P3-07's
+// shower card (the derived next due date and the recent few from the history).
 //
-// Growth is read from `GET /api/growth`, never from the `profile` frame: P2-05
-// made that frame a signal, not data, so a measurement bumps `careSeq` and this
-// screen re-reads — the same rule Today follows for the day's meals. A local
-// `loadSeq` makes a slow read lose to a newer one or to a committed write.
+// Growth, the board and the shower history are read from their own routes, never
+// from the `profile` frame: P2-05 made that frame a signal, not data, so a care
+// commit bumps `careSeq` and this screen re-reads — the same rule Today follows
+// for the day's meals. A local `loadSeq` makes a slow read lose to a newer one or
+// to a committed write.
 //
 // Two rules shape the form:
 //   * the save echoes the revision it read. A 409 `stale` is not an error: the
@@ -25,6 +26,7 @@ import htm from "../vendor/htm.mjs";
 import { NetworkError, requestJson } from "../client.js";
 import { chartGeometry, formatKg, measurementRows, windowLabel } from "../growth-chart.js";
 import { Milestones } from "./milestones.js";
+import { Showers } from "./showers.js";
 import { changedFields, draftOf, emptyDraft, isNewer, pendingSave, sameHousehold } from "../profile-form.js";
 import { subscribe } from "../store.js";
 
@@ -128,6 +130,9 @@ export class Pup extends Component {
     /** The committed milestone board from `GET /api/training`; `null` until read. */
     training: null,
     trainingError: null,
+    /** The committed shower view from `GET /api/showers`; `null` until read. */
+    showers: null,
+    showersError: null,
     /** The last `careSeq` this screen re-read for (P2-05's signal). */
     seenCare: 0,
     draft: emptyDraft(),
@@ -157,6 +162,7 @@ export class Pup extends Component {
     void this.load();
     void this.loadGrowth();
     void this.loadTraining();
+    void this.loadShowers();
   }
 
   componentWillUnmount() {
@@ -211,6 +217,22 @@ export class Pup extends Component {
   }
 
   /**
+   * The shower history and its derived due date, re-read on the care signal.
+   * The write's answer stays bounded, so this is where the list is refreshed.
+   */
+  async loadShowers() {
+    const seq = (this.showersSeq = (this.showersSeq ?? 0) + 1);
+    const outcome = await readCareView(this.request, "/api/showers", "shower history");
+    if (seq !== this.showersSeq) return "superseded";
+    if (outcome.kind === "error") {
+      this.setState({ showersError: outcome.message });
+      return "refused";
+    }
+    this.setState({ showers: outcome.body, showersError: null });
+    return "loaded";
+  }
+
+  /**
    * Adopt a committed board (a write's answer). It outranks any read that is
    * still in flight: without the bump, that read would land later with the
    * pre-write board.
@@ -238,6 +260,7 @@ export class Pup extends Component {
       this.setState({ seenCare: seq });
       void this.loadGrowth();
       void this.loadTraining();
+      void this.loadShowers();
     }
 
     const incoming = state.profile;
@@ -428,6 +451,8 @@ export class Pup extends Component {
       growthError,
       training,
       trainingError,
+      showers,
+      showersError,
       draft,
       busy,
       error,
@@ -645,6 +670,14 @@ export class Pup extends Component {
           timezone=${profile.household.timezone}
           request=${this.request}
           onRows=${(rows) => this.applyBoard(rows)}
+        />`}
+
+        ${html`<${Showers}
+          view=${showers}
+          error=${showersError}
+          timezone=${profile.household.timezone}
+          request=${this.request}
+          onLogged=${() => this.loadShowers()}
         />`}
       </section>
     `;
