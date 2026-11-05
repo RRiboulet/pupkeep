@@ -34,6 +34,8 @@ export const NOTIFICATIONS_SCHEMA_VERSION = 1 as const;
 export const GROWTH_SCHEMA_VERSION = 1 as const;
 /** Milestones (P3-04): the build's catalog plus the household's own. */
 export const TRAINING_SCHEMA_VERSION = 1 as const;
+/** Showers (P3-06): an append-only history; the next due date is derived. */
+export const SHOWERS_SCHEMA_VERSION = 1 as const;
 /**
  * Version 2 adds `discarded` (P2-07): a stale walk can be resolved by ending it
  * or by discarding it, and the history must keep the difference. A version-1
@@ -46,9 +48,17 @@ export type MemberProfile = { id: string; name: string };
 export type HouseholdSettings = {
   feedReminderDelayMin: number;
   appointmentReminderOffsetsMin: number[];
+  /**
+   * Whole days between showers (the plan's default 21). The parser enforces the
+   * bound: a due date is a calendar date, and the arithmetic must never build
+   * one from a corrupt interval.
+   */
   showerIntervalDays: number;
   agentBudgetUsd: number;
 };
+
+/** Ten years: past this the "interval" is a corrupt setting, not a habit. */
+export const SHOWER_INTERVAL_MAX_DAYS = 3650;
 
 export type Household = {
   schemaVersion: typeof HOUSEHOLD_SCHEMA_VERSION;
@@ -345,6 +355,44 @@ export type Training = {
   states: MilestoneState[];
   /** Custom milestones, creation order; unique ids and titles. */
   custom: CustomMilestone[];
+  createdAt: string;
+};
+
+/**
+ * One logged shower (PLAN §8.1). "Date" is the household-local date the shower
+ * happened on, derived from `at` at write time (never client input): the next
+ * due date is a calendar question and must not be re-derived from a stored
+ * instant after the household moves zones.
+ *
+ * `shampoo` and `notes` are one line of caregiver text each, JSON-quoted where
+ * they are shown. The record carries who and when like every other care write.
+ */
+export type Shower = {
+  id: string;
+  /** `YYYY-MM-DD` in the household zone, derived at write time. */
+  localDate: string;
+  /** UTC instant, ISO with a trailing `Z`; the server's clock. */
+  at: string;
+  shampoo?: string;
+  notes?: string;
+  /** Config member id, or `null` for the household fallback (§9.2). */
+  byUserId: string | null;
+  byLabel: string;
+  source: "ui" | "agent";
+  /** HTTP idempotency key or the agent tool's task id (§7.3). */
+  actionId: string;
+};
+
+/**
+ * `app.showers`: the history (P3-06). Append-only and never pruned in v1; the
+ * **next due date is derived** from the latest shower plus
+ * `app.household.settings.showerIntervalDays` (the plan's one source for the
+ * interval), not stored.
+ */
+export type Showers = {
+  schemaVersion: typeof SHOWERS_SCHEMA_VERSION;
+  /** Append order; a reader sorts by `localDate`/`at` where it needs chronology. */
+  showers: Shower[];
   createdAt: string;
 };
 

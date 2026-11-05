@@ -22,6 +22,7 @@ import type {
   Feeding,
   Growth,
   Household,
+  Showers,
   Training,
   MemberProfile,
   Notifications,
@@ -35,6 +36,7 @@ import {
   FeedingDoc,
   GrowthDoc,
   HouseholdDoc,
+  ShowersDoc,
   TrainingDoc,
   NotificationsDoc,
   PuppyDoc,
@@ -44,6 +46,7 @@ import {
   emptyFeeding,
   emptyGrowth,
   emptyHousehold,
+  emptyShowers,
   emptyTraining,
   emptyNotifications,
   emptyPuppy,
@@ -54,6 +57,7 @@ import {
   parseFeeding,
   parseGrowth,
   parseHousehold,
+  parseShowers,
   parseTraining,
   parseMemberProfiles,
   parseNotifications,
@@ -160,6 +164,10 @@ function initialTraining(createdAt: string): Training {
   return { ...emptyTraining(), createdAt };
 }
 
+function initialShowers(createdAt: string): Showers {
+  return { ...emptyShowers(), createdAt };
+}
+
 function initialNotifications(createdAt: string): Notifications {
   return { ...emptyNotifications(), createdAt };
 }
@@ -217,6 +225,9 @@ export async function bootstrapSession(
     if ((await harness.snapshot(TrainingDoc, context)) !== undefined) {
       throw new BootstrapError("app.household is missing but app.training exists; refusing to reset it");
     }
+    if ((await harness.snapshot(ShowersDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.showers exists; refusing to reset it");
+    }
 
     const createdAt = now().toISOString();
     const timezone = options.timezone ?? defaultTimezone();
@@ -238,6 +249,7 @@ export async function bootstrapSession(
       Object.assign(await tx.doc(WalksDoc), initialWalks(createdAt));
       Object.assign(await tx.doc(GrowthDoc), initialGrowth(createdAt));
       Object.assign(await tx.doc(TrainingDoc), initialTraining(createdAt));
+      Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
 
       return { shared: shared.id, system: system.id };
     }, context);
@@ -259,6 +271,7 @@ export async function bootstrapSession(
         "app.walks",
         "app.growth",
         "app.training",
+        "app.showers",
       ],
       clearedSystemModel,
     };
@@ -348,6 +361,11 @@ export async function bootstrapSession(
   if (trainingSnapshot !== undefined && !training) {
     throw new BootstrapError("app.training is not a shape this build understands; refusing to reset it");
   }
+  const showersSnapshot = await harness.snapshot(ShowersDoc, context);
+  const showers = showersSnapshot === undefined ? undefined : parseShowers(showersSnapshot);
+  if (showersSnapshot !== undefined && !showers) {
+    throw new BootstrapError("app.showers is not a shape this build understands; refusing to reset it");
+  }
 
   const docsCreated: string[] = [];
   if (!puppy) docsCreated.push("app.puppy");
@@ -358,6 +376,7 @@ export async function bootstrapSession(
   if (!walksDoc) docsCreated.push("app.walks");
   if (!growth) docsCreated.push("app.growth");
   if (!training) docsCreated.push("app.training");
+  if (!showers) docsCreated.push("app.showers");
 
   if (membersChanged || docsCreated.length > 0) {
     const createdAt = now().toISOString();
@@ -374,6 +393,7 @@ export async function bootstrapSession(
       if (!walksDoc) Object.assign(await tx.doc(WalksDoc), initialWalks(createdAt));
       if (!growth) Object.assign(await tx.doc(GrowthDoc), initialGrowth(createdAt));
       if (!training) Object.assign(await tx.doc(TrainingDoc), initialTraining(createdAt));
+      if (!showers) Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
     }, context);
   }
 
