@@ -27,6 +27,17 @@ const { changedFields, draftOf, isNewer, pendingSave, wireOf } = await import(".
 const { CHART_SIZE, chartGeometry, daysBetweenLocalDates, formatKg, measurementRows, windowLabel } =
   await import("../web/growth-chart.js");
 const { boardGroups, customMilestone, noteUpdate, rowMetaText, statusUpdate } = await import("../web/training.js");
+const { Showers } = await import("../web/views/showers.js");
+const { dateText } = await import("../web/clock.js");
+const {
+  dueText,
+  earlierCount,
+  intervalText,
+  lastShowerText,
+  recentShowers,
+  showerBody,
+  showerMetaText,
+} = await import("../web/showers.js");
 
 function profileOf({
   rev = 1,
@@ -52,6 +63,11 @@ function profileOf({
     setup: { complete: true, missing: [] },
     today,
   };
+}
+
+/** A committed shower view, as GET /api/showers answers it. */
+function showerView({ history = [], last = null, nextDue = null, daysUntilDue = null, intervalDays = 21 } = {}) {
+  return { history, status: { last, nextDue, daysUntilDue }, intervalDays };
 }
 
 /** A mounted-enough Pup: onStore only needs `state` and a working setState. */
@@ -939,13 +955,16 @@ test("the table carries the numbers, newest first, in the stored units", () => {
   assert.equal(formatKg(4), "4 kg");
 });
 
-test("the Pup screen re-reads growth and the board on a care signal instead of trusting the frame", async () => {
+test("the Pup screen re-reads growth, the board and the showers on a care signal instead of trusting the frame", async () => {
   const views = [];
   const pup = new Pup({
     request: async (path) => {
       views.push(path);
       if (path === "/api/growth") {
         return { status: 200, ok: true, body: { points: [], summary: { state: "no_data" }, lines: [] } };
+      }
+      if (path === "/api/showers") {
+        return { status: 200, ok: true, body: showerView() };
       }
       return { status: 200, ok: true, body: { milestones: [] } };
     },
@@ -958,15 +977,17 @@ test("the Pup screen re-reads growth and the board on a care signal instead of t
   await new Promise((resolve) => setTimeout(resolve, 10));
   pup.onStore({ profile: profileOf(), careSeq: 3 });
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(views.sort(), ["/api/growth", "/api/training"]);
+  assert.deepEqual(views.sort(), ["/api/growth", "/api/showers", "/api/training"]);
   assert.deepEqual(pup.state.growth, { points: [], summary: { state: "no_data" }, lines: [] });
   assert.deepEqual(pup.state.training, []);
+  assert.deepEqual(pup.state.showers, showerView());
 
-  // A new sequence means a care commit: read both again.
+  // A new sequence means a care commit: read all three again.
   pup.onStore({ profile: profileOf(), careSeq: 4 });
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(views.length, 4);
+  assert.equal(views.length, 6);
   assert.equal(views.filter((path) => path === "/api/training").length, 2);
+  assert.equal(views.filter((path) => path === "/api/showers").length, 2);
 });
 
 test("a committed board answer outranks a read that was in flight", async () => {
@@ -1100,4 +1121,150 @@ test("an unparseable height is refused before it can be dropped silently", async
   await pup.logWeight({ preventDefault() {} });
   assert.equal(requests.length, 1);
   assert.deepEqual(requests[0].body, { weightKg: 4.2, heightCm: 31.5 });
+});
+
+// --- the shower card (P3-07) ------------------------------------------------
+
+test("the shower card's body, due copy and recent-few cap are pure and household-local", () => {
+  // A stored local date reads back as that date, never the day before in a zone
+  // behind UTC (the formatter is pinned to UTC on purpose).
+  assert.equal(dateText("2026-11-15"), "15 Nov 2026");
+  assert.equal(dateText("not-a-date"), "not-a-date");
+  assert.equal(dateText(null), "");
+  // A day that does not exist and a year `Date.UTC` would remap are shown as
+  // they arrived, never as a different date.
+  assert.equal(dateText("2026-02-31"), "2026-02-31");
+  assert.equal(dateText("0001-01-01"), "0001-01-01");
+
+  // Empty text is absent, padded text is trimmed: the same draft must replay.
+  assert.deepEqual(showerBody({ shampoo: "  Oatmeal ", notes: "   " }), { shampoo: "Oatmeal" });
+  assert.deepEqual(showerBody({ shampoo: "", notes: "Muddy paws" }), { notes: "Muddy paws" });
+  assert.deepEqual(showerBody({}), {}, "the primary action is a shower with no details");
+
+  // The one comparison P3-06 derived, in the card's words.
+  assert.equal(dueText({ last: null, nextDue: null, daysUntilDue: null }), "No showers logged yet.");
+  assert.equal(dueText({ last: null, nextDue: "2026-11-15", daysUntilDue: 0 }), "Next due 15 Nov 2026 — due today.");
+  assert.equal(dueText({ last: null, nextDue: "2026-11-15", daysUntilDue: 1 }), "Next due 15 Nov 2026 — in 1 day.");
+  assert.equal(dueText({ last: null, nextDue: "2026-11-15", daysUntilDue: -3 }), "Next due 15 Nov 2026 — 3 days overdue.");
+  assert.equal(lastShowerText({ last: { localDate: "2026-10-25", byLabel: "Alex" } }), "Last shower 25 Oct 2026 by Alex.");
+  assert.equal(lastShowerText({ last: null }), "");
+  assert.equal(intervalText(21), "every 21 days");
+  assert.equal(intervalText(1), "every day");
+
+  // The recent few, newest first, and the count of what is hidden.
+  const history = Array.from({ length: 7 }, (_, index) => ({ id: `s-${index}`, localDate: "2026-10-25" }));
+  assert.equal(recentShowers(history).length, 5);
+  assert.equal(recentShowers(history)[0].id, "s-0");
+  assert.equal(earlierCount(history), 2);
+  assert.equal(earlierCount([]), 0);
+
+  // The row's time is the household zone: 23:30Z is already the next day in Paris.
+  assert.equal(
+    showerMetaText({ byLabel: "Alex", at: "2026-10-29T23:30:00.000Z" }, "Europe/Paris"),
+    "by Alex at 00:30",
+  );
+  // An unusable zone must not produce "at at an unknown time".
+  assert.equal(showerMetaText({ byLabel: "Alex", at: "2026-10-29T23:30:00.000Z" }, "Not/AZone"), "by Alex");
+});
+
+test("logging a shower sends a bounded body and asks for a re-read instead of adopting a collection", async () => {
+  const calls = [];
+  let rereads = 0;
+  const card = new Showers({
+    request: async (path, options) => {
+      calls.push({ path, options });
+      // A write's answer is the record, never the history.
+      return { status: 200, ok: true, body: { shower: { id: "s-1" }, replayed: false } };
+    },
+    onLogged: async () => {
+      rereads += 1;
+    },
+    view: showerView(),
+    timezone: "Europe/Paris",
+    error: null,
+  });
+  card.setState = (patch) => Object.assign(card.state, patch);
+  card.state = { ...card.state, draft: { shampoo: " Oatmeal ", notes: "" } };
+
+  await card.save({ preventDefault() {} });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/showers");
+  assert.deepEqual(calls[0].options.body, { shampoo: "Oatmeal" });
+  assert.equal(rereads, 1, "the parent re-reads the unbounded history");
+  assert.equal("view" in card.state, false, "the card keeps no collection of its own");
+  assert.equal(card.state.message, "Logged.");
+  assert.deepEqual(card.state.draft, { shampoo: "", notes: "" });
+});
+
+test("a refused shower shows the domain's rule and keeps the key for a same-body retry", async () => {
+  let pendingKey;
+  const card = new Showers({
+    request: async (_path, options) => {
+      pendingKey = options?.idempotencyKey;
+      return { status: 409, ok: false, body: { error: "a shower is optional shampoo and note text, one line each" } };
+    },
+    onLogged: async () => {
+      throw new Error("nothing was written, so nothing is re-read");
+    },
+    view: showerView(),
+    timezone: "Europe/Paris",
+    error: null,
+  });
+  card.setState = (patch) => Object.assign(card.state, patch);
+  card.state = { ...card.state, draft: { shampoo: "", notes: "x".repeat(400) } };
+
+  await card.save({ preventDefault() {} });
+  assert.match(card.state.error, /one line each/);
+  assert.equal(card.state.pending.key, pendingKey, "the key stays with the body it belongs to");
+  assert.equal(card.state.message, null);
+});
+
+test("a failed re-read after a successful log is not reported as a failed log", async () => {
+  const card = new Showers({
+    request: async () => ({ status: 200, ok: true, body: { shower: { id: "s-1" }, replayed: false } }),
+    // The parent's loader rejects: the commit already succeeded, so this must
+    // not become a red "Could not log the shower" beside "Logged."
+    onLogged: async () => {
+      throw new Error("the re-read failed");
+    },
+    view: showerView(),
+    timezone: "Europe/Paris",
+    error: null,
+  });
+  card.setState = (patch) => Object.assign(card.state, patch);
+
+  await card.save({ preventDefault() {} });
+  assert.equal(card.state.message, "Logged.");
+  assert.equal(card.state.error, null, "the write succeeded; the read owns its own error");
+  assert.equal(card.state.busy, false);
+});
+
+/** Any string in the vnode tree contains `needle` (a render smoke test, no DOM). */
+function vnodeText(node, needle) {
+  if (typeof node === "string") return node.includes(needle);
+  if (Array.isArray(node)) return node.some((child) => vnodeText(child, needle));
+  if (node && typeof node === "object") {
+    if (vnodeText(node.props?.children, needle)) return true;
+    // htm keeps the text of an element in its children; attributes are not copy.
+    return false;
+  }
+  return false;
+}
+
+test("the card shows a stale-history warning, and still offers the log form", () => {
+  const card = new Showers({
+    request: async () => ({ status: 200, ok: true, body: showerView() }),
+    view: showerView(),
+    timezone: "Europe/Paris",
+    error: "Could not load the shower history. Try again in a moment.",
+  });
+  card.setState = (patch) => Object.assign(card.state, patch);
+
+  const withView = card.render();
+  assert.ok(vnodeText(withView, "Could not load the shower history"), "a failed re-read is visible, not swallowed");
+
+  // The form is its own commit, so a read failure does not take logging away.
+  const withoutView = new Showers({ request: async () => ({}), view: null, error: "nope", timezone: "Europe/Paris" });
+  withoutView.setState = (patch) => Object.assign(withoutView.state, patch);
+  assert.ok(vnodeText(withoutView.render(), "Log shower"), "the form is shown while the read is unavailable");
 });

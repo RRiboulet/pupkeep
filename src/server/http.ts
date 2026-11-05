@@ -32,6 +32,8 @@
 //   GET  /api/training           the milestone board
 //   POST /api/training/milestone    set a milestone's status and/or note (Idempotency-Key)
 //   POST /api/training/custom    add a milestone of the household's own (Idempotency-Key)
+//   GET  /api/showers            the shower history, the last shower and the next due date
+//   POST /api/showers            log a shower (Idempotency-Key)
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -98,6 +100,7 @@ import {
   type CustomMilestoneOutcome,
   type MilestoneUpdateOutcome,
 } from "./domain/training.ts";
+import { logShower, readShowerView, type ShowerOutcome } from "./domain/showers.ts";
 import {
   ThreadUnavailableError,
   labelFor,
@@ -532,16 +535,28 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/showers" && req.method === "GET") {
+      requireCare(session);
+      await handleShowersRead(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/showers" && req.method === "POST") {
+      await handleShowerWrite(deps, req, res, requireCare(session));
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
-        "route not served yet: the remaining care routes (calendar, training, showers) " +
+        "route not served yet: the remaining care routes (calendar) " +
         "arrive with their phases; the profile is GET/PATCH /api/puppy, " +
         "the timezone PATCH /api/household, the meal schedule PATCH /api/feeding/slots, " +
         "today's meals GET /api/feeding/day, POST /api/feeding/fed, POST /api/feeding/extra, " +
         "walks GET /api/walks, POST /api/walks/start, POST /api/walks/end, POST /api/walks/discard, " +
         "growth GET /api/growth, POST /api/growth, " +
-        "and milestones GET /api/training, POST /api/training/milestone, POST /api/training/custom",
+        "milestones GET /api/training, POST /api/training/milestone, POST /api/training/custom, " +
+        "and showers GET /api/showers, POST /api/showers",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -1407,6 +1422,86 @@ async function handleCustomMilestone(
     milestones: await readTrainingView(deps.thread.harness, deps.thread.context),
     replayed: outcome.kind === "replayed",
   });
+}
+
+// --- showers (P3-07) --------------------------------------------------------
+
+/**
+ * The shower surface is the Pup screen's **live read**, like growth and the
+ * milestone board: the `profile` frame is a signal, not data (P2-05), so logging
+ * a shower bumps `careSeq` and the screen re-reads here.
+ *
+ * This is also the **only** place the history is served. It is unbounded
+ * (P3-07's carried note, P5-07 measures the growth), so a write's answer stays
+ * bounded and the card re-reads this read rather than adopting a collection.
+ */
+async function handleShowersRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  sendJson(res, 200, await readShowerView(deps.thread.harness, deps.thread.context, now));
+}
+
+interface ShowerBody {
+  readonly shampoo?: string;
+  readonly notes?: string;
+}
+
+/**
+ * The body of a shower. Both fields are optional free text, and `null` is how a
+ * form spells "left empty" — the same shape rule as a measurement. The values
+ * are the domain's to trim and cap, so only the text type is checked here.
+ */
+function parseShowerBody(raw: unknown): ShowerBody {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a shower is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["shampoo", "notes"]);
+  for (const field of ["shampoo", "notes"] as const) {
+    const value = record[field];
+    if (value !== undefined && value !== null && typeof value !== "string") {
+      throw new ConflictError(`the ${field} is text`);
+    }
+  }
+  const shampoo = (record.shampoo as string | null | undefined) ?? undefined;
+  const notes = (record.notes as string | null | undefined) ?? undefined;
+  return {
+    ...(shampoo !== undefined ? { shampoo } : {}),
+    ...(notes !== undefined ? { notes } : {}),
+  };
+}
+
+/**
+ * Log one shower. A shower has no revision and no conflict — a second rinse is
+ * legitimate (P3-06). The same key and body is a replay, a different body is the
+ * one key-conflict answer, and every other refusal goes through the mapper.
+ *
+ * The answer is deliberately bounded to the committed record: the history can
+ * grow without limit, so the client re-reads `GET /api/showers` on the care
+ * signal instead of taking a collection from a write's answer.
+ */
+async function handleShowerWrite(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = parseShowerBody(await readJsonBody(req));
+  const now = new Date(deps.now?.() ?? Date.now());
+
+  const outcome: ShowerOutcome = await logShower(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    ...(body.shampoo !== undefined ? { shampoo: body.shampoo } : {}),
+    ...(body.notes !== undefined ? { notes: body.notes } : {}),
+    source: "ui",
+    now,
+  });
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  sendJson(res, 200, { shower: outcome.shower, replayed: outcome.kind === "replayed" });
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

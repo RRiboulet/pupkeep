@@ -595,6 +595,71 @@ a.button {
   border-top: 1px solid #e4e0ec;
 }
 
+/* --- Showers (P3-07) ----------------------------------------------------- */
+
+.showers {
+  margin-top: 1rem;
+}
+
+.showers__status {
+  margin-bottom: 0.75rem;
+}
+
+.showers__due {
+  margin: 0;
+  font-weight: 600;
+}
+
+.showers__meta,
+.shower__meta,
+.showers__earlier {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.showers__list {
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shower {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid #e4e0ec;
+}
+
+.shower:last-child {
+  border-bottom: 0;
+}
+
+.shower__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.shower__date {
+  font-weight: 600;
+}
+
+.shower__detail,
+.shower__note {
+  margin: 0.2rem 0 0;
+  font-size: 0.9rem;
+}
+
+.shower__note {
+  color: var(--muted);
+}
+
+.showers__form {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e4e0ec;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

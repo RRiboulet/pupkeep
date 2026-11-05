@@ -52,3 +52,30 @@ export function localTimeText(instant, timezone) {
   const minute = String(minutes % 60).padStart(2, "0");
   return `${hour}:${minute}`;
 }
+
+/**
+ * A stored `YYYY-MM-DD` local date as display text: `15 Nov 2026`. The date was
+ * already computed in the household zone by the server, so it is formatted at
+ * UTC — reading it as an instant in a zone behind UTC would show the 14th. A
+ * value that does not round-trip (a day that does not exist, a year `Date.UTC`
+ * would remap) is returned as it arrived rather than shown as a different date.
+ */
+const LOCAL_DATE_FORMAT = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+export function dateText(localDate) {
+  const raw = String(localDate ?? "");
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (match === null) return raw;
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const at = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(at.getTime())) return raw;
+  // `Date.UTC` maps years 0–99 into the 1900s and rolls 31 February into March;
+  // the server's `isLocalDate` refuses both, so show the stored text instead.
+  if (at.toISOString().slice(0, 10) !== raw) return raw;
+  return LOCAL_DATE_FORMAT.format(at);
+}

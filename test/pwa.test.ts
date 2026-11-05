@@ -167,7 +167,9 @@ test("the shell imports the vendored modules by relative path", async () => {
     "profile-form.js",
     "growth-chart.js",
     "training.js",
+    "showers.js",
     "views/milestones.js",
+    "views/showers.js",
     "views/today.js",
     "views/calendar.js",
     "views/pup.js",
@@ -702,7 +704,7 @@ test("install fills exactly PRECACHE, from pristine same-origin 200s", async () 
   const expected = [...worker.precache]
     .map((entry) => new URL(entry, `${ORIGIN}/sw.js`).pathname)
     .sort();
-  assert.equal(expected.length, 25, "the shell is the document, styles, modules, manifest and icons");
+  assert.equal(expected.length, 27, "the shell is the document, styles, modules, manifest and icons");
   assert.deepEqual(worker.cache.paths(), expected, "the cache holds exactly the precache list");
   assert.equal(worker.network.length, worker.precache.length, "one network fetch per entry");
   for (const call of worker.network) {
