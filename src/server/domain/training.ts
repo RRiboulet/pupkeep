@@ -118,7 +118,7 @@ function milestoneSummary(
   const previousStatus = before?.status ?? "not_started";
   if (previousStatus !== status || (explicitStatus !== undefined && !noteChanged)) {
     if (status === "mastered") return `marked ${quoted} mastered`;
-    if (status === "practicing") return `started practising ${quoted}`;
+    if (status === "practicing") return `started practicing ${quoted}`;
     return `set ${quoted} to ${statusWord(status)}`;
   }
   if (noteOp === "clear") return `cleared the note on ${quoted}`;
@@ -142,7 +142,7 @@ export type MilestoneUpdate = {
 };
 
 export type MilestoneUpdateOutcome =
-  | { kind: "updated" | "replayed"; state: MilestoneState }
+  | { kind: "updated" | "replayed"; state: MilestoneState; /** The change, without the actor: "added a note to …" */ summary: string }
   | { kind: "key-conflict" };
 
 /** No such milestone (a typo, a stale screen, or a catalog entry a newer build has). */
@@ -178,7 +178,9 @@ export async function updateMilestone(
   const note = noteChange(input.note);
   if (!note) throw new DomainConflictError(MILESTONE_RULE);
   if (input.status === undefined && note.op === "keep") {
-    throw new DomainConflictError(MILESTONE_RULE);
+    // No status and no note: the same sentence the domain uses for a redundant
+    // clear, so a caller reads one rule for "nothing to do".
+    throw new DomainConflictError(MILESTONE_NOOP_RULE);
   }
 
   const request = {
@@ -191,7 +193,7 @@ export async function updateMilestone(
 
   // The typed refusals (unknown milestone) propagate: they roll the key back
   // with everything else, and the route maps the class to a 409 sentence.
-  const outcome: CommandOutcome<{ state: MilestoneState }> = await runIdempotent(
+  const outcome: CommandOutcome<{ state: MilestoneState; summary: string }> = await runIdempotent(
     { store, context },
     { key: input.actionId, requestHash: requestHashOf(request), now },
     async (tx) => {
@@ -248,23 +250,31 @@ export async function updateMilestone(
       }
       draft.states = states;
 
+      const summary = milestoneSummary(title, before, status, input.status, noteChanged, note.op);
       appendActivity(
         await tx.doc(ActivityDoc),
         activityEntry({
           kind: "training.milestone",
-          summary: `${actor.label} ${milestoneSummary(title, before, status, input.status, noteChanged, note.op)}`,
+          summary: `${actor.label} ${summary}`,
           actorId: actor.id,
           actorLabel: actor.label,
           now,
         }),
       );
-      return { state: parsed };
+      return { state: parsed, summary };
     },
   );
 
   if (outcome.kind === "conflict") return { kind: "key-conflict" };
-  const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as { state: MilestoneState };
-  return { kind: outcome.kind === "replayed" ? "replayed" : "updated", state: recorded.state };
+  const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as {
+    state: MilestoneState;
+    summary: string;
+  };
+  return {
+    kind: outcome.kind === "replayed" ? "replayed" : "updated",
+    state: recorded.state,
+    summary: recorded.summary,
+  };
 }
 
 export type CustomMilestoneWrite = {

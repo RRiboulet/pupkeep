@@ -25,6 +25,8 @@
 
 import type { CustomMilestone, MilestoneCatalogEntry, MilestoneState, MilestoneStatus, Training } from "./domain.ts";
 import { MILESTONE_STATUSES, OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
+
+export { MILESTONE_STATUSES };
 import { HOUSEHOLD_FALLBACK_LABEL } from "./chat.ts";
 import { hasControlCharacter } from "./profile.ts";
 
@@ -147,7 +149,7 @@ export function parseMilestoneState(raw: unknown): MilestoneState | undefined {
     if (!isIsoInstant(record.masteredAt)) return undefined;
     state.masteredAt = record.masteredAt;
   } else if (record.masteredAt !== undefined) {
-    // `masteredAt` exists iff mastered: a practising milestone with a "done at"
+    // `masteredAt` exists iff mastered: a practicing milestone with a "done at"
     // would let the board claim two things at once.
     return undefined;
   }

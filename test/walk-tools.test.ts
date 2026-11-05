@@ -226,7 +226,7 @@ test("get_context reports the open walk and no longer lists walks as untracked",
     const after = resultText(await getContext.execute({}, toolApi(fixture, conversationId), context));
     assert.match(after, /Walk: open, started by "Household" at 08:00 \(under a minute ago\)/);
     // Growth left that list with P3-03; the remaining sections are still named.
-    assert.match(after, /Not tracked by this build yet: milestones, appointments, showers/);
+    assert.match(after, /Not tracked by this build yet: appointments, showers/);
   } finally {
     await stop(fixture);
   }
