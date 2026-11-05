@@ -1,22 +1,19 @@
 # Todo guide — how to work the Pupkeep plan
 
-**Status:** Phase 3 in progress. Phase 1 is complete on `main` through P1-14,
-and G1 is covered by the suite (`test/e2e.test.ts` is the slice end to end,
-`test/setup.test.ts` the first-run setup). Phase 2 is complete on `main` through
-P2-09 (`app.feeding`, the feed service, routes, tools and UI, the walk document,
-routes, tools and UI, the durability/multiplayer tests, and the feed reminder
-task skeleton); the daily feed planner and reminder delivery stay P4-04/P4-05.
-P3-01 (`app.growth`), P3-02 (the trend copy), P3-03 (growth HTTP, tools and the
-Pup chart), P3-04 (`app.training`) and P3-05 (milestone HTTP, tools and board)
-are on `main`; P3-06 (`app.showers` and its service) is on `feat/phase3-showers`
-(PR #47, open), P3-07 (shower HTTP, tools and the Pup card) is stacked on it in
-`feat/phase3-showers-surface` (PR #48), and P3-08 (the Phase 3 test slice) is
-stacked on that in `feat/phase3-tests`. Phase 3 is complete through P3-08: every
-care surface is agent-accessible and Gate G3 is covered by
-`test/dual-path.test.ts` (the shared harness lives in `test/support/app.ts`).
-Phase 4 (calendar, reminders, push, approvals) starts once #47, #48 and P3-08's
-PR merge. P0-03/P0-08/P0-10 remain device-gated partner checks and do not block
-the host-side work.
+**Status:** Phase 3 complete on `main` through P3-08. Phase 1 is complete on
+`main` through P1-14, and G1 is covered by the suite (`test/e2e.test.ts` is the
+slice end to end, `test/setup.test.ts` the first-run setup). Phase 2 is complete
+on `main` through P2-09 (`app.feeding`, the feed service, routes, tools and UI,
+the walk document, routes, tools and UI, the durability/multiplayer tests, and
+the feed reminder task skeleton); the daily feed planner and reminder delivery
+stay P4-04/P4-05. Phase 3 is complete on `main` through P3-08: growth, the trend
+copy, growth HTTP/tools/Pup chart, the milestone board, `app.showers` and its
+service, the shower HTTP/tools/Pup card, and the Phase 3 test slice. Every care
+surface is agent-accessible, Gate G3 is covered by `test/dual-path.test.ts`
+(the shared harness lives in `test/support/app.ts`), and the shower interval is
+pinned across a DST change, a month end and a leap day. Phase 4 (calendar,
+reminders, push, approvals) starts at **P4-01**. P0-03/P0-08/P0-10 remain
+device-gated partner checks and do not block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The
