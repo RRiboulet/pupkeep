@@ -1,10 +1,10 @@
 // Pup — the puppy profile and its growth card (PLAN §13.1).
 //
 // This build owns the profile fields (name, birthday, breed, sex, target
-// weight) and P3-03's growth chart: the committed series drawn as an inline
-// SVG over `growth-chart.js`'s pure geometry, the trend copy from P3-02, the
-// target distance, and a form to log a weight. Milestones and showers join this
-// screen with their own phases.
+// weight), P3-03's growth chart (the committed series drawn as an inline SVG
+// over `growth-chart.js`'s pure geometry, the trend copy from P3-02, the target
+// distance and a form to log a weight) and P3-05's milestone board. Showers join
+// the screen with their own phase.
 //
 // Growth is read from `GET /api/growth`, never from the `profile` frame: P2-05
 // made that frame a signal, not data, so a measurement bumps `careSeq` and this
@@ -24,6 +24,7 @@ import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
 import { NetworkError, requestJson } from "../client.js";
 import { chartGeometry, formatKg, measurementRows, windowLabel } from "../growth-chart.js";
+import { Milestones } from "./milestones.js";
 import { changedFields, draftOf, emptyDraft, isNewer, pendingSave, sameHousehold } from "../profile-form.js";
 import { subscribe } from "../store.js";
 
@@ -33,6 +34,25 @@ const CONFLICT_MESSAGE =
   "Someone else changed this profile. Your edits are kept below; saving again replaces their change.";
 
 const EMPTY_LOG = { weightKg: "", heightCm: "", note: "" };
+
+/**
+ * One read of a care view for this screen: the 401 and error branches live
+ * here, so growth, the board and P3-07's shower history do not each grow a copy.
+ * Returns the outcome; the caller applies it (and owns its sequence guard).
+ */
+async function readCareView(request, path, label) {
+  try {
+    const result = await request(path);
+    if (result.status === 401) return { kind: "error", message: "Please sign in again." };
+    if (!result.ok) return { kind: "error", message: `Could not load the ${label}. Try again in a moment.` };
+    return { kind: "loaded", body: result.body };
+  } catch (error) {
+    return {
+      kind: "error",
+      message: error instanceof NetworkError ? error.message : `Could not load the ${label}.`,
+    };
+  }
+}
 
 /**
  * The chart: points and segments only, no smoothing. A segment longer than a
@@ -105,6 +125,9 @@ export class Pup extends Component {
     /** The committed growth view from `GET /api/growth`; `null` until read. */
     growth: null,
     growthError: null,
+    /** The committed milestone board from `GET /api/training`; `null` until read. */
+    training: null,
+    trainingError: null,
     /** The last `careSeq` this screen re-read for (P2-05's signal). */
     seenCare: 0,
     draft: emptyDraft(),
@@ -133,6 +156,7 @@ export class Pup extends Component {
     this.unsubscribe = subscribe((state) => this.onStore(state));
     void this.load();
     void this.loadGrowth();
+    void this.loadTraining();
   }
 
   componentWillUnmount() {
@@ -163,33 +187,43 @@ export class Pup extends Component {
    */
   async loadGrowth() {
     const seq = (this.growthSeq = (this.growthSeq ?? 0) + 1);
-    try {
-      const result = await this.request("/api/growth");
-      if (seq !== this.growthSeq) return "superseded";
-      if (result.status === 401) {
-        this.setState({ growthError: "Please sign in again." });
-        return "refused";
-      }
-      if (!result.ok) {
-        this.setState({ growthError: "Could not load the measurements. Try again in a moment." });
-        return "refused";
-      }
-      this.setState({ growth: result.body, growthError: null });
-      return "loaded";
-    } catch (error) {
-      if (seq === this.growthSeq) {
-        this.setState({
-          growthError: error instanceof NetworkError ? error.message : "Could not load the measurements.",
-        });
-      }
-      return "failed";
+    const outcome = await readCareView(this.request, "/api/growth", "measurements");
+    if (seq !== this.growthSeq) return "superseded";
+    if (outcome.kind === "error") {
+      this.setState({ growthError: outcome.message });
+      return "refused";
     }
+    this.setState({ growth: outcome.body, growthError: null });
+    return "loaded";
+  }
+
+  /** The milestone board, re-read on the care signal like the growth chart. */
+  async loadTraining() {
+    const seq = (this.trainingSeq = (this.trainingSeq ?? 0) + 1);
+    const outcome = await readCareView(this.request, "/api/training", "milestone board");
+    if (seq !== this.trainingSeq) return "superseded";
+    if (outcome.kind === "error") {
+      this.setState({ trainingError: outcome.message });
+      return "refused";
+    }
+    this.setState({ training: outcome.body.milestones, trainingError: null });
+    return "loaded";
+  }
+
+  /**
+   * Adopt a committed board (a write's answer). It outranks any read that is
+   * still in flight: without the bump, that read would land later with the
+   * pre-write board.
+   */
+  applyBoard(rows) {
+    this.trainingSeq = (this.trainingSeq ?? 0) + 1;
+    this.setState({ training: rows, trainingError: null });
   }
 
   /**
    * A frame from `live.js`. The shell re-renders the tree on every store change,
-   * so this only has to keep the draft in step — and to re-read the growth the
-   * frame only signals.
+   * so this only has to keep the draft in step — and to re-read the growth and
+   * the milestone board the frame only signals.
    *
    * Two kinds of change arrive on this one frame: a profile edit (the revision
    * moves) and a household change (a partner joined, the timezone changed, the
@@ -203,6 +237,7 @@ export class Pup extends Component {
     if (seq !== this.state.seenCare) {
       this.setState({ seenCare: seq });
       void this.loadGrowth();
+      void this.loadTraining();
     }
 
     const incoming = state.profile;
@@ -387,8 +422,22 @@ export class Pup extends Component {
   };
 
   render() {
-    const { profile, growth, growthError, draft, busy, error, message, conflict, log, logBusy, logError, logMessage } =
-      this.state;
+    const {
+      profile,
+      growth,
+      growthError,
+      training,
+      trainingError,
+      draft,
+      busy,
+      error,
+      message,
+      conflict,
+      log,
+      logBusy,
+      logError,
+      logMessage,
+    } = this.state;
 
     if (profile === null) {
       return html`
@@ -589,6 +638,14 @@ export class Pup extends Component {
             </div>
           </form>
         </section>
+
+        ${html`<${Milestones}
+          rows=${training}
+          error=${trainingError}
+          timezone=${profile.household.timezone}
+          request=${this.request}
+          onRows=${(rows) => this.applyBoard(rows)}
+        />`}
       </section>
     `;
   }

@@ -286,7 +286,7 @@ test("a status change is one commit: the state, one activity line and the key", 
   });
 });
 
-test("practising, mastery and its undo are three real commits with who and when", async () => {
+test("practicing, mastery and its undo are three real commits with who and when", async () => {
   await withTrainingHarness(async (opened) => {
     const start = await updateMilestone(opened.harness, context, {
       actor: alex,
@@ -297,7 +297,7 @@ test("practising, mastery and its undo are three real commits with who and when"
       now: NOON,
     });
     assert.equal(start.kind, "updated");
-    assert.equal(start.state.masteredAt, undefined, "practising is not mastered");
+    assert.equal(start.state.masteredAt, undefined, "practicing is not mastered");
 
     const later = new Date(NOON.getTime() + 60_000);
     const done = await updateMilestone(opened.harness, context, {
@@ -323,9 +323,9 @@ test("practising, mastery and its undo are three real commits with who and when"
     assert.equal(undo.state.masteredAt, undefined, "an undo leaves no 'done at' behind");
     assert.equal((await readTraining(opened.harness, context)).states.length, 1, "one state per milestone");
     assert.deepEqual(await activity(opened.harness), [
-      'Alex started practising "Sit"',
+      'Alex started practicing "Sit"',
       'Alex marked "Sit" mastered',
-      'Alex started practising "Sit"',
+      'Alex started practicing "Sit"',
     ]);
   });
 });
@@ -368,7 +368,7 @@ test("a note is set, kept across a status change, and cleared as its own commit"
     assert.equal(cleared.state.note, undefined);
     assert.deepEqual(await activity(opened.harness), [
       'Alex added a note to "Sit"',
-      'Alex started practising "Sit"',
+      'Alex started practicing "Sit"',
       'Alex cleared the note on "Sit"',
     ]);
   });
@@ -535,7 +535,7 @@ test("an empty change is refused, and a replay returns the recorded state", asyn
         source: "ui",
       now: NOON,
       }),
-      (error: unknown) => error instanceof Error && error.message === MILESTONE_RULE,
+      (error: unknown) => error instanceof Error && error.message === MILESTONE_NOOP_RULE,
     );
 
     const first = await updateMilestone(opened.harness, context, {
@@ -644,7 +644,7 @@ test("a caregiver the household does not carry writes as the household fallback"
     assert.equal(outcome.kind, "updated");
     assert.equal(outcome.state.byUserId, null);
     assert.equal(outcome.state.byLabel, "Household");
-    assert.deepEqual(await activity(opened.harness), ['Household started practising "Sit"']);
+    assert.deepEqual(await activity(opened.harness), ['Household started practicing "Sit"']);
   });
 });
 

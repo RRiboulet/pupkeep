@@ -29,6 +29,9 @@
 //   POST /api/walks/discard      discard a stale walk (Idempotency-Key)
 //   GET  /api/growth             the measurement series, the trend and its copy
 //   POST /api/growth             log a weight (Idempotency-Key)
+//   GET  /api/training           the milestone board
+//   POST /api/training/milestone    set a milestone's status and/or note (Idempotency-Key)
+//   POST /api/training/custom    add a milestone of the household's own (Idempotency-Key)
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -45,6 +48,7 @@
 //     and guessing them is met by an IP rate limit (§14.2).
 
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
+import { isMilestoneStatus } from "../shared/training.ts";
 import type { AgentEvent } from "@earendil-works/pi-durable";
 import { HOUSEHOLD_FALLBACK_LABEL, THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
 import {
@@ -86,6 +90,14 @@ import {
 import { updateHouseholdTimezone } from "./domain/household.ts";
 import { readProfile, updatePuppyProfile } from "./domain/profile.ts";
 import { logMeasurement, readGrowthView, type MeasurementOutcome } from "./domain/growth.ts";
+import {
+  MilestoneUnknownError,
+  addCustomMilestone,
+  readTrainingView,
+  updateMilestone,
+  type CustomMilestoneOutcome,
+  type MilestoneUpdateOutcome,
+} from "./domain/training.ts";
 import {
   ThreadUnavailableError,
   labelFor,
@@ -504,6 +516,22 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/training" && req.method === "GET") {
+      requireCare(session);
+      await handleTrainingRead(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/training/milestone" && req.method === "POST") {
+      await handleMilestoneUpdate(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/training/custom" && req.method === "POST") {
+      await handleCustomMilestone(deps, req, res, requireCare(session));
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
@@ -512,7 +540,8 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
         "the timezone PATCH /api/household, the meal schedule PATCH /api/feeding/slots, " +
         "today's meals GET /api/feeding/day, POST /api/feeding/fed, POST /api/feeding/extra, " +
         "walks GET /api/walks, POST /api/walks/start, POST /api/walks/end, POST /api/walks/discard, " +
-        "and growth GET /api/growth, POST /api/growth",
+        "growth GET /api/growth, POST /api/growth, " +
+        "and milestones GET /api/training, POST /api/training/milestone, POST /api/training/custom",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -1257,6 +1286,127 @@ async function handleGrowthWrite(
   // series the answer carries are derived from the same instant (§8.4).
   const growth = await readGrowthView(deps.thread.harness, deps.thread.context, now);
   sendJson(res, 200, { growth, replayed: outcome.kind === "replayed" });
+}
+
+// --- milestones (P3-05) ------------------------------------------------------
+
+/**
+ * The board. This is the Pup screen's **live read**: the `profile` frame is a
+ * signal, not data (P2-05), so a milestone change bumps `careSeq` and the screen
+ * re-reads here — the same rule as growth and the day's meals.
+ */
+async function handleTrainingRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  sendJson(res, 200, { milestones: await readTrainingView(deps.thread.harness, deps.thread.context) });
+}
+
+/**
+ * One milestone's status and/or note. `note` is deliberately **absent-vs-null**
+ * sensitive here and nowhere else: absent keeps the note, `null` or "" clears it
+ * (the feed and measurement parsers collapse null to absent, which would make
+ * "clear the note" silently a no-op).
+ */
+function parseMilestoneBody(raw: unknown): {
+  milestoneId: string;
+  status?: "not_started" | "practicing" | "mastered";
+  note?: string | null;
+} {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a milestone change is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["milestoneId", "status", "note"]);
+  if (typeof record.milestoneId !== "string" || record.milestoneId.trim() === "") {
+    throw new ConflictError("a milestone change needs the milestone's id");
+  }
+  if (record.status !== undefined && !isMilestoneStatus(record.status)) {
+    throw new ConflictError("a status is not_started, practicing or mastered");
+  }
+  if (record.note !== undefined && record.note !== null && typeof record.note !== "string") {
+    throw new ConflictError("the note is text");
+  }
+  return {
+    milestoneId: record.milestoneId.trim(),
+    ...(record.status !== undefined ? { status: record.status as "not_started" | "practicing" | "mastered" } : {}),
+    // Keep the distinction: `undefined` = absent, `null` = clear.
+    ...(record.note !== undefined ? { note: record.note as string | null } : {}),
+  };
+}
+
+/**
+ * Change one milestone. A status change and a note change share the writer; an
+ * unknown milestone is a 409 that carries the current board, so the screen can
+ * re-render instead of guessing what is missing.
+ */
+async function handleMilestoneUpdate(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = parseMilestoneBody(await readJsonBody(req));
+  const now = new Date(deps.now?.() ?? Date.now());
+
+  let outcome: MilestoneUpdateOutcome;
+  try {
+    outcome = await updateMilestone(deps.thread.harness, deps.thread.context, {
+      actor: careActor(session),
+      actionId: `http:${key}`,
+      milestoneId: body.milestoneId,
+      ...(body.status !== undefined ? { status: body.status } : {}),
+      ...(body.note !== undefined ? { note: body.note } : {}),
+      source: "ui",
+      now,
+    });
+  } catch (error) {
+    if (!(error instanceof MilestoneUnknownError)) throw error;
+    sendJson(res, 409, {
+      error: error.message,
+      milestones: await readTrainingView(deps.thread.harness, deps.thread.context),
+    });
+    return;
+  }
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  sendJson(res, 200, {
+    milestones: await readTrainingView(deps.thread.harness, deps.thread.context),
+    replayed: outcome.kind === "replayed",
+  });
+}
+
+/** Add a milestone of the household's own. */
+async function handleCustomMilestone(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a milestone is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["title"]);
+  if (typeof record.title !== "string") throw new ConflictError("a milestone needs a title");
+
+  const outcome: CustomMilestoneOutcome = await addCustomMilestone(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    title: record.title,
+    source: "ui",
+    now: new Date(deps.now?.() ?? Date.now()),
+  });
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  sendJson(res, 200, {
+    milestones: await readTrainingView(deps.thread.harness, deps.thread.context),
+    replayed: outcome.kind === "replayed",
+  });
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

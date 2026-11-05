@@ -298,7 +298,7 @@ export type MilestoneCatalogEntry = { id: string; title: string };
  * actually touched have a record; an untouched one reads as `not_started`.
  *
  * `masteredAt` exists **iff** the status is `mastered` (a parser invariant): a
- * milestone cannot stay "done at" while it is practising, and undoing is a real
+ * milestone cannot stay "done at" while it is practicing, and undoing is a real
  * commit — the activity feed keeps who un-did it and when, so nothing is
  * silently deleted.
  */

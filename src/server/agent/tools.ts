@@ -34,17 +34,20 @@ import { readFeeding } from "../domain/feeding.ts";
 import { WalksUnavailableError, readWalks } from "../domain/walks.ts";
 import { openWalk } from "../../shared/walks.ts";
 import { readProfile, updatePuppyProfile } from "../domain/profile.ts";
-import { readGrowth } from "../domain/growth.ts";
 import { growthSeries } from "../../shared/growth.ts";
 import { growthSummary } from "../../shared/growth-trend.ts";
 import { localTimeAt } from "../domain/time.ts";
 import { feedingDayText } from "./feed-text.ts";
 import { latestWeightText } from "./growth-text.ts";
+import { milestoneSummaryText } from "./training-text.ts";
+import { TrainingUnavailableError, readTrainingView } from "../domain/training.ts";
+import { GrowthUnavailableError, readGrowth } from "../domain/growth.ts";
 import { openWalkText } from "./walk-text.ts";
 import { refused, speakerSeam, text } from "./tool-kit.ts";
 
+
 /** §10.1 sections this build does not track yet. Remove one per phase. */
-const NOT_TRACKED = ["milestones", "appointments", "showers"] as const;
+const NOT_TRACKED = ["appointments", "showers"] as const;
 
 /**
  * The name and breed are caregiver free text, so they are rendered as JSON
@@ -89,8 +92,8 @@ export function createProfileTools(): Extension<ToolRegistration> {
     name: "get_context",
     description:
       "Read the current household state: now, the household-local date, the caregivers, the puppy profile and age, " +
-      "today's meals and who fed each, the open walk, the latest weight, and recent activity. Sections this build " +
-      "does not track are listed in the answer; say so instead of guessing.",
+      "today's meals and who fed each, the open walk, the latest weight, the milestone summary, and recent " +
+      "activity. Sections this build does not track are listed in the answer; say so instead of guessing.",
     parameters: Type.Object({}),
     execute: async (_args, api, context) => {
       const now = new Date(api.now());
@@ -105,7 +108,28 @@ export function createProfileTools(): Extension<ToolRegistration> {
       }
       // §10.1's latest weight, from the committed series; the trend state says
       // whether "latest" is also "current".
-      const growthPoints = growthSeries(await readGrowth(api, context));
+      // One unreadable document must not cost the model every other section —
+      // and it must not become a false "none logged yet" either.
+      let latestWeight = "Latest weight: unavailable (retry after boot)";
+      try {
+        const growthPoints = growthSeries(await readGrowth(api, context));
+        latestWeight = latestWeightText(
+          growthPoints,
+          growthSummary({
+            points: growthPoints,
+            today: profile.today,
+            targetWeightKg: profile.puppy.targetWeightKg,
+          }).state,
+        );
+      } catch (error) {
+        if (!(error instanceof GrowthUnavailableError)) throw error;
+      }
+      let milestones = "Milestones: unavailable (retry after boot)";
+      try {
+        milestones = milestoneSummaryText(await readTrainingView(api, context));
+      } catch (error) {
+        if (!(error instanceof TrainingUnavailableError)) throw error;
+      }
       const activity = await api.snapshot(ActivityDoc, context);
       const parsed = activity === undefined ? undefined : parseActivity(activity);
       // Names are free text too (an invite's display name), so they get the
@@ -131,14 +155,9 @@ export function createProfileTools(): Extension<ToolRegistration> {
           walkLine,
           // §10.1's latest weight; P3-02's state rides along so "latest" is
           // never reported as "current" when the series is stale.
-          latestWeightText(
-            growthPoints,
-            growthSummary({
-              points: growthPoints,
-              today: profile.today,
-              targetWeightKg: profile.puppy.targetWeightKg,
-            }).state,
-          ),
+          latestWeight,
+          // §10.1's milestone summary: counts and what is being practised.
+          milestones,
           `Recent activity:\n${activityText(parsed ? recentActivity(parsed, 10) : [])}`,
           `Not tracked by this build yet: ${NOT_TRACKED.join(", ")}`,
         ].join("\n"),

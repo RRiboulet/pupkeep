@@ -1245,6 +1245,7 @@ changes rarely.
 | `log_measurement` | low | Weight/height; actionId dedupe |
 | `log_shower` | low | Date/notes; actionId dedupe |
 | `update_milestone` | low | Status/note; records who/when; actionId dedupe |
+| `add_milestone` | low | A milestone of the household's own; unique title; actionId dedupe (P3-05) |
 | `create_appointment` | low | Creates appointment + **system-conversation-owned** reminder tasks in one commit |
 | `update_appointment` | low/medium | Revision check; creates new reminder tasks, old tasks no-op |
 | `update_puppy_profile` | low/medium | Name/breed/birthday/target weight |
@@ -1509,7 +1510,9 @@ displayed but not pushed in v1.
    - Profile (name, birthday, breed, sex, target weight).
    - Growth chart, 7/14/30-day trend, target progress, deterministic advice with
      disclaimer.
-   - Milestone board with status.
+   - Milestone board with status, a status/note change per row, and the
+     household's own milestones (P3-05). The starter list is a checklist, not a
+     schedule.
    - Shower history + next due.
 
 4. **Agent**
@@ -3439,7 +3442,7 @@ process kill; both clients see the same state; the partner notification
       accepted** and hidden from the board), the board (catalog order, untouched
       as not_started, custom last, counts), the document parser (schema, instant,
       malformed) and `emptyTraining`; then the service over a real harness: one
-      commit (state + activity + key), practising → mastered → undone as three
+      commit (state + activity + key), practicing → mastered → undone as three
       real commits with `masteredAt` set and cleared, notes set/kept/cleared with
       their own summaries, an unknown milestone refused with nothing written and
       no key burnt, an empty and a no-op change refused (a clear with no note),
@@ -3462,10 +3465,103 @@ process kill; both clients see the same state; the partner notification
       cell is last-write-wins with its own who/when, and both events stay in the
       activity feed (a deliberate deviation from §7.4's compare-and-swap, which
       protects a read-modify-write payload this document does not have).
-- [ ] **P3-05** Milestone HTTP + agent tools + UI board.
+- [x] **P3-05** Milestone HTTP + agent tools + UI board. **Landed:**
+      `GET /api/training` (the committed board), `POST /api/training/milestone`
+      (status and/or note, Idempotency-Key) and `POST /api/training/custom` (a
+      milestone of the household's own) in `src/server/http.ts`;
+      `list_milestones`, `update_milestone` and `add_milestone` in
+      `src/server/agent/training-tools.ts` with `training-text.ts` for the
+      model-facing copy; `get_context` now reports the milestone summary and no
+      longer lists milestones as untracked; `web/training.js` (pure helpers:
+      grouping, the update bodies, the row meta) and `web/views/milestones.js`
+      (the board: grouped by status, per-row status buttons and a note form, an
+      "add a milestone" form), mounted on the Pup screen and re-read on the care
+      signal like the growth chart; both client modules are precached
+      (VERSION v6). The plan's tool names are used; the task text's
+      `complete_milestone` is `update_milestone { status: "mastered" }`.
+      Decisions: (1) **the update body keeps `null` (clear) apart from an absent
+      note (keep)**, unlike the feed and measurement parsers, which collapse
+      `null` to absent: for a milestone a note is independently editable, and an
+      absent note would silently wipe it on every status change. The tool has no
+      way to send `null` through an optional string, so **an empty note means
+      clear** and its schema says so. (2) **one route serves status and note**:
+      P3-04's writer already takes both, so "mark mastered", "undo", "add a
+      note" and "clear it" are one endpoint and one commit each; a separate
+      add-custom route exists because adding creates a milestone rather than
+      changing one. (3) **the board is a live read on the care signal**, never
+      frame data (P2-05, as for growth): `app.training` is in `PROFILE_KINDS`,
+      a commit bumps `careSeq`, and the screen re-reads `/api/training` with a
+      `loadSeq` guard so a slow read loses to a newer one or to a committed
+      answer. (4) **the answer is the board**: every write answers with the
+      committed rows, so the screen never merges a partial state; an unknown
+      milestone is a 409 that carries the board (the screen re-renders instead
+      of guessing). (5) **a row's idempotency key is held with its body**
+      (`pendingSave`), and only one action per board runs at a time, so a lost
+      response retried with the same body replays and a double tap cannot change
+      a milestone twice. (6) **Gate G3's claim is a test**: the route and the
+      tool change the same document through the same writer and read the same
+      board; the test asserts the committed states (including each write's
+      `source: "ui"` / `"agent"`) and that the board the route serves equals the
+      one the tool quotes. (7) **the board is keyboard reachable by construction**
+      (native buttons and inputs in a `<fieldset>`, the current status
+      `aria-pressed` and disabled) and the loading/status line is
+      `role="status"`.
+      **Verified:** 15 new tests — `test/training-routes.test.ts` (the board and
+      `no-store`, one-commit status changes with the board in the answer, replay
+      vs key conflict, notes set by text / kept by an absent key / cleared by an
+      explicit `null`, an unknown milestone's 409 carrying the board, a no-op
+      clear refused, a custom milestone and a duplicate title refused, the
+      mutation guards and an unknown status refused without a write, **Gate G3**
+      in two parts — route and tool change one document and read one board with
+      each write's `source`, and the *same* input through both surfaces produces
+      the same committed state apart from provenance — and a tool refusal for an
+      unknown id); `test/training-tools.test.ts`
+      (`list_milestones` grouped with ids, notes and titles quoted; an update as
+      the household fallback with the memo, replay, the `tool:` action id and
+      `source: "agent"`; an empty note clearing; a custom entry added, mastered
+      and a duplicate refused; `get_context`'s summary and the trimmed untracked
+      list); `test/client.test.js` (the board grouping, the request bodies'
+      absent-vs-null rule, the row meta, and the Pup screen re-reading both
+      growth and the board once per care sequence, the board lock's committed
+      answer outranking an in-flight read). The suite is 550/550 and
+      `npm run typecheck` passes.
+      **Not verified:** no browser has rendered the board (the components are
+      tested as data and via the pure helpers, not in a DOM); the note form's
+      focus/scroll behaviour and a partner's simultaneous note edit (last write
+      wins, as designed) are not exercised; the board is not in `get_context`'s
+      agent answer beyond its summary line; and no phone has shown the screen.
+      **Review fixes:** the board's dates and the model copy go through the
+      household zone (a milestone mastered at 00:30 in Paris reads as that day,
+      never as the stored UTC date); a committed board answer invalidates an
+      in-flight read, so a slow GET cannot land after a write; the
+      unknown-milestone 409's board is actually adopted by the screen; the
+      `get_context` sections catch their **own** unavailable class (and growth
+      gained the same guard); the status triple and its labels are derived from
+      one place per layer; one spelling ("practicing"); the note cap is imported;
+      the board-text bound was restored with correct placement (no heading with
+      zero rows) and a pure test; `get_context` reports an unreadable growth
+      document as "unavailable", never as "none logged yet"; the model answer
+      prints the domain's own change sentence, so a note-only edit is not
+      reported as a status change; the board runs **one action at a time** (a
+      board-wide lock, so two commits cannot race and regress the board), a
+      status click no longer discards a typed note draft, a committed change is
+      announced in the `role="status"` region, a fresh row clears a stale
+      refusal, and the client caps live in one client-side module; and the route
+      is named for its action (`/api/training/milestone`). The loader's 401/error
+      branches are one helper shared by growth and the board, so P3-07 does not
+      make a third copy.
 - [ ] **P3-06** `app.showers` doc/service: log, history, next due.
-- [ ] **P3-07** Shower HTTP + agent tools + UI.
+- [ ] **P3-07** Shower HTTP + agent tools + UI. **Carried out of P3-05:** the
+      shower history is unbounded, so unlike the milestone board a write answer
+      must not adopt the whole collection — re-read the history instead (P5-07
+      is measuring exactly this growth). Reuse the Pup screen's `readCareView`
+      loader and its `loadSeq`/`careSeq` pattern; the per-row editor is not the
+      shape to copy (showers are append-only history plus a log form).
 - [ ] **P3-08** Tests: trend fixtures, milestone attribution, shower interval.
+      **Carried out of P3-05:** the app/tool fixtures (`startApp` + `toolApi`)
+      are now copied verbatim in the feed, walk, growth and training test files;
+      P3-08 should extract them into a `test/support/` helper rather than add a
+      fifth copy.
 
 **Gate G3:** UI and agent produce identical domain results; all logs attributed.
 

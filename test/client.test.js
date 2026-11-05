@@ -26,6 +26,7 @@ const { getState, setState } = await import("../web/store.js");
 const { changedFields, draftOf, isNewer, pendingSave, wireOf } = await import("../web/profile-form.js");
 const { CHART_SIZE, chartGeometry, daysBetweenLocalDates, formatKg, measurementRows, windowLabel } =
   await import("../web/growth-chart.js");
+const { boardGroups, customMilestone, noteUpdate, rowMetaText, statusUpdate } = await import("../web/training.js");
 
 function profileOf({
   rev = 1,
@@ -938,29 +939,107 @@ test("the table carries the numbers, newest first, in the stored units", () => {
   assert.equal(formatKg(4), "4 kg");
 });
 
-test("the Pup screen re-reads growth on a care signal instead of trusting the frame", async () => {
+test("the Pup screen re-reads growth and the board on a care signal instead of trusting the frame", async () => {
   const views = [];
   const pup = new Pup({
     request: async (path) => {
       views.push(path);
-      return { status: 200, ok: true, body: { points: [], summary: { state: "no_data" }, lines: [] } };
+      if (path === "/api/growth") {
+        return { status: 200, ok: true, body: { points: [], summary: { state: "no_data" }, lines: [] } };
+      }
+      return { status: 200, ok: true, body: { milestones: [] } };
     },
   });
   pup.state = { ...pup.state, profile: profileOf(), seenCare: 0 };
   pup.setState = (patch) => Object.assign(pup.state, patch);
 
-  // The same care sequence twice: one read, not two.
+  // The same care sequence twice: one read of each, not two.
   pup.onStore({ profile: profileOf(), careSeq: 3 });
   await new Promise((resolve) => setTimeout(resolve, 10));
   pup.onStore({ profile: profileOf(), careSeq: 3 });
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(views, ["/api/growth"]);
+  assert.deepEqual(views.sort(), ["/api/growth", "/api/training"]);
   assert.deepEqual(pup.state.growth, { points: [], summary: { state: "no_data" }, lines: [] });
+  assert.deepEqual(pup.state.training, []);
 
-  // A new sequence means a measurement (or another care commit): read again.
+  // A new sequence means a care commit: read both again.
   pup.onStore({ profile: profileOf(), careSeq: 4 });
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(views, ["/api/growth", "/api/growth"]);
+  assert.equal(views.length, 4);
+  assert.equal(views.filter((path) => path === "/api/training").length, 2);
+});
+
+test("a committed board answer outranks a read that was in flight", async () => {
+  let releaseRead;
+  let reads = 0;
+  const pup = new Pup({
+    request: async (path) => {
+      if (path === "/api/growth") return { status: 200, ok: true, body: { points: [], summary: {}, lines: [] } };
+      reads += 1;
+      if (reads === 1) {
+        return new Promise((resolve) => {
+          releaseRead = () => resolve({ status: 200, ok: true, body: { milestones: [{ id: "stale" }] } });
+        });
+      }
+      return { status: 200, ok: true, body: { milestones: [{ id: "fresh" }] } };
+    },
+  });
+  pup.setState = (patch) => Object.assign(pup.state, patch);
+
+  const inFlight = pup.loadTraining();
+  // A write commits while the read is out: the component's own `applyBoard`
+  // adopts the answer, and the read must not land on top of it.
+  pup.applyBoard([{ id: "committed" }]);
+  releaseRead();
+  assert.equal(await inFlight, "superseded");
+  assert.deepEqual(pup.state.training, [{ id: "committed" }], "the stale read never lands");
+});
+
+test("the board groups by status and the request bodies keep absent apart from null", () => {
+  const rows = [
+    { id: "catalog:sit", title: "Sit", origin: "catalog", status: "mastered", masteredAt: "2026-10-29T10:00:00.000Z", byLabel: "Alex" },
+    {
+      id: "custom:roll",
+      title: "Roll over",
+      origin: "custom",
+      status: "practicing",
+      note: "still wobbly",
+      updatedAt: "2026-10-29T11:00:00.000Z",
+      byLabel: "Sam",
+    },
+    { id: "catalog:come", title: "Come when called", origin: "catalog", status: "not_started" },
+  ];
+  assert.deepEqual(
+    boardGroups(rows).map((group) => [group.label, group.rows.map((row) => row.title)]),
+    [
+      ["Mastered", ["Sit"]],
+      ["Practicing", ["Roll over"]],
+      ["Not started", ["Come when called"]],
+    ],
+  );
+  assert.deepEqual(boardGroups([]), [
+    { status: "mastered", label: "Mastered", rows: [] },
+    { status: "practicing", label: "Practicing", rows: [] },
+    { status: "not_started", label: "Not started", rows: [] },
+  ]);
+
+  // A status click must not send a note key: absent means "keep the note".
+  assert.deepEqual(statusUpdate(rows[0], "practicing"), { milestoneId: "catalog:sit", status: "practicing" });
+  // An empty note is an explicit clear (null), never an absent key.
+  assert.deepEqual(noteUpdate(rows[1], "  "), { milestoneId: "custom:roll", note: null });
+  assert.deepEqual(noteUpdate(rows[1], " sits now "), { milestoneId: "custom:roll", note: "sits now" });
+  assert.deepEqual(customMilestone("  Spin  "), { title: "Spin" });
+
+  // The one line under a row, in the household zone: 22:30Z on 29 October is
+  // already 30 October in Paris, and the board must say so (never the UTC date).
+  assert.equal(rowMetaText(rows[0], "Europe/Paris"), "mastered 2026-10-29 11:00 by Alex");
+  assert.equal(
+    rowMetaText({ ...rows[0], masteredAt: "2026-10-29T23:30:00.000Z" }, "Europe/Paris"),
+    "mastered 2026-10-30 00:30 by Alex",
+    "23:30Z is the next day in Paris",
+  );
+  assert.equal(rowMetaText(rows[1], "Europe/Paris"), "changed 2026-10-29 12:00 by Sam");
+  assert.equal(rowMetaText(rows[2], "Europe/Paris"), "");
 });
 
 test("a slow growth read never overwrites a newer one", async () => {
