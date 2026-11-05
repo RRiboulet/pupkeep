@@ -3212,13 +3212,104 @@ process kill; both clients see the same state; the partner notification
       logged a measurement from a browser or the model yet; the trend windows,
       advice copy and target progress are P3-02; nothing prunes growth history
       (P5-07 measures it, as for feeds and walks); and no phone has run it.
-- [ ] **P3-02** Trend/advice rules: 7/14/30-day, weight loss, rapid gain, stale,
+- [x] **P3-02** Trend/advice rules: 7/14/30-day, weight loss, rapid gain, stale,
       target; disclaimers; tests. **Carried out of P3-01:** the windows read
       `growthSeries` (one point per household-local day, the day's latest
       measurement); "no measurement in N days" is a *date* question on that
       series, not `latestMeasurement()`'s instant question — after a timezone
       change the two can disagree, and the stale rule must not.
-- [ ] **P3-03** Growth HTTP + agent tools + UI chart.
+      **Landed:** `src/shared/growth-trend.ts` — `growthSummary` (the headline
+      state and its one sentence, the headline pair, the chart slices, the target
+      distance and the disclaimer), `growthWindow`, `targetProgress` and
+      `growthSummaryText`, the one text rendering `get_growth` and the panel will
+      share. `src/shared/dates.ts` is new: `daysBetween`/`dateMinusDays` moved
+      out of `server/domain/time.ts`, which now imports them, so the shared view
+      and the server use one date arithmetic. Thresholds: loss ≥2% of body
+      weight, a large gain ≥10%, stale after 10 household-local days, and a pair
+      closer than 3 days is not a trend. Nothing is stored: the summary is
+      derived on read, and `today` is an argument (the route passes
+      `localDateAt`), so the same summary feeds the route, the tool and the
+      tests.
+      Decisions: (1) **the headline is a pair of real readings, never a slice
+      label.** It compares the oldest reading of the 14-day slice (§1.2's own
+      example) with the latest, and falls back to the last two readings when
+      that slice holds fewer than two — so a household that weighs monthly gets
+      "over 30 days", not a self-contradicting "only 30 days apart; a trend
+      needs 3". Every sentence names the span it actually compared. (2) **the
+      7/14/30-day slices are chart data, not the trend**: a slice is the last N
+      calendar dates including today, it carries its own comparison and an
+      honest reason (`no_readings`/`one_reading`/`too_short`) for P3-03, and no
+      copy is built from it — a second, quieter sentence about the same weights
+      is how the copy and the headline drift apart. (3) **a reading dated after
+      today is not part of a trend as of today.** A clock jump or a westward
+      zone change can leave a future `localDate` in the document; it stays
+      there, becomes visible when its day arrives, and cannot become the
+      "current" weight, stretch a span or mask a stale series meanwhile. (4)
+      **the classified number is the printed number**: the percentage is rounded
+      to the tenth the copy shows *before* the threshold is applied, so no
+      sentence prints "10.0%" without the large-step warning or "2.0%" while
+      being called steady. (5) **stale outranks the numbers**, and it is a date
+      question on the series: a flat line whose last reading is ten days old is
+      stale, never "steady". The summary's `headline` is `null` unless the note
+      is about a pair, so a panel cannot highlight a comparison the copy does
+      not make. (6) **the copy states arithmetic, and at most one action.** Loss
+      is "Worth a vet call" — the plan's example wording; a large gain is a
+      *measurement* warning ("re-weigh on the same scale") because a
+      fast-growing puppy is normal and a single jump is as likely to be a unit
+      slip; steady and gaining carry no action; two recent readings closer than
+      three days are `too_short` even when the series holds a much older change
+      (the headline is the recent trend; the chart still shows the history). No
+      ranges, doses, diagnoses, "should", or comparisons to breed curves: the
+      product has no age/breed model, so it does not pretend to one. (7) **the
+      disclaimer is a constant in every summary and in every rendering**
+      (§1.2's "always marked as non-veterinary"), and its exact wording is
+      asserted so a rewrite to clinical text cannot pass the suite; the P3-02
+      task text's "§14.6" does not exist — the requirement is §1.2/§9.5. (8) **the
+      target remains `app.puppy`'s field**: `targetProgress` reports the
+      remaining distance (never negative) and `reached` at `>=`, and is `null`
+      without a reading or a numeric target. (9) **the browser does not share
+      this module.** `web/` is plain JS and imports nothing from `src/shared/`;
+      the sharing is route + agent tool + tests, and the panel renders what the
+      route ships (P3-03 decides whether it needs a duplicated display rule, as
+      `web/meals.js` did for "overdue"). A summary is computed at fetch time, so
+      a screen left open overnight shows yesterday's day count until it
+      refetches — a P3-03 concern, recorded there.
+      **Verified:** 16 new tests in `test/growth-trend.test.ts` — loss at exactly
+      2.0% and at 1.94% (with the printed-2.0% case, 4.901 kg, classified as a
+      loss); gain at 2.0% with no advice, at 9.9% and at exactly 10.0%
+      (large-step copy, no vet copy); steady; stale at exactly 10 days and not
+      at 9 (the same flat pair becoming "steady"); staleness decided by the
+      series' dates rather than the latest instant; no history / one reading /
+      one day / two days / three days of span as distinct states; a monthly
+      30-day pair as a 30-day comparison (the reviewer's reachable defect); a
+      future-dated reading kept out of the trend and unable to fake a current
+      weight or suppress staleness; the headline preferring the 14-day slice and
+      falling back to the last two readings; the slice semantics (last N
+      calendar dates, real span, `no_readings`/`one_reading`/`too_short`, the
+      29-day-vs-30-day edge, future points excluded); the `too_short` headline
+      still offering its pair; target distance, reached (including past the
+      target) and the null cases; the rendering as exactly note + target +
+      disclaimer; the literal disclaimer wording; a bad `today` failing with the
+      value; and a guardrail sweep over the note *and* the full rendering of
+      every state, asserting no dose/dosage, range, diagnosis, "should",
+      "treat", "urgent", "emergency", "diet", "calorie", "normal"/"abnormal" or
+      "healthy". The suite is 498/498 and `npm run typecheck` passes.
+      **Not verified:** no route, agent tool or UI yet (P3-03), so these
+      sentences have not been rendered in a browser or to the model; the
+      thresholds are product choices, not clinical ones — the security/release
+      reviews (P5-06, P5-09) may revisit the copy; the slices, the headline and
+      the stale rule are pinned against synthesised series, not a real logged
+      history; and no phone has shown the panel.
+
+- [ ] **P3-03** Growth HTTP + agent tools + UI chart. **Carried out of P3-02:**
+      the route ships the series (`growthSeries`) for the chart and the summary
+      text from `growthSummaryText` for the tool and the panel; the browser is
+      plain JS and does not import `src/shared/`, so displaying the slices means
+      rendering the summary's structured `windows` (or duplicating a rule, as
+      `web/meals.js` did for "overdue"). The summary is computed at fetch time,
+      so a Pup screen left open past midnight shows yesterday's stale day count
+      until it refetches — decide whether the panel refetches on visibility
+      (feeding solved the same problem by shipping `overdueAfterMin`).
 - [ ] **P3-04** `app.training` doc/service: starter milestone catalog, custom,
       status/note/who/when.
 - [ ] **P3-05** Milestone HTTP + agent tools + UI board.

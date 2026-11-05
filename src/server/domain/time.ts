@@ -8,8 +8,13 @@
 //     to construct and cheap to reuse, so one cache keyed by zone and options.
 //
 // The feeding day view (P2-01) and the walk/growth calendar (P3+) build on this
-// module; it holds the date arithmetic they and the profile (age) share.
+// module. The *calendar* arithmetic on local dates (days between two dates, a
+// date minus N days) lives in `src/shared/dates.ts`, so the pure view modules
+// can use it without importing the server; this module keeps what needs `Intl`
+// (formatting, the wall-clock conversion) plus the month arithmetic the puppy's
+// age uses.
 
+import { DAY_MS, daysBetween } from "../../shared/dates.ts";
 import type { PuppyAge } from "../../shared/profile.ts";
 import { isLocalDate } from "../../shared/profile.ts";
 import { isLocalTime } from "../../shared/feeding.ts";
@@ -53,8 +58,6 @@ export function localTimeAt(instant: Date, timezone: string): string {
   const get = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
   return `${get("hour")}:${get("minute")}`;
 }
-
-const DAY_MS = 86_400_000;
 
 /**
  * The zone's offset from UTC at one instant, in milliseconds (positive east).
@@ -126,11 +129,6 @@ export function instantAtLocalWallClock(localDate: string, timeLocal: string, ti
   // the instant one gap later on the new clock, which is the documented rule.
   const guess = wall - zoneOffsetMs(wall, timezone);
   return new Date(wall - zoneOffsetMs(guess, timezone));
-}
-
-/** Whole days from one local date to another; negative when `to` is earlier. */
-export function daysBetween(from: string, to: string): number {
-  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS);
 }
 
 /**
