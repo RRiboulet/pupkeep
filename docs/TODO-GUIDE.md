@@ -1,12 +1,14 @@
 # Todo guide — how to work the Pupkeep plan
 
-**Status:** Phase 2 is complete on its feature branch. Phase 1 is complete on
-`main` through P1-14, and G1 is covered by the suite (`test/e2e.test.ts` is the
-slice end to end, `test/setup.test.ts` the first-run setup). P2-01 through P2-08
-are on `main`; P2-09 (the feed reminder task skeleton) is on
-`feat/phase2-reminders` and closes Phase 2 once it merges — the daily planner
-and delivery stay P4-04/P4-05. P0-03/P0-08/P0-10 remain device-gated partner
-checks and do not block the host-side work.
+**Status:** Phase 3 in progress. Phase 1 is complete on `main` through P1-14,
+and G1 is covered by the suite (`test/e2e.test.ts` is the slice end to end,
+`test/setup.test.ts` the first-run setup). Phase 2 is complete on `main` through
+P2-09 (`app.feeding`, the feed service, routes, tools and UI, the walk document,
+routes, tools and UI, the durability/multiplayer tests, and the feed reminder
+task skeleton); the daily feed planner and reminder delivery stay P4-04/P4-05.
+P3-01 (`app.growth` and its service) is on `feat/phase3-growth`; the trend copy
+is P3-02. P0-03/P0-08/P0-10 remain device-gated partner checks and do not block
+the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The

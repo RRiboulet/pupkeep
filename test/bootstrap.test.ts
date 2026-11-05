@@ -97,6 +97,7 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
       "app.activity",
       "app.commands",
       "app.feeding",
+      "app.growth",
       "app.household",
       "app.notifications",
       "app.puppy",
