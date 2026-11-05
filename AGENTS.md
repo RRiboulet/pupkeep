@@ -7,16 +7,15 @@ The plan is the source of truth for product and architecture; the guide explains
 how to pick a task, branch, verify and report. Do not build app code beyond the
 current approved phase.
 
-**Current phase: Phase 3 complete** (growth, milestones, showers), through P3-08;
-Gate G3 is covered by `test/dual-path.test.ts`. Phase 1 is complete through
-P1-14 and Phase 2 through P2-09. The Phase 3 work is in flight as stacked PRs:
-P3-06 `feat/phase3-showers` (#47), P3-07 `feat/phase3-showers-surface` (#48) and
-P3-08 `feat/phase3-tests`; Phase 4 starts once those merge. G1's host-side
-criteria are covered by `test/e2e.test.ts` and `test/setup.test.ts`. The
-devcontainer is `.devcontainer/` (Node 24, pi `1.5.0`,
-sqlite3/cloudflared/rclone/tmux/gh, plus the host tools); `postCreate.sh` runs
-`npm ci`, typecheck and the tests. The shared pi package belongs in that
-container's personal settings, never in this repo's `.pi/settings.json`.
+**Current phase: Phase 4** (calendar, reminders, push, approvals). Phase 3 is
+complete on `main` through P3-08; Gate G3 is covered by
+`test/dual-path.test.ts`. Phase 1 is complete through P1-14 and Phase 2 through
+P2-09. The next task is **P4-01** (`app.calendar`). G1's host-side criteria are
+covered by `test/e2e.test.ts` and `test/setup.test.ts`. The devcontainer is
+`.devcontainer/` (Node 24, pi `1.5.0`, sqlite3/cloudflared/rclone/tmux/gh, plus
+the host tools); `postCreate.sh` runs `npm ci`, typecheck and the tests. The
+shared pi package belongs in that container's personal settings, never in this
+repo's `.pi/settings.json`.
 Phase 0 is closed by the go/no-go in PLAN §2.3, except three device-gated checks
 on the partner's iPhone — P0-03's access ones, P0-08's notification ones — which
 are carried by **P0-10** and do not block Phase 2. App code goes under `src/`,
