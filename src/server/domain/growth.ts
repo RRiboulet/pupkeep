@@ -22,7 +22,9 @@
 import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import type { JsonObject } from "@earendil-works/pi-durable";
-import type { Growth, GrowthMeasurement } from "../../shared/domain.ts";
+import type { Growth, GrowthMeasurement, Household, Puppy } from "../../shared/domain.ts";
+import { growthSeries, type GrowthView } from "../../shared/growth.ts";
+import { growthSummary, growthSummaryLines } from "../../shared/growth-trend.ts";
 import {
   MEASUREMENT_RULE,
   formatWeightKg,
@@ -35,6 +37,8 @@ import type { ActorResolver } from "./actor.ts";
 import { requestHashOf, runIdempotent, type CommandOutcome } from "./commands.ts";
 import { ActivityDoc, GrowthDoc, HouseholdDoc, parseGrowth, type DocStore } from "./docs.ts";
 import { DomainConflictError, UnavailableError } from "./errors.ts";
+import { readHousehold } from "./household.ts";
+import { readPuppy } from "./profile.ts";
 import { localDateAt } from "./time.ts";
 
 /** `app.growth` is missing or unreadable; retry once the server has booted. */
@@ -43,6 +47,35 @@ export class GrowthUnavailableError extends UnavailableError {
     super(message);
     this.name = "GrowthUnavailableError";
   }
+}
+
+/**
+ * The growth surface's one view (P3-03): the chart's committed points, P3-02's
+ * summary and its copy. Built by the route, the write answer and the agent tool
+ * alike, so the panel and the model cannot disagree about a weight or a trend.
+ *
+ * `today` is derived from the household zone (§8.4), never the host's or the
+ * device's: a tablet in another zone must see the household's day.
+ */
+export function growthView(household: Household, puppy: Puppy, growth: Growth, now: Date): GrowthView {
+  const today = localDateAt(now, household.timezone);
+  const points = growthSeries(growth);
+  const summary = growthSummary({ points, today, targetWeightKg: puppy.targetWeightKg });
+  return { points, summary, lines: growthSummaryLines(summary) };
+}
+
+/**
+ * The growth view from committed documents: the one builder behind the growth
+ * route, its write answer and the agent tool. Two extra reads, but no second
+ * implementation — the chart, the model and the tests cannot disagree.
+ */
+export async function readGrowthView(store: DocStore, context: Context, now: Date): Promise<GrowthView> {
+  const [household, puppy, growth] = await Promise.all([
+    readHousehold(store, context),
+    readPuppy(store, context),
+    readGrowth(store, context),
+  ]);
+  return growthView(household, puppy, growth, now);
 }
 
 /** The measurement history. Boot keeps the document present. */

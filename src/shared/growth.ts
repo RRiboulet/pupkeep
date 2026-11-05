@@ -33,6 +33,9 @@
 // reused key must not make `app.growth` unreadable — the service answers it.
 
 import type { Growth, GrowthMeasurement } from "./domain.ts";
+// Type-only: `growth-trend.ts` value-imports this module's formatter, so a value
+// import here would make the two halves of the view cyclic at load time.
+import type { GrowthSummary, GrowthSummaryLine } from "./growth-trend.ts";
 import { OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
 import { HOUSEHOLD_FALLBACK_LABEL } from "./chat.ts";
 import { hasControlCharacter, isLocalDate } from "./profile.ts";
@@ -299,5 +302,21 @@ export function latestMeasurement(growth: Pick<Growth, "measurements">): GrowthM
   }
   return latest;
 }
+
+/**
+ * What `GET /api/growth` and the `get_growth` tool carry (P3-03): the chart's
+ * committed points, P3-02's summary (state, note, headline, slices, target,
+ * disclaimer) and its copy as lines with roles. Built by `growthView` in
+ * `server/domain/growth.ts`. The `profile` frame does **not** carry it — P2-05
+ * made that frame a signal, so a measurement bumps `careSeq` and the Pup screen
+ * re-reads this view.
+ */
+export type GrowthView = {
+  /** `growthSeries(growth)`: one point per local date, ascending. */
+  points: GrowthPoint[];
+  summary: GrowthSummary;
+  /** The note, the target (when set) and the disclaimer, with roles. */
+  lines: GrowthSummaryLine[];
+};
 
 export type { Growth };

@@ -24,6 +24,8 @@ const { feedTimeText, localDate, localMinutes, mealClock, mealRows, mealStatus, 
 const { correctedNow, timerText, walkSeconds, walkStale, walkTimeText } = await import("../web/walks.js");
 const { getState, setState } = await import("../web/store.js");
 const { changedFields, draftOf, isNewer, pendingSave, wireOf } = await import("../web/profile-form.js");
+const { CHART_SIZE, chartGeometry, daysBetweenLocalDates, formatKg, measurementRows, windowLabel } =
+  await import("../web/growth-chart.js");
 
 function profileOf({
   rev = 1,
@@ -848,4 +850,175 @@ test("a slow walk read cannot overwrite a newer one, and a conflict clears the f
   assert.equal(conflicted.state.walkDiscardOpen, false);
   assert.deepEqual(conflicted.state.walkDraft, { pee: "", poop: "", dogsMet: "", mood: "", notes: "" });
   assert.ok(conflicted.state.walkError, "and the refusal is still shown");
+});
+
+// --- the growth chart's pure half (P3-03) --------------------------------
+
+function growthPoint(localDate, weightKg, measurementId = `m-${localDate}`) {
+  return { localDate, at: `${localDate}T09:00:00.000Z`, weightKg, measurementId };
+}
+
+test("the chart plots committed dates on a time axis, not one slot per point", () => {
+  assert.equal(chartGeometry([]), null, "an empty series draws no chart");
+
+  const { padding, width } = CHART_SIZE;
+  const one = chartGeometry([growthPoint("2026-10-29", 4.2)]);
+  assert.equal(one.dots.length, 1);
+  assert.equal(one.segments.length, 0);
+  assert.equal(
+    one.dots[0].x,
+    padding.left + (width - padding.left - padding.right) / 2,
+    "a single reading is centred, with no span to divide",
+  );
+
+  // Two readings three weeks apart: the second is at the right edge, and the
+  // first at the left. An index-based chart would put them equally spaced.
+  const wide = chartGeometry([growthPoint("2026-10-01", 4.2), growthPoint("2026-10-22", 4.9)]);
+  assert.equal(wide.dots[0].x, padding.left);
+  assert.equal(wide.dots[1].x, padding.left + (width - padding.left - padding.right));
+  assert.equal(daysBetweenLocalDates("2026-10-01", "2026-10-22"), 21);
+  assert.equal(wide.xTicks[0].label, "2026-10-01");
+  assert.equal(wide.xTicks[1].label, "2026-10-22");
+
+  // Three readings with uneven gaps: the middle dot sits 1/21 of the way
+  // across, not halfway. This is the assertion that tells a time axis from an
+  // index axis (two points cannot).
+  const uneven = chartGeometry([
+    growthPoint("2026-10-01", 4.2),
+    growthPoint("2026-10-02", 4.201),
+    growthPoint("2026-10-22", 4.202),
+  ]);
+  const plotWidth = width - padding.left - padding.right;
+  assert.ok(uneven.dots[1].x < padding.left + plotWidth / 4, "the second day is near the left edge");
+  assert.equal(uneven.dots[1].x, Math.round((padding.left + (1 / 21) * plotWidth) * 10) / 10);
+  // A gram-wide range still labels three distinct weights.
+  assert.deepEqual(uneven.yTicks.map((tick) => tick.label), ["4.202", "4.201", "4.2"]);
+});
+
+test("a trend slice is a chip label: the change, or what is missing", () => {
+  assert.equal(windowLabel({ days: 14, available: true, pct: 2.04 }), "+2.0%");
+  assert.equal(windowLabel({ days: 14, available: true, pct: -2.04 }), "-2.0%");
+  assert.equal(windowLabel({ days: 7, available: true, pct: 0 }), "0.0%");
+  assert.equal(windowLabel({ days: 7, available: false, reason: "no_readings" }), "no readings");
+  assert.equal(windowLabel({ days: 30, available: false, reason: "one_reading" }), "one reading");
+  assert.equal(windowLabel({ days: 30, available: false, reason: "too_short" }), "too few days");
+});
+
+test("a gap between measurements is marked, never drawn as an ordinary segment", () => {
+  const geometry = chartGeometry([
+    growthPoint("2026-10-21", 4.2),
+    growthPoint("2026-10-22", 4.25),
+    growthPoint("2026-10-25", 4.3),
+    growthPoint("2026-10-26", 4.35),
+  ]);
+  assert.deepEqual(
+    geometry.segments.map((segment) => segment.gap),
+    [false, true, false],
+    "only a segment crossing more than a day is a gap",
+  );
+  assert.equal(geometry.hasGaps, true);
+  // The weights rise, so the y coordinates fall: y is inverted.
+  assert.ok(geometry.dots[0].y > geometry.dots[1].y);
+  assert.equal(chartGeometry([growthPoint("2026-10-21", 4.2), growthPoint("2026-10-22", 4.3)]).hasGaps, false);
+});
+
+test("the table carries the numbers, newest first, in the stored units", () => {
+  assert.deepEqual(
+    measurementRows([
+      growthPoint("2026-10-21", 4.2),
+      { ...growthPoint("2026-10-22", 4.25), heightCm: 31.5 },
+    ]),
+    [
+      { localDate: "2026-10-22", weightKg: "4.25 kg", heightCm: "31.5 cm" },
+      { localDate: "2026-10-21", weightKg: "4.2 kg", heightCm: "" },
+    ],
+  );
+  assert.equal(formatKg(4.237), "4.237 kg");
+  assert.equal(formatKg(4.2), "4.2 kg");
+  assert.equal(formatKg(4), "4 kg");
+});
+
+test("the Pup screen re-reads growth on a care signal instead of trusting the frame", async () => {
+  const views = [];
+  const pup = new Pup({
+    request: async (path) => {
+      views.push(path);
+      return { status: 200, ok: true, body: { points: [], summary: { state: "no_data" }, lines: [] } };
+    },
+  });
+  pup.state = { ...pup.state, profile: profileOf(), seenCare: 0 };
+  pup.setState = (patch) => Object.assign(pup.state, patch);
+
+  // The same care sequence twice: one read, not two.
+  pup.onStore({ profile: profileOf(), careSeq: 3 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  pup.onStore({ profile: profileOf(), careSeq: 3 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(views, ["/api/growth"]);
+  assert.deepEqual(pup.state.growth, { points: [], summary: { state: "no_data" }, lines: [] });
+
+  // A new sequence means a measurement (or another care commit): read again.
+  pup.onStore({ profile: profileOf(), careSeq: 4 });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(views, ["/api/growth", "/api/growth"]);
+});
+
+test("a slow growth read never overwrites a newer one", async () => {
+  let releaseFirst;
+  let calls = 0;
+  const pup = new Pup({
+    request: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise((resolve) => {
+          releaseFirst = () => resolve({ status: 200, ok: true, body: { points: [], summary: {}, lines: [], tag: "old" } });
+        });
+      }
+      return { status: 200, ok: true, body: { points: [], summary: {}, lines: [], tag: "new" } };
+    },
+  });
+  pup.setState = (patch) => Object.assign(pup.state, patch);
+
+  const first = pup.loadGrowth();
+  await pup.loadGrowth();
+  assert.equal(pup.state.growth.tag, "new");
+  releaseFirst();
+  assert.equal(await first, "superseded", "the older read loses");
+  assert.equal(pup.state.growth.tag, "new");
+});
+
+test("a refused weight shows the domain's rule, not a generic sentence", async () => {
+  const pup = new Pup({
+    request: async () => ({ status: 409, ok: false, body: { error: "a measurement is a weight in kilograms from 0.001 to 200" } }),
+  });
+  pup.state = { ...pup.state, profile: profileOf(), log: { weightKg: "500", heightCm: "", note: "" } };
+  pup.setState = (patch) => Object.assign(pup.state, patch);
+  await pup.logWeight({ preventDefault() {} });
+  assert.match(pup.state.logError, /a measurement is a weight in kilograms/);
+});
+
+test("an unparseable height is refused before it can be dropped silently", async () => {
+  const requests = [];
+  const pup = new Pup({
+    request: async (path, options) => {
+      requests.push({ path, body: options?.body });
+      return { status: 200, ok: true, body: { growth: { points: [], summary: {}, lines: [] }, replayed: false } };
+    },
+  });
+  pup.state = {
+    ...pup.state,
+    profile: profileOf(),
+    log: { weightKg: "4.2", heightCm: "abc", note: "" },
+    logBusy: false,
+  };
+  pup.setState = (patch) => Object.assign(pup.state, patch);
+
+  await pup.logWeight({ preventDefault() {} });
+  assert.match(pup.state.logError, /height is a number/);
+  assert.deepEqual(requests, [], "nothing is sent: a null height would commit without it");
+
+  pup.state.log = { weightKg: "4.2", heightCm: "31.5", note: "" };
+  await pup.logWeight({ preventDefault() {} });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].body, { weightKg: 4.2, heightCm: 31.5 });
 });

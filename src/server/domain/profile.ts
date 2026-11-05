@@ -104,7 +104,12 @@ export function setupState(household: Household, puppy: Puppy, feeding: Feeding)
   return { complete: missing.length === 0, missing };
 }
 
-/** The wire/view shape: document facts plus derived age, roster, meals and setup. */
+/**
+ * The wire/view shape: document facts plus derived age, roster, meals and setup.
+ * Growth is deliberately **not** here: P2-05 made the frame a signal rather than
+ * data, so a measurement moves `careSeq` and the Pup screen re-reads
+ * `/api/growth` (P3-03).
+ */
 export function profileView(household: Household, puppy: Puppy, feeding: Feeding, now: Date): PuppyProfile {
   const today = localDateAt(now, household.timezone);
   return {

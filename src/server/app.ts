@@ -48,6 +48,7 @@ import { pickInitialModel, SHARED_THREAD_INSTRUCTIONS } from "./agent/model.ts";
 import { watchProfileState, type ProfileStateWatch } from "./agent/state.ts";
 import { createFeedTools } from "./agent/feed-tools.ts";
 import { createWalkTools } from "./agent/walk-tools.ts";
+import { createGrowthTools } from "./agent/growth-tools.ts";
 import { createProfileTools } from "./agent/tools.ts";
 import { createReminders } from "./reminders/feed-reminder.ts";
 import {
@@ -236,6 +237,7 @@ export function installAppExtensions(registry: Registry<ToolRegistration>): void
   registry.install(createProfileTools());
   registry.install(createFeedTools());
   registry.install(createWalkTools());
+  registry.install(createGrowthTools());
   // P2-09: the feeding reminder task definition. Installing it is what lets a
   // task armed by the meal schedule sleep and wake; the hidden system
   // conversation owns it and never selects an extension of its own (§9.1).
@@ -553,7 +555,16 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     // Live care state over the stream that already exists (P1-11): both
     // caregivers see a profile edit without reloading. Registering a commit
     // listener cannot fail; the first publish reports its own failures.
-    profileState = watchProfileState({ harness: opened.harness, context, bus, logger });
+    profileState = watchProfileState({
+      harness: opened.harness,
+      context,
+      bus,
+      logger,
+      // The care view's `today` and the growth staleness derive from this
+      // clock; a frame built on the wall clock would disagree with every read
+      // on a process with an injected clock (P3-03).
+      now: options.now ? () => new Date(options.now!()) : undefined,
+    });
 
     try {
       const household = await readHousehold(thread.harness, thread.context);

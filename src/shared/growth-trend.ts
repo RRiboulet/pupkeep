@@ -314,14 +314,31 @@ function targetText(target: GrowthTargetProgress): string {
   return `Target ${formatWeightKg(target.targetKg)} — ${formatWeightKg(target.remainingKg)} to go.`;
 }
 
+/** One line of the summary copy, with the role that says how it is displayed. */
+export type GrowthSummaryLine = {
+  role: "note" | "target" | "disclaimer";
+  text: string;
+};
+
+/**
+ * The summary as lines with roles: the note, the target sentence when there is
+ * one, and the disclaimer last. The panel styles by role instead of by line
+ * index, so a future third sentence cannot silently restyle the disclaimer.
+ */
+export function growthSummaryLines(summary: GrowthSummary): GrowthSummaryLine[] {
+  const lines: GrowthSummaryLine[] = [{ role: "note", text: summary.note }];
+  if (summary.target !== null) lines.push({ role: "target", text: targetText(summary.target) });
+  lines.push({ role: "disclaimer", text: summary.disclaimer });
+  return lines;
+}
+
 /**
  * The one text rendering of a summary: the note, the target and the disclaimer.
  * Nothing is built from the chart slices — a second, quieter sentence about the
  * same weights is how copy and headline drift apart.
  */
 export function growthSummaryText(summary: GrowthSummary): string {
-  const lines = [summary.note];
-  if (summary.target !== null) lines.push(targetText(summary.target));
-  lines.push(summary.disclaimer);
-  return lines.join("\n");
+  return growthSummaryLines(summary)
+    .map((line) => line.text)
+    .join("\n");
 }
