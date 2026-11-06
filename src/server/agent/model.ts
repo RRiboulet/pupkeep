@@ -15,6 +15,7 @@ import type { Models } from "@earendil-works/pi-ai/models";
 import type { ProbeResult } from "../models/probe.ts";
 import type { ModelProbeCache } from "../models/cache.ts";
 import { DEFAULT_MODEL_ID } from "../../shared/chat.ts";
+import { isFreeModel } from "../../shared/usage.ts";
 
 /** The shared thread's system prompt, rendered once per request section (§9.5). */
 export const SHARED_THREAD_INSTRUCTIONS = [
@@ -42,10 +43,9 @@ export const SHARED_THREAD_INSTRUCTIONS = [
 export function modelIsPaid(models: Models | undefined, ref: { provider: string; modelId: string }): boolean {
   const catalog = catalogOf(models);
   if (!catalog) return true;
-  const model = catalog.getModel(ref.provider, ref.modelId);
-  const cost = model?.cost;
-  if (!cost) return true;
-  return !(cost.input === 0 && cost.output === 0);
+  // The rule lives in `shared/usage.ts` so a candidate list, a budget check and a
+  // picker cannot each decide "free" differently.
+  return !isFreeModel(catalog.getModel(ref.provider, ref.modelId)?.cost);
 }
 
 export interface ModelRef {

@@ -57,8 +57,8 @@ import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { createApprovalTools } from "./agent/approval-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
 import { reconcileUsageMonth } from "./domain/usage.ts";
-import { createAppModels, PROVIDERS, type AppModels } from "./models/collection.ts";
-import { probeAndCache } from "./models/probe-run.ts";
+import { createAppModels, providersWithKeys, type AppModels } from "./models/collection.ts";
+import { PROBE_FRESH_MS, probeAndCache } from "./models/probe-run.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
 import {
@@ -108,6 +108,12 @@ export interface AppOptions {
   /** Cap for `harness.close()`; see DEFAULT_CLOSE_TIMEOUT_MS. */
   closeTimeoutMs?: number;
   models?: Models | (() => Models);
+  /**
+   * Run §11.2's startup probe once this boot. Defaults to **true only when the
+   * catalog was built from `secrets.json`**: an injected catalog is a test's
+   * scripted one, where a probe would spend the fixture's responses.
+   */
+  startupProbe?: boolean;
   /** Extensions to install; the app always adds the profile tools. */
   registry?: Registry<ToolRegistration>;
   settings?: HarnessSettings | (() => HarnessSettings | undefined);
@@ -735,7 +741,18 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         auth,
         thread,
         bus,
-        ...(catalog !== undefined ? { models: catalog.models, modelProviders: catalog.configured } : {}),
+        ...(catalog !== undefined
+          ? {
+              models: catalog.models,
+              // Read live, not the boot snapshot: a key saved from Settings must
+              // count for the next probe without a restart. An injected catalog
+              // is a test's, so its providers count as configured there.
+              modelProviders: async () =>
+                options.models === undefined
+                  ? providersWithKeys(stores.secrets)
+                  : catalog!.configured,
+            }
+          : {}),
         secrets: stores.secrets,
         modelCache: stores.models,
         submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
@@ -763,10 +780,13 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       // Only a catalog built from real keys is probed: an injected one is a
       // test's scripted catalog, where a probe would spend the fixture's scripted
       // responses and change what the suite is asserting.
-      if (options.models === undefined && catalog !== undefined && catalog.configured.size > 0) {
+      if ((options.startupProbe ?? options.models === undefined) && catalog !== undefined && catalog.configured.size > 0) {
         void probeAndCache(stores.models, {
           models: catalog.models,
           configured: catalog.configured,
+          // Frequent reboots must not re-spend a provider call per paid
+          // candidate: a verified verdict is trusted for a few hours.
+          freshWithinMs: PROBE_FRESH_MS,
           ...(options.now !== undefined ? { now: options.now } : {}),
         })
           .then((run) => {

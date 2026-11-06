@@ -217,9 +217,10 @@ export class Settings extends Component {
 
   async loadModels() {
     let result;
-    let session;
     try {
-      [result, session] = await Promise.all([this.request("/api/models"), this.request("/api/session")]);
+      // One read: the route carries the caller's role, so the card needs no
+      // separate session request to know which controls to hide.
+      result = await this.request("/api/models");
     } catch (error) {
       this.setState({ modelsError: error instanceof NetworkError ? error.message : "Could not load the model settings." });
       return;
@@ -231,7 +232,7 @@ export class Settings extends Component {
     const budget = result.body.budget ?? null;
     this.setState({
       models: result.body,
-      role: session?.ok ? session.body.role : null,
+      role: result.body.role ?? null,
       capDraft: budget ? String(budget.capUsd) : "",
       modelsError: null,
     });
@@ -487,6 +488,9 @@ export class Settings extends Component {
           ${(models.candidates ?? []).map((candidate) => {
             const usable = allowed.has(candidate.id);
             const isCurrent = picked === candidate.id;
+            // A model whose provider has no key cannot authenticate even when the
+            // cache still allows it: say so instead of offering a doomed button.
+            const keyed = Boolean(models.providers?.[candidate.provider]);
             return html`
               <li key=${candidate.id}>
                 <span>${modelOptionText(candidate)}</span>
@@ -495,10 +499,10 @@ export class Settings extends Component {
                     ? html`<button
                         type="button"
                         class="button button--ghost"
-                        disabled=${!usable || isCurrent || this.state.modelsBusy !== null}
+                        disabled=${!usable || isCurrent || !keyed || this.state.modelsBusy !== null}
                         onClick=${() => void this.pickModel(candidate.id)}
                       >
-                        ${isCurrent ? "In use" : usable ? "Use this" : "Not checked"}
+                        ${isCurrent ? "In use" : !keyed ? "Add a key first" : usable ? "Use this" : "Not checked"}
                       </button>`
                     : isCurrent
                       ? html`<span class="field__hint">In use</span>`

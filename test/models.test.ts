@@ -21,7 +21,13 @@ import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { JsonFileStore } from "../src/server/json-file.ts";
 import { emptySecrets, parseSecrets, type SecretsConfig } from "../src/server/config.ts";
-import { createAppModels, createSecretCredentials, isProviderId, PROVIDERS } from "../src/server/models/collection.ts";
+import {
+  createAppModels,
+  createSecretCredentials,
+  isProviderId,
+  providersWithKeys,
+  PROVIDERS,
+} from "../src/server/models/collection.ts";
 import {
   PROBE_CANDIDATES,
   allowlistOf,
@@ -266,4 +272,104 @@ test("the cache write is guarded by checkedAt, so an older run cannot overwrite 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// --- review follow-ups ------------------------------------------------------
+
+test("the configured providers are read live, so a saved key counts for the next probe", async () => {
+  await withSecrets(async (secrets) => {
+    assert.deepEqual(await providersWithKeys(secrets), new Set(), "nothing stored yet");
+    await secrets.update((config) => ({ ...config, providerKeys: { "opencode-go": "sk-1" } }));
+    assert.deepEqual(await providersWithKeys(secrets), new Set(["opencode-go"]), "a save is visible immediately");
+    await secrets.update((config) => ({
+      ...config,
+      providerKeys: { "opencode-go": "sk-1", openrouter: "sk-2" },
+    }));
+    assert.deepEqual(await providersWithKeys(secrets), new Set(["opencode-go", "openrouter"]));
+    // Clearing is a delete; `secrets.json`'s parser refuses a blank key rather
+    // than storing one that would silently mean "configured".
+    await secrets.update((config) => {
+      const providerKeys = { ...config.providerKeys };
+      delete providerKeys.openrouter;
+      return { ...config, providerKeys };
+    });
+    assert.deepEqual(await providersWithKeys(secrets), new Set(["opencode-go"]));
+  });
+});
+
+test("a probe keeps the verdicts of models it did not re-probe", async () => {
+  const dir = await mkdtemp(join(tmpdir(), `${TMP_PREFIX}merge-`));
+  try {
+    const cache = cacheFile(dir);
+    await cache.ensure();
+    const known = (id: string, checkedAt: string, status: ProbeResult["status"] = "ok"): ProbeResult => ({
+      id,
+      provider: id.split("/")[0]!,
+      model: id.split("/")[1]!,
+      status,
+      toolCall: status === "ok",
+      latencyMs: 5,
+      checkedAt,
+    });
+    await cache.update(() =>
+      toModelProbeCache(
+        [
+          known("opencode-go/mimo-v2.6-flash", "2026-10-01T00:00:00.000Z"),
+          known("openrouter/openrouter/free", "2026-10-01T00:00:00.000Z"),
+        ],
+        "2026-10-01T00:00:00.000Z",
+      ),
+    );
+
+    // Only opencode-go has a key now: the OpenRouter verdict must survive.
+    const models = createModels();
+    models.setProvider(okFauxProvider().provider);
+    await probeAndCache(cache, {
+      models,
+      configured: new Set(["opencode-go"]),
+      now: () => Date.parse("2026-10-29T12:00:00.000Z"),
+    });
+    const stored = await cache.read();
+    assert.equal(stored.checkedAt, "2026-10-29T12:00:00.000Z");
+    assert.ok(
+      stored.results.some((entry) => entry.id === "openrouter/openrouter/free"),
+      "the skipped provider's last-known-good is kept",
+    );
+    assert.ok(
+      allowlistOf(stored).allowed.some((entry) => entry.id === "openrouter/openrouter/free"),
+      "and it stays usable in the derived allowlist",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the boot probe trusts a fresh verdict and re-probes a stale one", async () => {
+  const models = createModels();
+  models.setProvider(okFauxProvider().provider);
+  const previous: ProbeResult[] = PROBE_CANDIDATES.filter((target) => target.provider === "opencode-go").map(
+    (target) => ({
+      id: `${target.provider}/${target.model}`,
+      provider: target.provider,
+      model: target.model,
+      status: "ok",
+      toolCall: true,
+      latencyMs: 5,
+      checkedAt: "2026-10-29T11:00:00.000Z",
+    }),
+  );
+  const nowMs = Date.parse("2026-10-29T12:00:00.000Z");
+  // One hour old, inside a six-hour window: nothing is re-probed.
+  const fresh = await probeModels({ models, configured: new Set(["opencode-go"]), previous, now: () => nowMs, freshWithinMs: 6 * 60 * 60 * 1000 });
+  assert.deepEqual(fresh.results, [], "a recent check is not paid for again");
+  assert.equal(fresh.allowlist.allowed.length, previous.length, "the cached verdicts still make them usable");
+  // Seven hours old: every candidate is probed again.
+  const stale = await probeModels({
+    models,
+    configured: new Set(["opencode-go"]),
+    previous: previous.map((result) => ({ ...result, checkedAt: "2026-10-29T04:00:00.000Z" })),
+    now: () => nowMs,
+    freshWithinMs: 6 * 60 * 60 * 1000,
+  });
+  assert.equal(stale.results.length, previous.length, "a stale verdict is re-checked");
 });

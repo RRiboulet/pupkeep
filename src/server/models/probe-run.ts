@@ -56,6 +56,15 @@ export interface ProbeRun {
   providers: string[];
 }
 
+/**
+ * How long a verified verdict is trusted for the **boot** probe. A phone that
+ * reboots often must not re-spend a provider call per paid candidate every time;
+ * the Settings "check now" ignores this and probes everything the owner asked
+ * for. §11.4's cost rule, applied to the one automatic model call the plan
+ * sanctions.
+ */
+export const PROBE_FRESH_MS = 6 * 60 * 60 * 1000;
+
 export interface ProbeRunOptions {
   readonly models: Models;
   /** Providers with a stored key; everything else is skipped. */
@@ -69,6 +78,12 @@ export interface ProbeRunOptions {
   /** Clock, injected by tests. */
   readonly now?: () => number;
   readonly candidates?: readonly ProbeTarget[];
+  /**
+   * Skip a candidate whose cached verdict is `ok` with a tool call and newer
+   * than this. The boot probe passes `PROBE_FRESH_MS`; a manual run passes
+   * nothing, because the owner asked for a check.
+   */
+  readonly freshWithinMs?: number;
 }
 
 /**
@@ -77,7 +92,22 @@ export interface ProbeRunOptions {
  */
 export async function probeModels(options: ProbeRunOptions): Promise<ProbeRun> {
   const now = options.now ?? Date.now;
-  const candidates = options.candidates ?? PROBE_CANDIDATES;
+  const all = options.candidates ?? PROBE_CANDIDATES;
+  const previous = options.previous ?? [];
+  // A fresh `ok` + tool call is trusted for the freshness window (boot only).
+  const fresh = options.freshWithinMs === undefined ? undefined : now() - options.freshWithinMs;
+  const trusted = new Set(
+    fresh === undefined
+      ? []
+      : previous
+          .filter((result) => result.status === "ok" && result.toolCall)
+          .filter((result) => {
+            const checked = Date.parse(result.checkedAt);
+            return Number.isFinite(checked) && checked >= fresh;
+          })
+          .map((result) => result.id),
+  );
+  const candidates = all.filter((target) => !trusted.has(`${target.provider}/${target.model}`));
   const targets = candidates.filter((target) => options.configured.has(target.provider));
   const skipped = candidates.filter((target) => !options.configured.has(target.provider));
   const results =
@@ -91,7 +121,7 @@ export async function probeModels(options: ProbeRunOptions): Promise<ProbeRun> {
   return {
     checkedAt: new Date(now()).toISOString(),
     results,
-    allowlist: resolveAllowlist(options.previous ?? [], results),
+    allowlist: resolveAllowlist(previous, results),
     skipped,
     providers: [...new Set(targets.map((target) => target.provider))],
   };
@@ -104,12 +134,18 @@ export async function probeModels(options: ProbeRunOptions): Promise<ProbeRun> {
  */
 export async function probeAndCache(
   cache: JsonFileStore<ModelProbeCache>,
-  options: Omit<ProbeRunOptions, "previous"> & { previous?: readonly ProbeResult[] },
+  options: ProbeRunOptions,
 ): Promise<ProbeRun> {
   const previous = options.previous ?? (await cache.read()).results;
   const run = await probeModels({ ...options, previous });
+  // A run that probed nothing writes nothing (an all-providers-skipped press must
+  // not touch the cache). A run that probed *some* models keeps the others'
+  // verdicts: a provider whose key was cleared or whose candidate was fresh must
+  // not lose the last-known-good the allowlist rules promise to remember.
   if (run.results.length > 0) {
-    const next = toModelProbeCache(run.results, run.checkedAt);
+    const merged = new Map(previous.map((result) => [result.id, result]));
+    for (const result of run.results) merged.set(result.id, result);
+    const next = toModelProbeCache([...merged.values()], run.checkedAt);
     await cache.update((current) => (current.checkedAt > next.checkedAt ? current : next));
   }
   return run;
@@ -121,5 +157,5 @@ export async function probeAndCache(
  * last-known-good") — the same view the last probe produced for the picker.
  */
 export function allowlistOf(cache: ModelProbeCache): Allowlist {
-  return resolveAllowlist(cache.results, cache.results);
+  return resolveAllowlist([], cache.results);
 }

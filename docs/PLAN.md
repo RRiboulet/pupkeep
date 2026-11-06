@@ -4414,7 +4414,7 @@ process kill; both clients see the same state; the partner notification
       write for a member (§14.1). (8) **The startup probe is skipped for an
       injected catalog** (a test's), because it would consume the fixture's
       scripted responses.
-      **Verified:** 32 new tests — 10 in `test/usage.test.ts` (the thresholds
+      **Verified:** 35 new tests — 10 in `test/usage.test.ts` (the thresholds
       including a zero cap and a negative spend, the catalog's free/paid decision,
       the usage document's shape, spend summed over every harness bucket, a fresh
       household's baseline, `total − baseline`, a month rollover, a restore that
@@ -4433,8 +4433,27 @@ process kill; both clients see the same state; the partner notification
       `test/client.test.js` (the price/current/spend copy, the threshold sentences
       and the bar's clamp, the allowlist reasons, the probe summary's spend
       exception, the request bodies and cap parsing, and the card rendering with
-      the owner controls hidden from a partner). The suite is 766/766 and
+      the owner controls hidden from a partner), plus the review follow-ups'
+      tests (a live `providersWithKeys`, the cache merge over history, and the
+      boot probe's freshness window). The suite is 769/769 and
       `npm run typecheck` passes.
+      **Review follow-ups (adversarial + complexity):** the probe's configured
+      providers are read **live** from `secrets.json` (the boot snapshot froze
+      them, so a key saved from Settings was invisible to the check and the
+      picker until a restart — the one real bug the review found); the probe cache
+      write now merges over the previous results, so a run that skips a provider
+      (no key, or a fresh verdict) cannot erase that provider's last-known-good;
+      an upgrade from a pre-P4-08 database baselines at the harness's current
+      total instead of zero, so all-time spend is not counted against the current
+      month; the boot probe trusts a verified verdict for six hours (`check now`
+      always probes), which bounds the one automatic model call §11.4 allows; the
+      picker disables a model whose provider has no key ("Add a key first"); the
+      rollover repair answers with the document its commit read rather than the
+      pre-commit snapshot; paid/free is one rule (`modelIsPaid` delegates to
+      `isFreeModel`, and the candidate list uses it); the submission gate reads
+      the model first and the budget only for a paid one; the caller's `role` rides
+      `GET /api/models` so the card needs no second request; and the reads that
+      can commit (a rollover repair) say so at their route.
       **Not verified / carried out:** no live provider prose — the devcontainer
       has no keys, so the probe is proven against a scripted catalog with the real
       `createPiAiProbeCall` seam, and the live allowlist will be whatever the
