@@ -14,7 +14,7 @@ import type { Harness } from "@earendil-works/pi-durable";
 import type { PushConfig } from "../config.ts";
 import type { JsonFileStore } from "../json-file.ts";
 import type { Logger } from "../log.ts";
-import { drainNotificationOutbox, type OutboxOutcome, type DrainOptions } from "./outbox.ts";
+import { drainNotificationOutbox, type DrainOptions } from "./outbox.ts";
 import type { PushTransport } from "../push/web-push.ts";
 
 /** Retry cadence for failed items; the backoff itself lives in the outbox. */
@@ -24,10 +24,6 @@ const NOTIFICATIONS_KIND = "app.notifications";
 
 export interface NotificationOutboxWatch {
   stop(): void;
-  /** Run one pass now (used by boot and tests). Errors are thrown, not logged. */
-  drain(): Promise<OutboxOutcome>;
-  /** The most recent pass's outcome, for the boot log and tests. */
-  last(): OutboxOutcome | null;
 }
 
 export interface OutboxWatchOptions {
@@ -47,7 +43,6 @@ export function startNotificationOutbox(options: OutboxWatchOptions): Notificati
   let stopped = false;
   let running = false;
   let wanted = false;
-  let last: OutboxOutcome | null = null;
 
   const drainOptions = (): DrainOptions => ({
     store: options.harness,
@@ -69,7 +64,6 @@ export function startNotificationOutbox(options: OutboxWatchOptions): Notificati
         wanted = false;
         try {
           const outcome = await drainNotificationOutbox(drainOptions());
-          last = outcome;
           if (
             outcome.sent > 0 ||
             outcome.failed > 0 ||
@@ -126,11 +120,5 @@ export function startNotificationOutbox(options: OutboxWatchOptions): Notificati
       clearInterval(timer);
       unsubscribe();
     },
-    drain: async () => {
-      const outcome = await drainNotificationOutbox(drainOptions());
-      last = outcome;
-      return outcome;
-    },
-    last: () => last,
   };
 }

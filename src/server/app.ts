@@ -583,7 +583,10 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   // a process that is already leaving. `deps.thread === "scaffold"` keeps the
   // P1-07 scaffold listener for the harness-level contract tests.
   if (!stopping && deps.thread !== "scaffold") {
-    const auth = new Auth({ config: stores.config });
+    // The auth authority owns session removal; giving it the push store means a
+    // removed caregiver's subscriptions, prefs and ntfy topic go with them
+    // (P4-05). The launcher already wires the same pair for owner reissue.
+    const auth = new Auth({ config: stores.config, push: stores.push });
     const thread: ThreadRef = { harness: opened.harness, context };
 
     try {

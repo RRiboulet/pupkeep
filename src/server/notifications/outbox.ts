@@ -154,6 +154,12 @@ export async function drainNotificationOutbox(options: DrainOptions): Promise<Ou
       else if (result.kind === "gone") {
         gone.add(subscription.endpoint);
         lastStatus = result.status;
+      } else if (result.status === null) {
+        // A local failure (an unusable key, an encryption error) is permanent
+        // for this subscription: retrying it would burn the intent's attempts
+        // forever. Remove it like a gone endpoint.
+        gone.add(subscription.endpoint);
+        lastError = result.error;
       } else {
         lastStatus = result.status;
         lastError = result.error;
@@ -210,9 +216,4 @@ export async function drainNotificationOutbox(options: DrainOptions): Promise<Ou
   }
 
   return { sent, failed, dropped, skipped, removedSubscriptions: gone.size };
-}
-
-/** The pending count a caller may log; no delivery is attempted. */
-export function pendingIntentCount(items: readonly NotificationIntent[], now: Date): number {
-  return items.filter((intent) => deliverableDelivery(intent.delivery, now)).length;
 }

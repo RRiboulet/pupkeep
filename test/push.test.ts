@@ -276,7 +276,7 @@ test("the public-key route serves only the public half", async () => {
 test("a subscription is stored per endpoint and member, and only its owner can remove it", async () => {
   const fixture = await startPushApp();
   try {
-    const subscription = makeSubscription("https://push.example/send/device-1");
+    const subscription = makeSubscription("https://fcm.googleapis.com/fcm/send/device-1");
     const keys = { p256dh: subscription.record.p256dh, auth: subscription.record.auth };
 
     const first = await post(fixture, "/api/push/subscriptions", fixture.owner, {
@@ -321,24 +321,23 @@ test("a subscription is stored per endpoint and member, and only its owner can r
     assert.deepEqual(await removed.json(), { removed: true });
     assert.equal((await dataStores(fixture.dir).push.read()).subscriptions.length, 0);
 
-    // A non-HTTPS or keyless subscription is refused.
+    // A non-HTTPS, unsupported-host or malformed-key subscription is refused.
+    for (const endpoint of ["http://fcm.googleapis.com/x", "https://internal.example/x"]) {
+      assert.equal(
+        (await post(fixture, "/api/push/subscriptions", fixture.owner, { endpoint, keys })).status,
+        409,
+        endpoint,
+      );
+    }
     assert.equal(
       (
         await post(fixture, "/api/push/subscriptions", fixture.owner, {
-          endpoint: "http://push.example/x",
-          keys,
+          endpoint: "https://fcm.googleapis.com/x",
+          keys: { p256dh: "A".repeat(40), auth: "A".repeat(22) },
         })
       ).status,
       409,
-    );
-    assert.equal(
-      (
-        await post(fixture, "/api/push/subscriptions", fixture.owner, {
-          endpoint: "https://push.example/x",
-          keys: { p256dh: "short", auth: "short" },
-        })
-      ).status,
-      409,
+      "a key that decodes to the wrong size is refused, not stored",
     );
   } finally {
     await fixture.stop();

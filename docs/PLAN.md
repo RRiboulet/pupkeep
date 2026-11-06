@@ -1452,11 +1452,13 @@ displayed but not pushed in v1.
 ### 12.3 Outbox, Web Push and ntfy
 
 - Notification intents are committed to `app.notifications` with a server-side
-  dedupe key. The tuple is per category; the implemented `fed` key is
-  `fed|<localDate>|slot|<slotId>|<userId>` or
-  `fed|<localDate>|extra|<eventId>|<userId>`, every part percent-encoded before
-  the join so an id containing the separator cannot alias another intent. The
-  Web Push `tag` is display-only; it is not the authority.
+  dedupe key. The tuple is per category; the implemented keys are
+  `fed|<localDate>|slot|<slotId>|<userId>`,
+  `fed|<localDate>|extra|<eventId>|<userId>`,
+  `feed_overdue|<localDate>|slot|<slotId>|<userId>` and
+  `appointment|<appointmentId>|<offsetMin>|<startsAt>|<userId>`, every part
+  percent-encoded before the join so an id containing the separator cannot alias
+  another intent. The Web Push `tag` is display-only; it is not the authority.
 - A stored intent's `title` must equal its category's catalog string
   (`shared/notifications.ts`), which is what keeps care detail out of a push
   body. The catalog text is therefore **document-frozen**: rewording an entry
@@ -1475,7 +1477,11 @@ displayed but not pushed in v1.
   skipped (the in-app item remains), a disabled category is dropped, a 404/410
   removes the subscription, and failures back off (1 min · 2^n, cap 30 min, five
   attempts). Payloads carry the category title, the dedupe key as the display
-  `tag` and the app route — never the in-app body. P4-06 adds ntfy.
+  `tag` and the app route — never the in-app body. A subscription endpoint is
+  restricted to the push services the product supports (FCM, Mozilla, Apple,
+  Windows), a send has a 10 s timeout, and a subscription whose keys cannot be
+  encrypted for is removed rather than retried forever. Removing a member also
+  removes their subscriptions, prefs and ntfy topic. P4-06 adds ntfy.
 - ntfy carries the **title and category text only**, from a shared constants
   module; urgency rides on the ntfy `priority` (P0-08 measured `default` 3,
   `high` 4, `max` 5) and never on extra words. `Click` points at the private
@@ -4111,9 +4117,9 @@ process kill; both clients see the same state; the partner notification
       **Verified:** 6 tests in `test/push.test.ts` (a real P-256 pair and one
       persisted pair, the JWT's claims and signature, an aes128gcm round trip,
       send headers/outcomes, and the three routes with their ownership rules),
-      9 in `test/outbox.test.ts` (fan-out, skipped/dropped, 410 removal, backoff
-      and the attempt cap, no VAPID, a concurrent append, prefs defaults, an
-      ensureVapid pair), the reminder-intent assertions in
+      10 in `test/outbox.test.ts` (fan-out, skipped/dropped, 410 removal,
+      backoff and the attempt cap, no VAPID, a concurrent append, prefs defaults,
+      an ensureVapid pair, an unusable key removed), the reminder-intent assertions in
       `test/reminders.test.ts` and `test/appointment-reminders.test.ts`, the
       service worker's push/click tests in `test/pwa.test.ts`, 5 client tests for
       `web/push.js`, and the version-1 migration in `test/feed.test.ts`. The suite

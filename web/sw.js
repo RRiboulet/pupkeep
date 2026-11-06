@@ -233,8 +233,12 @@ function pushContent(data) {
     candidate !== "" && candidate.length <= PUSH_TITLE_LIMIT && !CONTROL.test(candidate)
       ? candidate
       : PUSH_DEFAULT_TITLE;
-  const tag = typeof data.tag === "string" && data.tag.length <= 300 ? data.tag : undefined;
-  const url = typeof data.url === "string" && data.url.startsWith("/") ? data.url : "/";
+  // 512 covers the server's dedupe keys even when a member id is long; a
+  // longer string is not this server's key and would not collapse anything.
+  const tag = typeof data.tag === "string" && data.tag.length <= 512 ? data.tag : undefined;
+  // A protocol-relative `//host` is another origin, not an app route.
+  const url =
+    typeof data.url === "string" && data.url.startsWith("/") && !data.url.startsWith("//") ? data.url : "/";
   return { title, tag, url };
 }
 

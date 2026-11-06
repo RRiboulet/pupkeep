@@ -516,7 +516,9 @@ export type Calendar = {
  * at-least-once and best-effort: the intent is written once (server dedupe key),
  * then the drain marks it `sent` or `failed` with an attempt count and a bounded
  * error. `dropped` is a deliberate non-delivery (the member disabled the
- * category, or no transport is configured); the in-app item stays.
+ * category); the in-app item stays. A missing transport (no VAPID pair, no
+ * subscription) leaves the intent pending instead, because a later
+ * subscription can still deliver it.
  *
  * `lastError` is a short, app-built sentence, never a provider payload; the log
  * scrubber and the parser both keep control characters out.

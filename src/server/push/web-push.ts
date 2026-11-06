@@ -31,6 +31,42 @@ export type PushTransport = (url: string, init: RequestInit) => Promise<Response
 export const PUSH_RECORD_SIZE = 4096;
 /** A day is plenty for a reminder; the push service drops it after that. */
 export const PUSH_TTL_S = 24 * 60 * 60;
+/**
+ * One send may not hang the outbox: a dead endpoint is retried later, but it
+ * cannot hold the drain (and every other notification) for undici's default.
+ */
+export const PUSH_SEND_TIMEOUT_MS = 10_000;
+
+/**
+ * The push services a browser can hand us. The endpoint is a capability the
+ * server POSTs to with a signed request, so a member-supplied URL is bounded to
+ * the services the product supports rather than any HTTPS host (SSRF). A new
+ * browser service is a deliberate addition here.
+ */
+const PUSH_HOSTS = new Set([
+  "fcm.googleapis.com",
+  "android.googleapis.com",
+  "updates.push.services.mozilla.com",
+  "web.push.apple.com",
+]);
+
+/** Whether `endpoint` is a supported push service's HTTPS URL. */
+export function isPushEndpoint(endpoint: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  return (
+    PUSH_HOSTS.has(host) ||
+    host.endsWith(".push.services.mozilla.com") ||
+    host.endsWith(".notify.windows.com") ||
+    host.endsWith(".push.apple.com")
+  );
+}
 
 function hmac(key: Buffer, data: Buffer): Buffer {
   return createHmac("sha256", key).update(data).digest();
@@ -129,8 +165,9 @@ export async function sendWebPush(
       },
       body: new Uint8Array(body),
       // A push endpoint that redirects is not one we should follow with a
-      // signed request.
+      // signed request, and one that hangs must not hold the outbox.
       redirect: "error",
+      signal: AbortSignal.timeout(PUSH_SEND_TIMEOUT_MS),
     });
     if (response.status === 404 || response.status === 410) {
       return { kind: "gone", status: response.status };

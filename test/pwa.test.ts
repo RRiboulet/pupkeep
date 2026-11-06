@@ -1125,7 +1125,7 @@ test("a push shows the category title with the dedupe tag and no care text", asy
 
 test("a malformed push title falls back to the app name, and a click focuses or opens the app", async () => {
   const worker = await loadWorker();
-  await worker.push({ title: "Breakfast was not logged\nby 07:15", tag: "x", url: "https://elsewhere.example" });
+  await worker.push({ title: "Breakfast was not logged\nby 07:15", tag: "x", url: "//elsewhere.example/x" });
   assert.equal(worker.notifications[0]?.title, "Pupkeep", "a control character is not category text");
   assert.equal(
     (worker.notifications[0]?.options.data as { url?: string } | undefined)?.url,

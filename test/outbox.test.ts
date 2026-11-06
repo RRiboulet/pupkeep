@@ -303,6 +303,29 @@ test("a failed send backs off, retries, and gives up at the cap", async () => {
   });
 });
 
+test("a subscription with an unusable key is removed instead of retried forever", async () => {
+  await withOutbox(async (fixture) => {
+    // 65 bytes that are not a valid P-256 point: encryption fails locally.
+    const broken = {
+      ...makeSubscription("owner").record,
+      p256dh: Buffer.alloc(65, 7).toString("base64url"),
+    };
+    await configure(fixture, [broken]);
+    await fixture.seed([intent()]);
+    const calls = capture();
+    const result = await drainNotificationOutbox({
+      store: fixture.opened.harness,
+      context,
+      push: fixture.push,
+      now: NOW,
+      transport: calls.transport,
+    });
+    assert.equal(result.removedSubscriptions, 1);
+    assert.equal(calls.calls.length, 0, "the send never leaves the process");
+    assert.deepEqual((await fixture.push.read()).subscriptions, []);
+  });
+});
+
 test("no VAPID pair leaves intents pending rather than failing them", async () => {
   await withOutbox(async (fixture) => {
     await fixture.seed([intent()]);

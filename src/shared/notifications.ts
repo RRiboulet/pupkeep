@@ -245,7 +245,8 @@ export function appendIntents(
   // `slice(-0)` is `slice(0)`, which keeps every item; so does a fractional or
   // NaN limit, which `slice` also maps to `0`.
   if (!Number.isInteger(limit) || limit <= 0) return protectedItems;
-  const rest = all.filter((intent) => !protectedItems.includes(intent)).slice(-limit);
+  const protectedSet = new Set(protectedItems);
+  const rest = all.filter((intent) => !protectedSet.has(intent)).slice(-limit);
   // Keep document order: owed items are the ones a caregiver or the outbox owes.
   const keep = new Set<NotificationIntent>([...protectedItems, ...rest]);
   return all.filter((intent) => keep.has(intent));

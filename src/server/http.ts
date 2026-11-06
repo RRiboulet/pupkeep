@@ -97,6 +97,7 @@ import type { Logger } from "./log.ts";
 import type { JsonFileStore } from "./json-file.ts";
 import type { PushConfig } from "./config.ts";
 import { ensureVapid } from "./push/vapid.ts";
+import { isPushEndpoint } from "./push/web-push.ts";
 import { CLIENT_KEY_LIMIT, isCommandKey, type WriteOutcome } from "./domain/commands.ts";
 import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
 import {
@@ -1621,14 +1622,16 @@ function parsePushSubscriptionBody(raw: unknown): PushSubscriptionBody {
   requireOnlyKeys(keyRecord, ["p256dh", "auth"]);
   const { endpoint } = record;
   const { p256dh, auth } = keyRecord;
-  if (typeof endpoint !== "string" || endpoint.length > PUSH_ENDPOINT_MAX || !/^https:\/\//.test(endpoint)) {
-    throw new ConflictError("a push subscription needs an HTTPS endpoint");
+  if (typeof endpoint !== "string" || endpoint.length > PUSH_ENDPOINT_MAX || !isPushEndpoint(endpoint)) {
+    throw new ConflictError("a push subscription needs a supported push service endpoint (FCM, Mozilla, Apple or Windows)");
   }
-  if (typeof p256dh !== "string" || p256dh.length < 40 || p256dh.length > 200) {
-    throw new ConflictError("a push subscription needs its p256dh key");
+  // Node's base64url decoder drops invalid characters, so length alone is not
+  // enough: decode and check the exact key sizes the encryption requires.
+  if (typeof p256dh !== "string" || Buffer.from(p256dh, "base64url").length !== 65) {
+    throw new ConflictError("a push subscription needs its 65-byte p256dh key");
   }
-  if (typeof auth !== "string" || auth.length < 16 || auth.length > 100) {
-    throw new ConflictError("a push subscription needs its auth secret");
+  if (typeof auth !== "string" || Buffer.from(auth, "base64url").length !== 16) {
+    throw new ConflictError("a push subscription needs its 16-byte auth secret");
   }
   return { endpoint, p256dh, auth };
 }
