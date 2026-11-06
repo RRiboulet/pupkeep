@@ -56,6 +56,7 @@ import { createShowerTools } from "./agent/shower-tools.ts";
 import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { createApprovalTools } from "./agent/approval-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
+import { reconcileUsageMonth } from "./domain/usage.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
 import {
@@ -548,6 +549,17 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     });
   }
 
+  // P4-08: the monthly baseline is repaired from `harness.usage()` — the ledger —
+  // before anything reads it. A rollover, a restore that reported less spend, or
+  // a database from before `app.usage` all land here; the read is outside a
+  // commit, so this must not be inside the bootstrap.
+  try {
+    const usage = await reconcileUsageMonth(opened.harness, context, new Date(options.now?.() ?? Date.now()));
+    logger.info("usage baseline", { month: usage.snapshot.month, baselineCostUsd: usage.snapshot.baselineCostUsd });
+  } catch (error) {
+    logger.warn("could not read the usage baseline; the budget will read it on first use", { error });
+  }
+
   // A failed Session closes itself; this is the only place the process learns
   // that it must exit rather than keep a dead harness behind a live port.
   void opened.harness.closed.then(
@@ -688,10 +700,19 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       // The actual bound port can differ from `options.port` (port 0 in tests);
       // the origin list follows whatever the listener really bound.
       let boundPort = options.port;
+      // Resolved once for the budget's paid/free check and (P4-08b) the picker.
+      // A throwing catalog factory is the same as no catalog: fail closed.
+      let catalog: Models | undefined;
+      try {
+        catalog = typeof options.models === "function" ? options.models() : options.models;
+      } catch {
+        catalog = undefined;
+      }
       const handler = createAppHandler({
         auth,
         thread,
         bus,
+        ...(catalog !== undefined ? { models: catalog } : {}),
         submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
         notificationLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),

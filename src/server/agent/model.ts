@@ -33,6 +33,21 @@ export const SHARED_THREAD_INSTRUCTIONS = [
   "Never ask for or reveal shell, filesystem, database, or provider credentials.",
 ].join("\n");
 
+/**
+ * Is this model paid? §11.3 blocks paid models at the cap while free ones stay
+ * selectable, so the check must come from the catalog rather than the plan's
+ * table (which is a snapshot) and must fail **closed** for a model the catalog
+ * no longer carries.
+ */
+export function modelIsPaid(models: Models | undefined, ref: { provider: string; modelId: string }): boolean {
+  const catalog = catalogOf(models);
+  if (!catalog) return true;
+  const model = catalog.getModel(ref.provider, ref.modelId);
+  const cost = model?.cost;
+  if (!cost) return true;
+  return !(cost.input === 0 && cost.output === 0);
+}
+
 export interface ModelRef {
   readonly provider: string;
   readonly modelId: string;

@@ -55,6 +55,7 @@ import {
   NOTIFICATIONS_SCHEMA_VERSION,
   OPAQUE_ID_PATTERN,
   PUPPY_SCHEMA_VERSION,
+  USAGE_SCHEMA_VERSION,
   SHOWER_INTERVAL_MAX_DAYS,
   SHOWERS_SCHEMA_VERSION,
   WALKS_SCHEMA_VERSION,
@@ -76,6 +77,7 @@ import {
   type Notifications,
   type Puppy,
   type PuppySex,
+  type UsageSnapshot,
   type Walks,
 } from "../../shared/domain.ts";
 import { parseAppointmentList, parseReminderOffsets } from "../../shared/calendar.ts";
@@ -87,6 +89,7 @@ import { parseShowerList } from "../../shared/showers.ts";
 import { parseNotificationIntents, pendingDelivery } from "../../shared/notifications.ts";
 import { parseWalkList } from "../../shared/walks.ts";
 import { hasControlCharacter, isIanaZone, isLocalDate } from "../../shared/profile.ts";
+import { isUsageMonth } from "../../shared/usage.ts";
 
 /**
  * What a domain function needs from its caller: committed reads plus one
@@ -177,6 +180,17 @@ export function emptyNotifications(): Notifications {
 /** No proposals yet; a fresh household has nothing waiting for a decision. */
 export function emptyApprovals(): Approvals {
   return { schemaVersion: APPROVALS_SCHEMA_VERSION, approvals: [], createdAt: "" };
+}
+
+/**
+ * A fresh baseline. `month` is filled by boot (it needs the household zone, which
+ * an initial value cannot read); `""` is a shape the parser refuses, so a
+ * document created without the bootstrap's assign can never be mistaken for a
+ * real baseline. Boot always writes the computed month in the commit that
+ * creates the document.
+ */
+export function emptyUsage(): UsageSnapshot {
+  return { schemaVersion: USAGE_SCHEMA_VERSION, month: "", baselineCostUsd: 0, observedAt: "" };
 }
 
 export function emptyWalks(): Walks {
@@ -366,6 +380,19 @@ export const NotificationsDoc = defineDoc<Notifications>({
     if (!parsed) throw new Error("app.notifications version 1 does not migrate to a valid version 2");
     return parsed;
   },
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/**
+ * The derived monthly baseline (P4-08, PLAN §11.3). Version 1 is the first
+ * shape; `harness.usage()` is the ledger, so a lost or unreadable document is
+ * repaired by boot from the session total rather than restored from anywhere.
+ */
+export const UsageDoc = defineDoc<UsageSnapshot>({
+  kind: "app.usage",
+  version: 1,
+  scope: "session",
+  initial: emptyUsage,
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -737,6 +764,28 @@ export function parseNotifications(value: unknown): Notifications | undefined {
   const items = parseNotificationIntents(record.items);
   if (!items) return undefined;
   return { schemaVersion: NOTIFICATIONS_SCHEMA_VERSION, items, createdAt: record.createdAt };
+}
+
+/**
+ * `app.usage`: the monthly baseline. It is a **cache**, not a ledger: the
+ * baseline is the session total at the month's start, and the parser only needs
+ * it to be a real month and a non-negative number.
+ */
+export function parseUsage(value: unknown): UsageSnapshot | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== USAGE_SCHEMA_VERSION) return undefined;
+  if (Object.keys(record).some((key) => !["schemaVersion", "month", "baselineCostUsd", "observedAt"].includes(key))) {
+    return undefined;
+  }
+  if (!isUsageMonth(record.month)) return undefined;
+  if (!isNonNegativeNumber(record.baselineCostUsd)) return undefined;
+  if (!isIsoInstant(record.observedAt)) return undefined;
+  return {
+    schemaVersion: USAGE_SCHEMA_VERSION,
+    month: record.month,
+    baselineCostUsd: record.baselineCostUsd,
+    observedAt: record.observedAt,
+  };
 }
 
 /**
