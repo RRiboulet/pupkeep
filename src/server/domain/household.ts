@@ -26,10 +26,10 @@ import { reconcileMembers, type AppConfig } from "../config.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
 import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type WriteOutcome } from "./commands.ts";
+import { isIanaZone } from "../../shared/profile.ts";
 import {
   ActivityDoc,
   HouseholdDoc,
-  isIanaZone,
   parseHousehold,
   parseMemberProfiles,
   type DocStore,

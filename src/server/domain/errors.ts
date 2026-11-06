@@ -15,12 +15,18 @@ export class UnavailableError extends Error {
   }
 }
 
-/** The request is well-formed JSON but the domain refuses it (409). */
+/**
+ * The request is well-formed JSON but the domain refuses it (409 by default).
+ * A subclass may answer another status when the refusal is about a missing
+ * record rather than a conflict (the calendar's unknown-appointment 404): the
+ * one failure mapper in `http.ts` reads this field either way.
+ */
 export class DomainConflictError extends Error {
-  readonly status = 409;
-  constructor(message: string) {
+  readonly status: number;
+  constructor(message: string, status = 409) {
     super(message);
     this.name = "DomainConflictError";
+    this.status = status;
   }
 }
 

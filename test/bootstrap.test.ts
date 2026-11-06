@@ -95,6 +95,7 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
     assert.equal(result.profilesRemoved, 0);
     assert.deepEqual(result.docsCreated.sort(), [
       "app.activity",
+      "app.calendar",
       "app.commands",
       "app.feeding",
       "app.growth",
@@ -358,8 +359,19 @@ test("the parsers reject duplicate command keys and timezone-less instants, and 
     systemConversationId: 2,
     createdAt,
   };
-  assert.ok(parseHousehold({ ...base, settings: { ...base.settings, appointmentReminderOffsetsMin: [] } }));
-  assert.ok(parseHousehold({ ...base, settings: { ...base.settings, appointmentReminderOffsetsMin: [0] } }));
+  const withOffsets = (appointmentReminderOffsetsMin: unknown) =>
+    parseHousehold({ ...base, settings: { ...base.settings, appointmentReminderOffsetsMin } });
+  assert.ok(withOffsets([]), "an empty list means reminders off");
+  assert.ok(withOffsets([0]), "offset 0 means at the appointment");
+  assert.ok(withOffsets([1440, 60]), "the plan's default");
+  // P4-01: the household default is copied into an appointment, so it obeys the
+  // same offset rule as the record (distinct whole minutes within 30 days, at
+  // most 8) rather than failing every create with a misleading message.
+  assert.equal(withOffsets([0, 0]), undefined, "duplicate offsets");
+  assert.equal(withOffsets([-1]), undefined);
+  assert.equal(withOffsets([1.5]), undefined);
+  assert.equal(withOffsets([30 * 24 * 60 + 1]), undefined);
+  assert.equal(withOffsets(Array.from({ length: 9 }, (_, i) => i)), undefined);
 });
 
 test("a model attached to the system conversation is cleared on boot", async () => {

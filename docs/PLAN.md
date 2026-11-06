@@ -921,7 +921,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.walks` | One open walk + history | One open walk at a time; duration from server timestamps |
 | `app.growth` | Measurements (weight, height, note, who, when) | Several per day, the day's latest is its reading; kg to the gram, cm to a tenth; the chart series is derived in local-date order, never stored; the target weight is `app.puppy`'s field (P1-11), never copied |
 | `app.training` | Milestones + status | Starter catalog (build-side, stable `catalog:` ids) + `custom:<uuid>` entries; `not_started`/`practicing`/`mastered`; `masteredAt` iff mastered; untouched milestones have no record |
-| `app.calendar` | Appointments | UTC instant + household timezone; reminder offsets; status |
+| `app.calendar` | Appointments | Household-local date + `HH:MM` time + a zone snapshot; the UTC instant is **derived on read**, never stored; reminder offsets; status; revision |
 | `app.showers` | Shower history | A household-local date with the record; shampoo and notes are one line each; the next due date is **derived** from the latest shower plus `app.household.settings.showerIntervalDays`, never stored; append-only, two showers a day allowed, repeated ids refused |
 | `app.notifications` | Per-user in-app items + push outbox | Dedupe key, read state, delivery state |
 | `app.activity` | Last N human-readable events | Built by domain functions, not the LLM |
@@ -935,7 +935,8 @@ adds `app.notifications` with the committed intents a care action creates (P4-05
 adds the outbox and delivery fields as version 2); P3-01 adds `app.growth` with
 the measurement history; P3-04 adds `app.training` with the milestone states
 and the household's own entries (the catalog lives in the build); P3-06 adds
-`app.showers` with the shower history. Each
+`app.showers` with the shower history; P4-01 adds `app.calendar` with the
+appointments. Each
 value carries `schemaVersion: 1` and its Pi Durable document version is 1; a
 future change increments both and adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
@@ -1037,19 +1038,21 @@ type Walk = {
 type Appointment = {
   id: string;
   title: string;
-  startsAt: string;                 // UTC ISO
-  timezone: string;                 // household TZ snapshot
+  localDate: string;                 // YYYY-MM-DD on the household calendar
+  timeLocal: string;                 // HH:MM on the household clock (§8.4)
+  timezone: string;                  // zone snapshot; the instant derives in it
   durationMin: number;
   location?: string;
   vetName?: string;
   notes?: string;
   status: "scheduled" | "cancelled" | "completed";
-  reminderOffsetsMin: number[];
+  reminderOffsetsMin: number[];      // [] = off; default from household settings
+  reminderTaskIds: number[];         // armed by P4-03 (system conversation)
   createdBy: string | null;          // null = household attribution
   createdByLabel: string;
-  updatedAt: string;
+  updatedAt: string;                 // last write, not creation
   rev: number;                       // revision, not schema version
-  actionId: string;
+  actionId: string;                  // the last write's idempotency key
 };
 ```
 
@@ -1064,9 +1067,10 @@ or "Household" and the confirming human.
 
 - Store instants as UTC ISO strings; display in the household timezone.
 - Meal slots are local wall-clock times in the household timezone.
-- Appointment input is local wall time + household timezone, converted by the
-  server; accept an explicit UTC instant from the agent only when it is
-  unambiguous.
+- Appointment input is local wall time + household timezone; the server stores
+  the wall clock with a zone snapshot and **derives** the UTC instant on read,
+  so a DST change cannot move a 09:00 visit. An agent supplies the same wall
+  clock, never an instant.
 - Birthday is a local date (`YYYY-MM-DD`), not an instant.
 - Metric first: kg, cm. The UI may show a secondary unit later.
 - DST transitions are tested with `Europe/Paris` spring/fall fixtures.
@@ -3763,8 +3767,83 @@ process kill; both clients see the same state; the partner notification
 
 ### Phase 4 — Calendar, reminders, push, agent approvals
 
-- [ ] **P4-01** `app.calendar` doc/service: create/update/cancel, timezone/DST,
+- [x] **P4-01** `app.calendar` doc/service: create/update/cancel, timezone/DST,
       version checks.
+      **Landed:** `src/shared/calendar.ts` (the appointment record and write-field
+      parsers, `parseReminderOffsets`, `scheduledAppointments`/`findAppointment`,
+      the text/duration bounds and `APPOINTMENT_RULE`), `Appointment`/`Calendar`/
+      `CALENDAR_SCHEMA_VERSION` in `src/shared/domain.ts`, `CalendarDoc`/
+      `emptyCalendar`/`parseCalendar` in `src/server/domain/docs.ts`,
+      `src/server/domain/calendar.ts` (`readCalendar`, `appointmentInstant`,
+      `upcomingAppointments`, `createAppointment`, `updateAppointment`,
+      `cancelAppointment`, `AppointmentUnknownError`), bootstrap creating and
+      repairing `app.calendar` (with the missing-household and malformed-document
+      refusals), `app.calendar` in the care frame, and the shared `isIanaZone`
+      moved to `src/shared/profile.ts` so the household, household-document and
+      appointment parsers use one zone rule.
+      Decisions: (1) **the wall clock is stored, the instant is derived** — this
+      is the deliberate deviation from §8.3's `startsAt` sketch. A record holds
+      `localDate` + `timeLocal` + a zone snapshot; `appointmentInstant` converts
+      it in that zone on read. A 09:00 visit booked in October (CEST) for
+      December (CET) must stay 09:00, which an instant written with the booking
+      day's offset cannot do — the §8.4 rule that governs a meal slot governs an
+      appointment. (2) **the zone snapshot is the zone at the last write.** The
+      appointment's own zone derives its instant, so a household move leaves a
+      booked visit at the time it was booked; an edit re-anchors the wall clock
+      in the household's current zone, because the editor writes times on the
+      clock the caregiver is reading (P4-02 must render a differing zone). (3)
+      **cancellation is a state change, not a delete**: the record, its ids and
+      its activity line stay readable, and the revision bumps; `completed` is
+      parsed for a future writer but P4-01 writes only `scheduled`/`cancelled`,
+      and a non-scheduled record is read-only. (4) **the stale check runs inside
+      the commit, after the idempotency lookup**, as the profile and household
+      writers do: a retried save with the same key replays as success even though
+      its own commit bumped `rev`, while a newer revision answers `stale` (P4-02
+      turns it into a 409 with the current record). A missing id is its own 404,
+      never a stale 409. (5) **reminder offsets are distinct whole minutes up to
+      30 days, up to eight, in the caller's order** — the plan's default is
+      `[1440, 60]`, so an ascending rule would refuse the documented default.
+      Absent means the household's `appointmentReminderOffsetsMin` on create and
+      *unchanged* on update (a title fix must not silently switch reminders
+      off); `[]` is an explicit "off". (6) **`reminderTaskIds` ships now, empty**:
+      P4-03 fills it, and adding the field later would force a schema bump for a
+      list the document already has a place for. (7) **the record's `actionId` is
+      the last write's key**; creation provenance lives in the activity entry,
+      and a replay never re-derives an actor label or a zone from a later clock.
+      (8) One commit per change: the record, one activity line and the
+      `app.commands` key, with the completed list re-parsed inside the commit as
+      a backstop, and a refused shape does not burn its key. (9) **the household
+      default offset list now obeys the appointment rule** (`parseReminderOffsets`,
+      the same function the record parser uses): it is the first consumer of
+      `settings.appointmentReminderOffsetsMin`, so a permissive default could
+      otherwise make every create fail with a rule message naming the
+      appointment. An empty list and offset 0 are still accepted (reminders off /
+      at the appointment); a list outside the rule fails boot like any malformed
+      document.
+      **Verified:** 20 new tests in `test/calendar.test.ts` — the shape (trimmed
+      one-line text, the zone validator, duration bounds, offset list rules, the
+      §9.2 fence, unique ids, statuses, task ids), the derived instant across the
+      Paris spring-forward (02:30 → 03:30) and fall-back (earlier occurrence)
+      hours plus a booked-in-winter 09:00, an appointment's own zone deciding
+      against the household's, `upcomingAppointments` ordering across zones and
+      excluding cancelled/past, one commit per create/update/cancel (record +
+      activity + key), the household default offsets and an empty default
+      meaning off, replay vs key conflict, a bad shape writing nothing and not
+      burning its key, the household fallback actor, update bumping `rev`,
+      keeping the creator, keeping offsets when absent and re-anchoring the
+      zone, a stale revision writing nothing, cancel replaying and refusing a
+      cancelled or completed record, a missing document being unavailable rather
+      than empty, the care frame carrying no calendar data, boot repairing a
+      pre-P4-01 database and refusing a malformed or household-less one, and an
+      appointment surviving a reopen; `test/bootstrap.test.ts` also pins the
+      household-default offset rule. The suite is 615/615 and
+      `npm run typecheck` passes. Bootstrap's document lists and the setup
+      migration test were updated.
+      **Not verified:** no HTTP route, agent tool or Calendar UI (P4-02), so
+      nothing has created an appointment from a browser or the model yet; no
+      reminder task is armed and `reminderTaskIds` is always empty (P4-03); the
+      cancellation approval is P4-07; no writer produces `completed`; nothing
+      prunes a cancelled history (P5-07); and no phone has run it.
 - [ ] **P4-02** Appointment HTTP + agent tools + Calendar UI.
 - [ ] **P4-03** Appointment reminder tasks owned by the **system conversation**
       (`tx.createTask`, background, no model); task IDs persisted; reschedule/

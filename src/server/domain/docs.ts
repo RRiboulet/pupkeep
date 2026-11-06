@@ -1,7 +1,7 @@
 // The session documents PLAN §8.1 assigns to P1-08 (household, puppy, activity,
 // commands), plus the care documents later phases added (`app.feeding` with the
 // meal slots and feed events, `app.notifications`, `app.walks`, `app.growth`,
-// `app.training`, `app.showers`), and their parsers.
+// `app.training`, `app.showers`, `app.calendar`), and their parsers.
 //
 // The doc `version` and the value's `schemaVersion` start at 1. A shape change
 // increments both and adds `migrate(value, fromVersion)`; the parsers below then
@@ -35,6 +35,7 @@ import type { CheckpointInfo, DocumentReader, Tx } from "@earendil-works/pi-dura
 import { defineDoc } from "@earendil-works/pi-durable";
 import {
   ACTIVITY_SCHEMA_VERSION,
+  CALENDAR_SCHEMA_VERSION,
   COMMANDS_SCHEMA_VERSION,
   DEFAULT_HOUSEHOLD_NAME,
   DEFAULT_HOUSEHOLD_SETTINGS,
@@ -50,6 +51,7 @@ import {
   WALKS_SCHEMA_VERSION,
   type Activity,
   type ActivityEntry,
+  type Calendar,
   type CommandRecord,
   type Commands,
   type FeedReminderRef,
@@ -66,13 +68,14 @@ import {
   type PuppySex,
   type Walks,
 } from "../../shared/domain.ts";
+import { parseAppointmentList, parseReminderOffsets } from "../../shared/calendar.ts";
 import { SLOT_ID_LIMIT, parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
 import { parseGrowthMeasurements } from "../../shared/growth.ts";
 import { parseTrainingList } from "../../shared/training.ts";
 import { parseShowerList } from "../../shared/showers.ts";
 import { parseNotificationIntents } from "../../shared/notifications.ts";
 import { parseWalkList } from "../../shared/walks.ts";
-import { hasControlCharacter, isLocalDate } from "../../shared/profile.ts";
+import { hasControlCharacter, isIanaZone, isLocalDate } from "../../shared/profile.ts";
 
 /**
  * What a domain function needs from its caller: committed reads plus one
@@ -147,6 +150,11 @@ export function emptyTraining(): Training {
 /** The shower history: append-only, with the next due date derived elsewhere. */
 export function emptyShowers(): Showers {
   return { schemaVersion: SHOWERS_SCHEMA_VERSION, showers: [], createdAt: "" };
+}
+
+/** No appointments yet; the calendar is never reset, only appended to. */
+export function emptyCalendar(): Calendar {
+  return { schemaVersion: CALENDAR_SCHEMA_VERSION, appointments: [], createdAt: "" };
 }
 
 /** No committed notification intents yet. */
@@ -277,6 +285,15 @@ export const ShowersDoc = defineDoc<Showers>({
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
+/** The appointments (P4-01). Version 1; a cancelled record stays in the list. */
+export const CalendarDoc = defineDoc<Calendar>({
+  kind: "app.calendar",
+  version: 1,
+  scope: "session",
+  initial: emptyCalendar,
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
 /** Committed notification intents (P2-02 writes them; P4-05 adds delivery). */
 export const NotificationsDoc = defineDoc<Notifications>({
   kind: "app.notifications",
@@ -321,18 +338,6 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
-
-
-export function isIanaZone(value: unknown): value is string {
-  if (!isNonEmptyString(value)) return false;
-  try {
-    new Intl.DateTimeFormat("en-GB", { timeZone: value });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
@@ -351,14 +356,13 @@ function parseSettings(value: unknown): HouseholdSettings | undefined {
   const { feedReminderDelayMin, appointmentReminderOffsetsMin, showerIntervalDays, agentBudgetUsd } = record;
   if (!isNonNegativeNumber(feedReminderDelayMin)) return undefined;
   // An empty offset list means "no appointment reminders"; offset 0 means "at
-  // the appointment". Rejecting either now would force a schemaVersion bump when
-  // P4 exposes the setting.
-  if (!Array.isArray(appointmentReminderOffsetsMin)) return undefined;
-  const offsets: number[] = [];
-  for (const offset of appointmentReminderOffsetsMin) {
-    if (!isNonNegativeInteger(offset)) return undefined;
-    offsets.push(offset);
-  }
+  // the appointment". Both are allowed by the one offset rule, which P4-01's
+  // appointment records use too: a household default can never be a list the
+  // appointment parser refuses (which would answer every create with a
+  // misleading rule message). A hand-edited list outside the rule fails boot,
+  // as any other malformed document does.
+  const offsets = parseReminderOffsets(appointmentReminderOffsetsMin);
+  if (!offsets) return undefined;
   // A whole number of days: the due date is a calendar date, so the one place
   // that decides the interval's domain is the document parser (no second
   // rounding rule downstream).
@@ -622,6 +626,21 @@ export function parseShowers(value: unknown): Showers | undefined {
   const showers = parseShowerList(record.showers);
   if (!showers) return undefined;
   return { schemaVersion: SHOWERS_SCHEMA_VERSION, showers, createdAt: record.createdAt };
+}
+
+/**
+ * `app.calendar`: the appointments. The record invariants (the wall-clock shape
+ * with its zone snapshot, the lifecycle status, the offset and task-id lists,
+ * the §9.2 pairing) live in `shared/calendar.ts`, so the service validates a
+ * draft with the same rules the document uses.
+ */
+export function parseCalendar(value: unknown): Calendar | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== CALENDAR_SCHEMA_VERSION) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  const appointments = parseAppointmentList(record.appointments);
+  if (!appointments) return undefined;
+  return { schemaVersion: CALENDAR_SCHEMA_VERSION, appointments, createdAt: record.createdAt };
 }
 
 /**

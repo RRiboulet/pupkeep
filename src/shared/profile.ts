@@ -88,6 +88,21 @@ export type PuppyProfile = {
 
 const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * The zone if `Intl` accepts it. Lives here, next to the local-date rule, so
+ * the household document, this module's readers and an appointment's zone
+ * snapshot all use one validator (`docs.ts` and `shared/calendar.ts`).
+ */
+export function isIanaZone(value: unknown): value is string {
+  if (typeof value !== "string" || value.trim() === "") return false;
+  try {
+    new Intl.DateTimeFormat("en-GB", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** A syntactically valid `YYYY-MM-DD` that names a real day. */
 export function isLocalDate(value: unknown): value is string {
   if (typeof value !== "string" || !LOCAL_DATE.test(value)) return false;
