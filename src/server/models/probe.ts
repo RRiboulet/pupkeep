@@ -278,6 +278,9 @@ export function createPiAiProbeCall(models: Models): ProbeCall {
     return models.completeSimple(model, context, {
       maxTokens: DEFAULT_MAX_TOKENS,
       signal,
+      // OpenCode Go routes per-conversation; without this header the provider
+      // answers 400 "MissingSessionID" and every model reads as `network`.
+      sessionId: "pupkeep-probe",
     });
   };
 }
