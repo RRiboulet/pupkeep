@@ -19,6 +19,8 @@
 //   GET  /api/puppy              the care state: puppy, roster, meals, setup
 //   PATCH /api/puppy             edit the profile (rev + Idempotency-Key)
 //   PATCH /api/household         set/confirm the timezone (rev + Idempotency-Key)
+//   GET  /api/budget             this month's spend against the cap (both caregivers)
+//   PATCH /api/budget            set the monthly cap (owner; rev + Idempotency-Key)
 //   PATCH /api/feeding/slots     set the meal schedule (rev + Idempotency-Key)
 //   GET  /api/feeding/day        today's meals: slots with who fed when, extras
 //   POST /api/feeding/fed        log a scheduled meal (Idempotency-Key → 409)
@@ -98,6 +100,7 @@ import {
 import type { ActorResolver } from "./domain/actor.ts";
 import type { Logger } from "./log.ts";
 import type { JsonFileStore } from "./json-file.ts";
+import type { Models } from "@earendil-works/pi-ai";
 import { isNtfyTopic, type PushConfig } from "./config.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { isPushEndpoint } from "./push/web-push.ts";
@@ -119,7 +122,9 @@ import {
   updateMealSlots,
   type FeedOutcome,
 } from "./domain/feeding.ts";
-import { updateHouseholdTimezone } from "./domain/household.ts";
+import { updateAgentBudget, updateHouseholdTimezone } from "./domain/household.ts";
+import { readBudget } from "./domain/usage.ts";
+import { modelIsPaid } from "./agent/model.ts";
 import { readProfile, updatePuppyProfile } from "./domain/profile.ts";
 import { logMeasurement, readGrowthView, type MeasurementOutcome } from "./domain/growth.ts";
 import {
@@ -154,6 +159,7 @@ import {
 import {
   ThreadUnavailableError,
   labelFor,
+  readThreadModel,
   readThreadSnapshot,
   submitChatMessage,
   type ThreadRef,
@@ -234,6 +240,12 @@ export interface HttpDeps {
   readonly logger: Logger;
   /** VAPID keys and per-device subscriptions, read/written through one queue. */
   readonly push: JsonFileStore<PushConfig>;
+  /**
+   * The provider catalog, for the catalog's prices (the budget's paid/free
+   * decision, P4-08). Absent only in a scaffold test; a missing catalog makes
+   * every model look paid, which is the fail-closed direction.
+   */
+  readonly models?: Models;
   /** Long-poll wait; capped to THREAD_POLL_MAX_MS. */
   readonly pollTimeoutMs?: number;
   /** The server clock, injected in tests; the wall clock otherwise (P2-03's day view). */
@@ -520,6 +532,18 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/budget" && req.method === "GET") {
+      // The partner can see the spend (§11.3); only the owner may change the cap.
+      requireCare(session);
+      await handleBudgetRead(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/budget" && req.method === "PATCH") {
+      await handleBudgetUpdate(deps, req, res, requireAction(requireCare(session), "budget"));
+      return;
+    }
+
     if (pathname === "/api/feeding/slots" && req.method === "PATCH") {
       await handleMealSlotsUpdate(deps, req, res, requireCare(session));
       return;
@@ -700,7 +724,8 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       error:
         "route not served yet: the remaining care routes " +
         "arrive with their phases; the profile is GET/PATCH /api/puppy, " +
-        "the timezone PATCH /api/household, the meal schedule PATCH /api/feeding/slots, " +
+        "the timezone PATCH /api/household, the budget GET/PATCH /api/budget, " +
+        "the meal schedule PATCH /api/feeding/slots, " +
         "today's meals GET /api/feeding/day, POST /api/feeding/fed, POST /api/feeding/extra, " +
         "walks GET /api/walks, POST /api/walks/start, POST /api/walks/end, POST /api/walks/discard, " +
         "growth GET /api/growth, POST /api/growth, " +
@@ -745,6 +770,25 @@ async function handleMessage(
 
   const body = parseSubmitBody(await readJsonBody(req));
   if (!body) throw new ConflictError("a message needs text and a clientMessageId");
+
+  // §11.3: the budget is enforced server-side, before the turn is placed. A
+  // running turn can cross the cap, so this is the next submission's check; a
+  // free (\$0) model stays usable at the cap, and its own turn is not blocked.
+  const now = new Date(deps.now?.() ?? Date.now());
+  const budget = await readBudget(deps.thread.harness, deps.thread.context, now);
+  if (!budget.paidAllowed) {
+    const model = await readThreadModel(deps.thread);
+    if (model !== undefined && modelIsPaid(deps.models, model)) {
+      sendJson(res, 409, {
+        error: "budget_exhausted",
+        message:
+          `The monthly agent budget is used up ($${budget.spentUsd.toFixed(2)} of $${budget.capUsd.toFixed(2)}). ` +
+          "The owner can raise it in Settings, or pick a free model.",
+        budget,
+      });
+      return;
+    }
+  }
 
   // Actor attribution (§9.2): the author is the session member; the label is
   // resolved through the household profiles, never the auth displayName.
@@ -1079,6 +1123,69 @@ async function handleHouseholdUpdate(
     now: new Date(deps.now?.() ?? Date.now()),
   });
   await respondToCareWrite(deps, res, outcome, "timezone");
+}
+
+/**
+ * This month's spend against the cap. Every caregiver sees it (§11.3: "show the
+ * current model and spend in Settings; the partner can see them"); the read is
+ * cheap and is what the Settings card and the agent header render.
+ */
+async function handleBudgetRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  sendJson(res, 200, { budget: await readBudget(deps.thread.harness, deps.thread.context, now) });
+}
+
+/**
+ * Set the monthly cap (owner-only by the §14.1 matrix). A stale household
+ * revision is a terminal 409 carrying the current care view, like every other
+ * §7.4 write.
+ */
+async function handleBudgetUpdate(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = await readJsonBody(req);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ConflictError("a budget change is a JSON object");
+  }
+  const record = body as Record<string, unknown>;
+  requireOnlyKeys(record, ["rev", "capUsd"]);
+  const rev = revisionOf(record);
+  if (typeof record.capUsd !== "number") {
+    throw new ConflictError("a budget change needs capUsd, a number of dollars");
+  }
+
+  const now = new Date(deps.now?.() ?? Date.now());
+  const outcome = await updateAgentBudget(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    rev,
+    capUsd: record.capUsd,
+    now,
+  });
+  if (outcome === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  if (outcome === "stale") {
+    // Terminal for this action: the client re-reads the care view, it does not
+    // auto-retry with a fresh revision.
+    sendJson(res, 409, {
+      error: "stale",
+      message: "the household changed since it was read",
+      profile: await readProfile(deps.thread.harness, deps.thread.context, now),
+    });
+    return;
+  }
+  // Success carries the budget the write produced, so the Settings card never
+  // merges a partial view (the same rule every care write follows).
+  sendJson(res, 200, {
+    budget: await readBudget(deps.thread.harness, deps.thread.context, now),
+    replayed: outcome === "replayed",
+  });
 }
 
 /**

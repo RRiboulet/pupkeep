@@ -26,6 +26,8 @@ import type { AppointmentFields } from "./calendar.ts";
 export const HOUSEHOLD_SCHEMA_VERSION = 4 as const;
 /** Version 2 adds `rev` (P1-11); a version-1 document migrates on read. */
 export const PUPPY_SCHEMA_VERSION = 2 as const;
+/** `app.usage` (P4-08): the derived monthly baseline; never a second ledger. */
+export const USAGE_SCHEMA_VERSION = 1 as const;
 export const ACTIVITY_SCHEMA_VERSION = 1 as const;
 export const COMMANDS_SCHEMA_VERSION = 1 as const;
 /**
@@ -711,6 +713,25 @@ export type Activity = {
   schemaVersion: typeof ACTIVITY_SCHEMA_VERSION;
   createdAt: string;
   entries: ActivityEntry[];
+};
+
+/**
+ * `app.usage`: the **derived** monthly snapshot (PLAN §11.3). `harness.usage()`
+ * is authoritative — this document only remembers where the current household
+ * month started, so a monthly figure can be read without a ledger of its own.
+ *
+ * `baselineCostUsd` is the session-total spend at the moment `month` began (or
+ * the last time the total went backwards, which a restore does). The month's
+ * spend is `sessionTotal − baselineCostUsd`, computed on read and never stored.
+ */
+export type UsageSnapshot = {
+  schemaVersion: typeof USAGE_SCHEMA_VERSION;
+  /** Household-local month, `YYYY-MM`. */
+  month: string;
+  /** Session-total spend (USD) when `month` began. */
+  baselineCostUsd: number;
+  /** When the baseline was last observed. */
+  observedAt: string;
 };
 
 /** One idempotency record; committed with the action it describes. */

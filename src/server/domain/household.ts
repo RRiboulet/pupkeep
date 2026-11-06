@@ -27,6 +27,7 @@ import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
 import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type WriteOutcome } from "./commands.ts";
 import { isIanaZone } from "../../shared/profile.ts";
+import { AGENT_BUDGET_MAX_USD, isAgentBudget } from "../../shared/usage.ts";
 import {
   ActivityDoc,
   FeedingDoc,
@@ -190,6 +191,77 @@ export async function updateHouseholdTimezone(
           }),
         );
         return { rev: draft.rev, timezone: input.timezone };
+      },
+    );
+  } catch (error) {
+    if (error instanceof StaleRevisionError) return "stale";
+    throw error;
+  }
+
+  return outcomeOf(outcome);
+}
+
+// --- the agent's monthly cap (P4-08) ----------------------------------------
+
+export type BudgetWrite = {
+  /** Resolved inside the commit, against the household the write reads. */
+  readonly actor: ActorResolver;
+  readonly actionId: string;
+  /** The household revision the caller read. */
+  readonly rev: number;
+  /** Whole cents, `0`–`AGENT_BUDGET_MAX_USD` (§11.3). */
+  readonly capUsd: number;
+  readonly now?: Date;
+};
+
+/**
+ * Set the monthly agent cap. One commit: the setting, the bumped revision, the
+ * activity line and the idempotency record. The cap is enforced server-side on
+ * the next submission (§11.3) — this route only stores the owner's decision.
+ *
+ * It shares `app.household`'s revision with the timezone write, so a stale draft
+ * of either is refused rather than silently overwriting the other.
+ */
+export async function updateAgentBudget(
+  store: DocStore,
+  context: Context,
+  input: BudgetWrite,
+): Promise<WriteOutcome> {
+  const now = input.now ?? new Date();
+  const request = { rev: input.rev, agentBudgetUsd: input.capUsd } as JsonObject;
+  let outcome: CommandOutcome<{ rev: number; agentBudgetUsd: number }>;
+  try {
+    outcome = await runIdempotent(
+      { store, context },
+      { key: input.actionId, requestHash: requestHashOf(request), now },
+      async (tx) => {
+        // Validated inside the callback, after the idempotency lookup: a replay
+        // must not be re-judged, and a bad cap must not reach the document.
+        if (!isAgentBudget(input.capUsd)) {
+          throw new DomainConflictError(`a monthly budget is whole cents from 0 to ${AGENT_BUDGET_MAX_USD}`);
+        }
+        const draft = await tx.doc(HouseholdDoc);
+        const actor = await input.actor(tx, draft);
+        if (draft.rev !== input.rev) throw new StaleRevisionError("the household changed since it was read");
+
+        const before = draft.settings.agentBudgetUsd;
+        draft.settings.agentBudgetUsd = input.capUsd;
+        draft.rev = input.rev + 1;
+        appendActivity(
+          await tx.doc(ActivityDoc),
+          activityEntry({
+            kind: "household.budget",
+            // Amounts only: a cap is not caregiver text and cannot forge a line.
+            summary:
+              before === input.capUsd
+                ? `${actor.label} re-confirmed the monthly agent budget ($${input.capUsd.toFixed(2)})`
+                : `${actor.label} set the monthly agent budget to $${input.capUsd.toFixed(2)}`,
+            actorId: actor.id,
+            actorLabel: actor.label,
+            now,
+          }),
+        );
+        return { rev: draft.rev, agentBudgetUsd: input.capUsd };
       },
     );
   } catch (error) {

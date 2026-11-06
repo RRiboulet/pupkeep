@@ -335,6 +335,18 @@ export async function readThreadSnapshot(thread: ThreadRef, seq: number): Promis
   };
 }
 
+/**
+ * The model the shared thread is configured with, if any. P4-08's budget check
+ * needs it on every submission, and reading it through the household keeps the
+ * check honest when a picker changes the model mid-session.
+ */
+export async function readThreadModel(thread: ThreadRef): Promise<{ provider: string; modelId: string } | undefined> {
+  const household = await readHousehold(thread.harness, thread.context);
+  const conversation = await sharedConversation(thread, household, "model");
+  const agent = await conversation.agent(thread.context);
+  return agent.model === undefined ? undefined : { provider: agent.model.provider, modelId: agent.model.modelId };
+}
+
 export type ThreadAgentConfig = {
   /** The §9.5 instructions, before this conversation is selectable in the UI. */
   readonly instructions: string;
