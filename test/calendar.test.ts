@@ -454,6 +454,10 @@ test("a stale revision is refused with no write, and a cancelled appointment is 
       now: LATE,
     });
     assert.equal(stale.kind, "stale");
+    if (stale.kind === "stale") {
+      assert.equal(stale.appointment.title, "Vet visit", "the stale answer carries the committed record");
+      assert.equal(stale.appointment.rev, 0);
+    }
     assert.equal((await readCalendar(opened.harness, context)).appointments[0]?.title, "Vet visit");
 
     const cancelled = await cancelAppointment(opened.harness, context, {

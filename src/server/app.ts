@@ -51,6 +51,7 @@ import { createWalkTools } from "./agent/walk-tools.ts";
 import { createGrowthTools } from "./agent/growth-tools.ts";
 import { createTrainingTools } from "./agent/training-tools.ts";
 import { createShowerTools } from "./agent/shower-tools.ts";
+import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { createProfileTools } from "./agent/tools.ts";
 import { createReminders } from "./reminders/feed-reminder.ts";
 import {
@@ -242,6 +243,9 @@ export function installAppExtensions(registry: Registry<ToolRegistration>): void
   registry.install(createGrowthTools());
   registry.install(createTrainingTools());
   registry.install(createShowerTools());
+  // P4-02: the free calendar reads. Appointment writes are schedule changes and
+  // wait for P4-07's approval path, so this extension has no write tool.
+  registry.install(createCalendarTools());
   // P2-09: the feeding reminder task definition. Installing it is what lets a
   // task armed by the meal schedule sleep and wake; the hidden system
   // conversation owns it and never selects an extension of its own (§9.1).

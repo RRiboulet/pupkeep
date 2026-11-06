@@ -30,6 +30,7 @@ import { OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
 import { HOUSEHOLD_FALLBACK_LABEL } from "./chat.ts";
 import { hasControlCharacter, isIanaZone, isLocalDate } from "./profile.ts";
 import { isLocalTime } from "./feeding.ts";
+import { dateMinusDays, daysBetween } from "./dates.ts";
 
 /** The opaque-id bound; action ids mirror `COMMAND_KEY_LIMIT`. */
 export const APPOINTMENT_ID_LIMIT = 64;
@@ -45,10 +46,17 @@ export const APPOINTMENT_DURATION_MAX = 720;
 /** The time before an appointment a reminder may fire, up to 30 days. */
 export const REMINDER_OFFSETS_MAX = 8;
 export const REMINDER_OFFSET_MAX_MIN = 30 * 24 * 60;
+/** The widest one request may ask for: a year and a week, enough for a month grid's neighbours. */
+export const CALENDAR_WINDOW_MAX_DAYS = 372;
+/** A range that names neither end: today and the next 90 days (a quarter). */
+export const CALENDAR_DEFAULT_DAYS = 90;
 
 /** The one sentence a refused appointment answers with (route, tool, service). */
 export const APPOINTMENT_RULE =
   "an appointment needs a title, a date and an HH:MM time, a 5 to 720 minute duration, and up to 8 distinct reminder offsets no more than 30 days before it";
+
+/** The one sentence a refused date range answers with (route and tool). */
+export const CALENDAR_WINDOW_RULE = `an appointment range is two calendar dates (YYYY-MM-DD), the start on or before the end, at most ${CALENDAR_WINDOW_MAX_DAYS} days apart`;
 
 export const APPOINTMENT_STATUSES = ["scheduled", "cancelled", "completed"] as const;
 
@@ -73,7 +81,8 @@ export type AppointmentFields = {
   reminderOffsetsMin?: number[];
 };
 
-const FIELD_KEYS = [
+/** The keys a create or update body may carry (the zone is never client input). */
+export const APPOINTMENT_FIELD_KEYS = [
   "title",
   "localDate",
   "timeLocal",
@@ -126,6 +135,27 @@ export function parseReminderOffsets(value: unknown): number[] | undefined {
 }
 
 /**
+ * The local-date range one read asks for. Both ends are optional: `from`
+ * defaults to the household's today and `to` to 90 days later, so a caller that
+ * names nothing gets the useful quarter. The range is inclusive and may include
+ * past days (the calendar's history is readable); only a reversed, malformed or
+ * over-wide range is refused, because it would scan an unbounded document.
+ */
+export type CalendarWindow = { from: string; to: string };
+
+export function parseCalendarWindow(from: unknown, to: unknown, today: string): CalendarWindow | undefined {
+  if (!isLocalDate(today)) return undefined;
+  if (from !== undefined && from !== null && !isLocalDate(from)) return undefined;
+  if (to !== undefined && to !== null && !isLocalDate(to)) return undefined;
+  const start = typeof from === "string" ? from : today;
+  const end = typeof to === "string" ? to : dateMinusDays(start, -CALENDAR_DEFAULT_DAYS);
+  if (!isLocalDate(end)) return undefined;
+  const span = daysBetween(start, end);
+  if (span < 0 || span > CALENDAR_WINDOW_MAX_DAYS) return undefined;
+  return { from: start, to: end };
+}
+
+/**
  * The editable fields of a create or update. The parser is the fence for both
  * surfaces (§10.3): the HTTP route and the agent tool pass the caller's object
  * and the service re-parses before it writes.
@@ -133,7 +163,9 @@ export function parseReminderOffsets(value: unknown): number[] | undefined {
 export function parseAppointmentFields(raw: unknown): AppointmentFields | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const record = raw as Record<string, unknown>;
-  if (Object.keys(record).some((key) => !(FIELD_KEYS as readonly string[]).includes(key))) return undefined;
+  if (Object.keys(record).some((key) => !(APPOINTMENT_FIELD_KEYS as readonly string[]).includes(key))) {
+    return undefined;
+  }
 
   const title = lineText(record.title, APPOINTMENT_TITLE_LIMIT);
   if (title === undefined) return undefined;

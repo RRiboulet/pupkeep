@@ -251,7 +251,7 @@ test("get_context reports today's meals and no longer says they are untracked", 
     assert.match(text, /Meals today: \(today, Europe\/Paris\) id "slot-b", "Breakfast" \(07:00\): fed by "Household"/);
     assert.match(text, /id "slot-d", "Dinner" \(18:00\): not fed/);
     assert.doesNotMatch(text, /Not tracked by this build yet: .*meals/);
-    assert.match(text, /Not tracked by this build yet: appointments$/m);
+    assert.match(text, /^Next appointment: none scheduled\.$/m);
   } finally {
     await fixture.stop();
   }

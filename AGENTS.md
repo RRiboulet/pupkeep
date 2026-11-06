@@ -10,9 +10,12 @@ current approved phase.
 **Current phase: Phase 4** (calendar, reminders, push, approvals). Phase 3 is
 complete on `main` through P3-08; Gate G3 is covered by
 `test/dual-path.test.ts`. Phase 1 is complete through P1-14 and Phase 2 through
-P2-09. **P4-01** (`app.calendar` and its service) is complete; the next task is
-**P4-02** (appointment HTTP, agent tools and Calendar UI). G1's
-host-side criteria are covered by `test/e2e.test.ts` and `test/setup.test.ts`.
+P2-09. **P4-01** (`app.calendar` and its service) and **P4-02** (appointment
+HTTP, the calendar read tool and the Calendar UI) are complete; the next task is
+**P4-03** (appointment reminder tasks owned by the hidden system conversation).
+The agent's appointment *write* tools wait for P4-07's approval path, so the
+calendar extension ships reads only. G1's host-side criteria are covered by
+`test/e2e.test.ts` and `test/setup.test.ts`.
 The devcontainer is `.devcontainer/` (Node 24, pi `1.5.0`,
 sqlite3/cloudflared/rclone/tmux/gh, plus the host tools); `postCreate.sh` runs
 `npm ci`, typecheck and the tests. The shared pi package belongs in that

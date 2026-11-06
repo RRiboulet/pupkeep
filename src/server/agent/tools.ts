@@ -45,12 +45,16 @@ import { TrainingUnavailableError, readTrainingView } from "../domain/training.t
 import { GrowthUnavailableError, readGrowth } from "../domain/growth.ts";
 import { ShowersUnavailableError, readShowerView } from "../domain/showers.ts";
 import { showerSummaryText } from "./shower-text.ts";
+import {
+  CalendarUnavailableError,
+  calendarView,
+  readCalendar,
+} from "../domain/calendar.ts";
+import { readHousehold } from "../domain/household.ts";
+import { nextAppointmentText } from "./calendar-text.ts";
 import { openWalkText } from "./walk-text.ts";
 import { refused, speakerSeam, text } from "./tool-kit.ts";
 
-
-/** §10.1 sections this build does not track yet. Remove one per phase. */
-const NOT_TRACKED = ["appointments"] as const;
 
 /**
  * The name and breed are caregiver free text, so they are rendered as JSON
@@ -96,8 +100,7 @@ export function createProfileTools(): Extension<ToolRegistration> {
     description:
       "Read the current household state: now, the household-local date, the caregivers, the puppy profile and age, " +
       "today's meals and who fed each, the open walk, the latest weight, the milestone summary, the shower " +
-      "status, and recent activity. Sections this build does not track are listed in the answer; say so instead " +
-      "of guessing.",
+      "status, the next appointment, and recent activity.",
     parameters: Type.Object({}),
     execute: async (_args, api, context) => {
       const now = new Date(api.now());
@@ -145,6 +148,16 @@ export function createProfileTools(): Extension<ToolRegistration> {
       } catch (error) {
         if (!(error instanceof ShowersUnavailableError)) throw error;
       }
+      // §10.1's next appointments: the household's zone and default range come
+      // from one household read, so this line and the Calendar screen agree.
+      let appointments = "Next appointment: unavailable (retry after boot)";
+      try {
+        appointments = nextAppointmentText(
+          calendarView(await readHousehold(api, context), await readCalendar(api, context), now),
+        );
+      } catch (error) {
+        if (!(error instanceof CalendarUnavailableError)) throw error;
+      }
       const activity = await api.snapshot(ActivityDoc, context);
       const parsed = activity === undefined ? undefined : parseActivity(activity);
       // Names are free text too (an invite's display name), so they get the
@@ -175,8 +188,9 @@ export function createProfileTools(): Extension<ToolRegistration> {
           milestones,
           // §10.1's shower status: the last shower and the next due date.
           showers,
+          // §10.1's next appointments (P4-02), with a household-local countdown.
+          appointments,
           `Recent activity:\n${activityText(parsed ? recentActivity(parsed, 10) : [])}`,
-          `Not tracked by this build yet: ${NOT_TRACKED.join(", ")}`,
         ].join("\n"),
       );
     },

@@ -34,6 +34,11 @@
 //   POST /api/training/custom    add a milestone of the household's own (Idempotency-Key)
 //   GET  /api/showers            the shower history, the last shower and the next due date
 //   POST /api/showers            log a shower (Idempotency-Key)
+//   GET  /api/appointments       appointments in a local-date range (?from=&to=)
+//   GET  /api/appointments/next  the next scheduled appointment
+//   POST /api/appointments       create an appointment (Idempotency-Key)
+//   POST /api/appointments/update  replace an appointment's fields (rev + Idempotency-Key)
+//   POST /api/appointments/cancel  cancel an appointment (rev + Idempotency-Key)
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -51,6 +56,11 @@
 
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { isMilestoneStatus } from "../shared/training.ts";
+import {
+  APPOINTMENT_FIELD_KEYS,
+  CALENDAR_WINDOW_RULE,
+  parseCalendarWindow,
+} from "../shared/calendar.ts";
 import type { AgentEvent } from "@earendil-works/pi-durable";
 import { HOUSEHOLD_FALLBACK_LABEL, THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
 import {
@@ -101,6 +111,16 @@ import {
   type MilestoneUpdateOutcome,
 } from "./domain/training.ts";
 import { logShower, readShowerView, type ShowerOutcome } from "./domain/showers.ts";
+import {
+  appointmentView,
+  calendarView,
+  cancelAppointment,
+  createAppointment,
+  readCalendar,
+  updateAppointment,
+  upcomingAppointments,
+  type AppointmentChangeOutcome,
+} from "./domain/calendar.ts";
 import {
   ThreadUnavailableError,
   labelFor,
@@ -546,17 +566,46 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/appointments" && req.method === "GET") {
+      requireCare(session);
+      await handleAppointmentsRead(deps, req, res);
+      return;
+    }
+
+    if (pathname === "/api/appointments/next" && req.method === "GET") {
+      requireCare(session);
+      await handleNextAppointment(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/appointments" && req.method === "POST") {
+      await handleAppointmentCreate(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/appointments/update" && req.method === "POST") {
+      await handleAppointmentUpdate(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/appointments/cancel" && req.method === "POST") {
+      await handleAppointmentCancel(deps, req, res, requireCare(session));
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
-        "route not served yet: the remaining care routes (calendar) " +
+        "route not served yet: the remaining care routes " +
         "arrive with their phases; the profile is GET/PATCH /api/puppy, " +
         "the timezone PATCH /api/household, the meal schedule PATCH /api/feeding/slots, " +
         "today's meals GET /api/feeding/day, POST /api/feeding/fed, POST /api/feeding/extra, " +
         "walks GET /api/walks, POST /api/walks/start, POST /api/walks/end, POST /api/walks/discard, " +
         "growth GET /api/growth, POST /api/growth, " +
         "milestones GET /api/training, POST /api/training/milestone, POST /api/training/custom, " +
-        "and showers GET /api/showers, POST /api/showers",
+        "showers GET /api/showers, POST /api/showers, " +
+        "and appointments GET /api/appointments, GET /api/appointments/next, " +
+        "POST /api/appointments, POST /api/appointments/update, POST /api/appointments/cancel",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -1502,6 +1551,177 @@ async function handleShowerWrite(
     return;
   }
   sendJson(res, 200, { shower: outcome.shower, replayed: outcome.kind === "replayed" });
+}
+
+// --- appointments (P4-02) ----------------------------------------------------
+
+/** A JSON object body, or the one sentence saying why it is not. */
+function appointmentBody(raw: unknown, allowed: readonly string[], subject: string): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError(`an ${subject} is a JSON object`);
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, allowed);
+  return record;
+}
+
+/** The appointment id from a body; the record is addressed by id, not path. */
+function appointmentIdOf(record: Record<string, unknown>): string {
+  const id = record.id;
+  if (typeof id !== "string" || id.trim() === "") {
+    throw new ConflictError("an appointment change needs the appointment's id");
+  }
+  return id.trim();
+}
+
+/**
+ * The ranged read. Filtering is by household-local date, so the window is
+ * parsed against the household's today — never the device's zone (§8.4). An
+ * invalid or over-wide range is a 409 sentence, not a 500.
+ */
+async function handleAppointmentsRead(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const window = parseCalendarWindow(
+    url.searchParams.get("from") ?? undefined,
+    url.searchParams.get("to") ?? undefined,
+    localDateAt(now, household.timezone),
+  );
+  if (!window) throw new ConflictError(CALENDAR_WINDOW_RULE);
+  const calendar = await readCalendar(deps.thread.harness, deps.thread.context);
+  sendJson(res, 200, calendarView(household, calendar, now, window));
+}
+
+/**
+ * The next scheduled appointment, for Today's countdown. It is deliberately
+ * small: Today does not need a range, and a month of records on every load would
+ * be the calendar screen's job.
+ */
+async function handleNextAppointment(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  const [household, calendar] = await Promise.all([
+    readHousehold(deps.thread.harness, deps.thread.context),
+    readCalendar(deps.thread.harness, deps.thread.context),
+  ]);
+  const next = upcomingAppointments(calendar, now, 1)[0];
+  sendJson(res, 200, {
+    timezone: household.timezone,
+    today: localDateAt(now, household.timezone),
+    next: next === undefined ? null : appointmentView(next),
+  });
+}
+
+/**
+ * Create one appointment. The fields are the body; the zone and the default
+ * reminder offsets come from the household inside the commit, never from the
+ * client. The answer is the committed record with its derived instants.
+ */
+async function handleAppointmentCreate(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const fields = appointmentBody(await readJsonBody(req), APPOINTMENT_FIELD_KEYS, "appointment");
+  const outcome = await createAppointment(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    fields,
+    now: new Date(deps.now?.() ?? Date.now()),
+  });
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  sendJson(res, 200, {
+    appointment: appointmentView(outcome.appointment),
+    replayed: outcome.kind === "replayed",
+  });
+}
+
+/**
+ * One answer for update and cancel (§7.4): a stale revision is a terminal 409
+ * carrying the **current appointment** the domain read (the caller re-reads and
+ * re-decides), a reused key is the one key-conflict answer, and success carries
+ * the committed record with its derived instants. A missing appointment reaches
+ * the mapper as a 404; it is neither stale nor a key conflict.
+ */
+async function respondToAppointmentWrite(
+  res: ServerResponse,
+  outcome: AppointmentChangeOutcome,
+): Promise<void> {
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  if (outcome.kind === "stale") {
+    // The domain carries the committed record it read at the revision check, so
+    // the conflict names the other caregiver's values without a second read.
+    sendJson(res, 409, {
+      error: "stale",
+      message: "the appointment changed since it was read",
+      appointment: appointmentView(outcome.appointment),
+    });
+    return;
+  }
+  sendJson(res, 200, {
+    appointment: appointmentView(outcome.appointment),
+    replayed: outcome.kind === "replayed",
+  });
+}
+
+/** Replace an appointment's editable fields; `rev` is the one that was read. */
+async function handleAppointmentUpdate(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const record = appointmentBody(
+    await readJsonBody(req),
+    [...APPOINTMENT_FIELD_KEYS, "id", "rev"],
+    "appointment change",
+  );
+  const id = appointmentIdOf(record);
+  const rev = revisionOf(record);
+  const { id: _id, rev: _rev, ...fields } = record;
+  const outcome = await updateAppointment(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    id,
+    rev,
+    fields,
+    now: new Date(deps.now?.() ?? Date.now()),
+  });
+  await respondToAppointmentWrite(res, outcome);
+}
+
+/** Cancel an appointment: a state change, so the record stays readable. */
+async function handleAppointmentCancel(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const record = appointmentBody(await readJsonBody(req), ["id", "rev"], "appointment change");
+  const id = appointmentIdOf(record);
+  const rev = revisionOf(record);
+  const outcome = await cancelAppointment(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    id,
+    rev,
+    now: new Date(deps.now?.() ?? Date.now()),
+  });
+  await respondToAppointmentWrite(res, outcome);
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

@@ -723,7 +723,8 @@ test("the tools read the profile, report what is not tracked, and attribute the 
     const empty = await getContext!.execute({}, api, context);
     const emptyText = (empty.output as { text: string }[])[0]!.text;
     assert.match(emptyText, /caregivers: "Alex", "Sam"/, "names are data, JSON-quoted in model context");
-    assert.match(emptyText, /Not tracked by this build yet: appointments$/m);
+    assert.doesNotMatch(emptyText, /Not tracked by this build yet/);
+    assert.match(emptyText, /^Next appointment: none scheduled\.$/m);
 
     const saved = await update!.execute({ rev: 0, name: "Biscuit", breed: "Beagle" }, api, context);
     const savedText = (saved.output as { text: string }[])[0]!.text;
