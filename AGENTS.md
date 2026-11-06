@@ -24,8 +24,10 @@ close/reopen, a cancelled one never firing, the dedupe key as the push tag) are
 complete, so **Phase 4 is done and Gate G4's automated half is covered**; the
 next task is **P5-01** (the kill/restart matrix on the phone). The agent can only *propose* an appointment or meal-schedule change; a
 caregiver's confirmation route executes the stored action in one commit. The
-approval centre has no browser UI yet (the Agent screen is still a placeholder),
-so a confirmation is an HTTP call until the thread's cards land. `harness.usage()`
+**Agent** screen is now the shared thread: it renders the transcript, collapsed
+tool cards, the **Waiting for your confirmation** proposal cards (Confirm /
+Decline with the revision they read), the busy state both caregivers share, and
+the model/monthly-spend card. `harness.usage()`
 is the spend ledger: a paid model's message is refused at the monthly cap while a
 free one still runs.
 The partner-delivery claim is gated on P0-10 and is unproven. G1's host-side criteria are covered by

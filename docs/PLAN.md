@@ -4324,9 +4324,10 @@ process kill; both clients see the same state; the partner notification
       is carried out**: history is append-only in v1 (§8.5) and no
       correction/delete writer exists, so a confirm would have nothing
       deterministic to run; it needs that domain function first. (8) **the
-      approval centre has no browser UI yet**: the Agent screen is still P1-10's
-      placeholder, so a caregiver confirms through the route until the thread's
-      cards land. The guard is structural rather than a convention: the proposing
+      approval centre is the Agent screen**: the pending cards, with Confirm and
+      Decline, landed with the shared-thread UI; a card sends the revision it
+      read, and a stale or expired one refreshes instead of overwriting. The
+      guard is structural rather than a convention: the proposing
       tools live in their own extension and the confirming functions have no
       tool caller.
       **Verified:** 40 new tests — 19 in `test/approvals.test.ts` (the record and
@@ -4376,9 +4377,11 @@ process kill; both clients see the same state; the partner notification
       the approval notification fan-out is one helper; and the unused
       `updateMealSlotsIn` result field, the tautological spread in
       `parseStoredFields` and the exported-but-internal `parseApprovalResult` went.
-      **Not verified / carried out:** no browser check — there is no approval card
-      to click, so the confirm path is proven over HTTP and the domain, not by a
-      caregiver tapping; the `approval` notification's real ntfy/push/host
+      **Not verified / carried out:** no browser check in this checkout — the
+      Agent screen now renders and sends the confirmation, but no live browser
+      and provider smoke was run here, so the confirm path is still proven over
+      HTTP and the domain rather than by a caregiver tapping; the `approval`
+      notification's real ntfy/push/host
       delivery is P0-10/P4-09's device check like every other category; the
       `request_history_correction` tool and its writer are carried (see decision
       7); P4-10 keeps the approval sentences here rather than duplicating them
@@ -4479,11 +4482,11 @@ process kill; both clients see the same state; the partner notification
       has no keys, so the probe is proven against a scripted catalog with the real
       `createPiAiProbeCall` seam, and the live allowlist will be whatever the
       phone's first boot records (the catalog's prices and deprecations move);
-      §11.3's "retry with fallback model" needs the Agent screen's error state,
-      which is still P1-10's placeholder, so it is carried (the classification it
-      needs is already in `src/shared/provider-errors.ts`); the 80% "agent header"
-      warning has no header yet — the Settings card shows it; and no phone has run
-      it.
+      the Agent screen surfaces the run's model error/retry sentence with a
+      Settings link; an automatic "retry with fallback model" stays manual in v1
+      (the classification it needs is already in
+      `src/shared/provider-errors.ts`), and the 80% warning is shown in the
+      Agent screen's budget card as well as in Settings; and no phone has run it.
 - [x] **P4-09** Tailscale runbook for daily access; ntfy onboarding; Cloudflare
       quick-tunnel runbook for testing; PWA install/push test; named tunnel
       deferred until a domain exists.
@@ -4510,8 +4513,8 @@ process kill; both clients see the same state; the partner notification
       notification rules for the two caregivers (who are also the owners), names
       the host phone when a step is host-level, and defers every host action to
       the operator runbook. (2) **the guide is
-      written against what is on screen**: it says the approval card is not there
-      yet rather than promising a tap (P4-07's carried UI), and it names P0-10 as
+      written against what is on screen**: it explains the Agent screen's
+      proposal cards, and it names P0-10 as
       the device check rather than claiming the partner's iPhone is proven.
       (3) **the invite card shows the link once**, in a readonly input (the daily
       origin is plain HTTP, so `navigator.clipboard` is unavailable and a "copy"
@@ -4558,8 +4561,8 @@ process kill; both clients see the same state; the partner notification
       followed it (that is **P0-10**, and P5-04 turns both documents into a
       verified procedure); the ntfy topic generator command is Termux/desktop
       shell only, because an iPhone user needs any password generator and this
-      guide cannot test the app's UI; and the approval card the guide defers to
-      is still P4-07's carried thread UI.
+      guide cannot test the app's UI; and the Agent screen's approval cards are
+      pinned by the client tests, not by a real browser or provider run.
 - [x] **P4-10** Tests: reminder after restart, cancel removes pending, dedupe/tag,
       approval does not execute before confirm, double confirm is idempotent.
       **Landed:** `test/phase4.test.ts` — the Gate G4 lifecycle across a real

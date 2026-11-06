@@ -17,7 +17,7 @@ import { test } from "node:test";
 const { Pup } = await import("../web/views/pup.js");
 const { Today } = await import("../web/views/today.js");
 const { Setup } = await import("../web/views/setup.js");
-const { applyCareView, startLive } = await import("../web/live.js");
+const { applyCareView, startLive, subscribeThread } = await import("../web/live.js");
 const { feedTimeText, localDate, localMinutes, mealClock, mealRows, mealStatus, minutesOf } = await import(
   "../web/meals.js"
 );
@@ -31,6 +31,7 @@ const { Showers } = await import("../web/views/showers.js");
 const { dateText } = await import("../web/clock.js");
 const { INVITE_TTL_MINUTES, inviteBody, inviteLinkOf } = await import("../web/household.js");
 const { Invite } = await import("../web/views/invite.js");
+const { Agent } = await import("../web/views/agent.js");
 const {
   allowlistLines,
   budgetBody,
@@ -177,6 +178,32 @@ test("a profile frame replaces the store's view whole", () => {
   listeners.get("profile")({ data: JSON.stringify(frame) });
   assert.equal(getState().profile.rev, 7);
   assert.equal(getState().profile.puppy.name, "From a frame");
+  live.close();
+});
+
+test("the one stream forwards the thread's snapshot, batch and connection frames", () => {
+  const listeners = new Map();
+  const source = {
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+    close() {},
+  };
+  const live = startLive({ createSource: () => source, refresh: () => {} });
+  const events = [];
+  const stop = subscribeThread((event) => events.push(event));
+
+  listeners.get("open")();
+  listeners.get("snapshot")({ data: JSON.stringify({ seq: 3, status: { busy: false, queued: 0 }, entries: [] }) });
+  listeners.get("batch")({ data: JSON.stringify({ seq: 4, events: [{ type: "run_start" }] }) });
+  listeners.get("error")();
+  stop();
+  listeners.get("open")();
+
+  assert.deepEqual(events.map((event) => event.type), ["open", "snapshot", "batch", "error"], "one stream, no second connection");
+  assert.equal(events[1].snapshot.seq, 3);
+  assert.equal(events[2].seq, 4);
+  assert.equal(events[2].events[0].type, "run_start");
   live.close();
 });
 
@@ -1973,4 +2000,232 @@ test("settings embeds the invite card with the role and the filled-household fla
   settings.setState({ role: "owner" });
   const twoMembers = findVnode(settings.render(), "Invite");
   assert.equal(twoMembers.props.full, true, "both slots filled: the card says the partner has joined");
+});
+
+// --- the shared agent thread (agent UI) -------------------------------------
+
+/** A mounted-enough Agent: only state, setState, request and the stubs need work. */
+function agentWith(request, state = {}) {
+  const agent = new Agent({ request });
+  agent.request = request;
+  agent.state = { ...agent.state, loading: false, ...state };
+  agent.setState = (patch, callback) => {
+    Object.assign(agent.state, typeof patch === "function" ? patch(agent.state) : patch);
+    if (typeof callback === "function") callback();
+  };
+  agent.timezone = () => "Europe/Paris";
+  return agent;
+}
+
+function threadSnapshot(seq, entries, overrides = {}) {
+  return { conversationId: 1, seq, status: { busy: false, queued: 0 }, entries, ...overrides };
+}
+
+function chatEntry(entryId, overrides = {}) {
+  return {
+    kind: "chat",
+    entryId,
+    at: "2026-11-06T09:00:00.000Z",
+    authorId: "owner",
+    authorName: "Alex",
+    text: `message ${entryId}`,
+    clientMessageId: `c-${entryId}`,
+    ...overrides,
+  };
+}
+
+function pendingApproval(overrides = {}) {
+  return {
+    id: "a-1",
+    action: { kind: "appointment.create" },
+    summary: 'add the appointment "Vet" on 2026-12-20 at 09:00',
+    status: "pending",
+    state: "pending",
+    requestedBy: "owner",
+    requestedByLabel: "Alex",
+    createdAt: "2026-11-06T09:00:00.000Z",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    actionId: "http:proposal",
+    rev: 0,
+    ...overrides,
+  };
+}
+
+test("the agent thread applies snapshots by seq and follows runs, args and approvals", async () => {
+  let approvalsRead = 0;
+  let refreshes = 0;
+  const agent = agentWith(async () => ({ status: 200, ok: true, body: {} }));
+  agent.loadApprovals = async () => void (approvalsRead += 1);
+  agent.loadStatus = async () => {};
+  agent.scheduleRefresh = () => void (refreshes += 1);
+
+  const tool = {
+    kind: "tool",
+    entryId: 2,
+    at: "2026-11-06T09:00:01.000Z",
+    toolCallId: "call-1",
+    toolName: "log_feed",
+    status: "ok",
+    text: "Logged breakfast",
+    byUserId: "owner",
+    byLabel: "Alex",
+  };
+  assert.equal(agent.applySnapshot(threadSnapshot(5, [chatEntry(1), tool])), true);
+  assert.equal(agent.state.thread.seq, 5);
+  // Arrival order is not freshness order: an older read loses.
+  assert.equal(agent.applySnapshot(threadSnapshot(4, [chatEntry(99)])), false);
+  assert.equal(agent.state.thread.entries[0].entryId, 1, "the visible thread did not move backwards");
+
+  agent.onBatch({ seq: 6, events: [{ type: "run_start" }] });
+  assert.equal(agent.state.status.busy, true, "a run disables both composers");
+  agent.onBatch({
+    seq: 7,
+    events: [
+      { type: "tool_execution_start", toolCallId: "call-1", toolName: "log_feed", args: { slotId: "slot-b" } },
+      { type: "tool_execution_end", toolCallId: "call-1", toolName: "log_feed", entry: { id: 3, kind: "app.tool" } },
+    ],
+  });
+  assert.deepEqual(agent.state.toolArgs["call-1"], { slotId: "slot-b" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(approvalsRead, 1, "a tool may have written a proposal");
+  assert.equal(refreshes, 1, "the entry-bearing batch schedules one snapshot read");
+  assert.ok(vnodeText(agent.render(), "slot-b"), "the expanded tool card has the live arguments");
+  agent.onBatch({ seq: 8, events: [{ type: "run_end" }] });
+  assert.equal(agent.state.status.busy, false);
+  assert.ok(vnodeText(agent.render(), "Logged breakfast"), "the tool card carries the result text");
+
+  // A later non-entry batch (usage, status) must not raise the floor past the
+  // snapshot that the entry-bearing batch announced: that snapshot is the one
+  // carrying the new entry, and rejecting it would strand the thread backwards.
+  agent.onBatch({ seq: 9, events: [{ type: "message_end", entry: { id: 9, kind: "app.chat" } }] });
+  agent.onBatch({ seq: 10, events: [{ type: "usage_changed" }] });
+  assert.equal(agent.applySnapshot(threadSnapshot(9, [chatEntry(9)])), true);
+  assert.equal(agent.state.thread.entries[0].entryId, 9);
+
+  // A lost batch is a gap, not a silent short transcript: one read catches up.
+  const beforeGap = refreshes;
+  agent.onBatch({ seq: 11, events: [{ type: "run_start" }] });
+  assert.equal(refreshes, beforeGap, "a consecutive batch needs no catch-up read");
+  agent.onBatch({ seq: 13, events: [{ type: "run_start" }] });
+  assert.equal(refreshes, beforeGap + 1, "a missing commit schedules a snapshot read");
+});
+
+test("a refused agent message keeps the draft and its key; an accepted one clears them", async () => {
+  let answer = { status: 409, ok: false, body: { error: "busy", message: "the assistant is busy" } };
+  const sent = [];
+  const agent = agentWith(async (path, options) => {
+    sent.push({ path, options });
+    return answer;
+  });
+  agent.loadThread = async () => {};
+  agent.state = { ...agent.state, draft: "  Fed lunch  ", status: { busy: false, queued: 0 }, pending: null };
+
+  await agent.send();
+  assert.equal(agent.state.draft, "  Fed lunch  ", "a busy refusal loses nothing");
+  assert.ok(agent.state.pending?.key, "the retry can replay the same intended message");
+  assert.match(agent.state.sendError, /not sent/);
+  assert.equal(sent[0].options.body.clientMessageId, agent.state.pending.key);
+  assert.equal(sent[0].options.idempotencyKey, agent.state.pending.key);
+
+  const firstKey = agent.state.pending.key;
+  // The wire shape is the accepted submission's status string (`"placed"`).
+  answer = { status: 202, ok: true, body: { accepted: true, submissionId: "s-1", status: "placed" } };
+  await agent.send();
+  assert.equal(agent.state.draft, "", "an accepted message clears the composer");
+  assert.equal(agent.state.pending, null);
+  assert.equal(agent.state.status.busy, true, "the submission record, not a false idle, drives busy");
+  assert.equal(sent[1].options.body.clientMessageId, firstKey, "the retry reused the key of the same body");
+  assert.deepEqual(sent[1].options.body.text, "Fed lunch");
+});
+
+test("an approval is decided with its revision and a fresh key, and a stale 409 adopts the current one", async () => {
+  let answer;
+  const calls = [];
+  const agent = agentWith(async (path, options) => {
+    calls.push({ path, options });
+    return answer;
+  });
+  agent.loadApprovals = async () => {};
+  agent.loadThread = async () => {};
+  const proposal = pendingApproval();
+  agent.state = { ...agent.state, approvals: [proposal] };
+
+  answer = {
+    status: 200,
+    ok: true,
+    body: { approval: { ...proposal, state: "confirmed", status: "confirmed", rev: 1 }, replayed: false },
+  };
+  await agent.decide(proposal, "confirm");
+  assert.equal(calls[0].path, "/api/approvals/confirm");
+  assert.deepEqual(calls[0].options.body, { id: "a-1", rev: 0 });
+  assert.equal(typeof calls[0].options.idempotencyKey, "string");
+  assert.equal(agent.state.approvals[0].state, "confirmed");
+  assert.match(agent.state.actionNotice, /Confirmed/);
+
+  // A proposal the other caregiver moved: the 409 carries the committed one,
+  // and the next tap uses that revision rather than silently re-sending rev 0.
+  answer = {
+    status: 409,
+    ok: false,
+    body: { error: "stale", message: "the proposal changed since it was read", approval: { ...proposal, rev: 4 } },
+  };
+  agent.state = { ...agent.state, actionBusy: null };
+  await agent.decide(proposal, "cancel");
+  assert.equal(agent.state.approvals[0].rev, 4);
+  assert.match(agent.state.actionError, /changed since it was read/);
+  assert.equal(calls[1].path, "/api/approvals/cancel");
+});
+
+
+
+test("the agent screen shows the model, the month's spend and a proposal's controls", () => {
+  const agent = agentWith(async () => ({ status: 200, ok: true, body: {} }));
+  agent.state = {
+    ...agent.state,
+    loading: false,
+    session: { memberId: "owner", role: "owner", label: "Alex", authorId: "owner" },
+    thread: threadSnapshot(1, [chatEntry(1)]),
+    models: {
+      current: { id: "opencode-go/mimo-v2.6-flash", paid: true, price: { input: 0.14, output: 0.28 } },
+      budget: { month: "2026-11", spentUsd: 8.5, capUsd: 10, ratio: 0.85, state: "warn", paidAllowed: true },
+    },
+    budget: { month: "2026-11", spentUsd: 8.5, capUsd: 10, ratio: 0.85, state: "warn", paidAllowed: true },
+    approvals: [pendingApproval()],
+  };
+  const tree = agent.render();
+  for (const text of [
+    "Waiting for your confirmation",
+    "A proposal is waiting for your confirmation",
+    "add the appointment",
+    "Confirm",
+    "Decline",
+    "Expires",
+    "opencode-go/mimo-v2.6-flash",
+    "Paid",
+    "$8.50 of $10.00",
+    "80% or more",
+  ]) {
+    assert.ok(vnodeText(tree, text), `missing ${text}`);
+  }
+  // The transcript bubble renders too, as text (never as HTML).
+  assert.ok(vnodeText(tree, "message 1"));
+
+  // No model: the panel says where to fix it instead of offering a dead send.
+  agent.setState({ models: { current: null }, budget: null });
+  assert.ok(vnodeText(agent.render(), "add a provider key in Settings"));
+});
+
+test("an opened stream re-reads the thread, approvals and status; a reconnect is visible", async () => {
+  const reads = [];
+  const agent = agentWith(async () => ({ status: 200, ok: true, body: {} }));
+  agent.loadThread = async () => void reads.push("thread");
+  agent.loadApprovals = async () => void reads.push("approvals");
+  agent.loadStatus = async () => void reads.push("status");
+
+  agent.onThreadEvent({ type: "open" });
+  assert.deepEqual(reads.sort(), ["approvals", "status", "thread"], "a reconnect is a catch-up point");
+
+  agent.onThreadEvent({ type: "reconnect" });
+  assert.equal(agent.state.connection, "reconnecting");
+  assert.ok(vnodeText(agent.render(), "Reconnecting to the shared thread"), "the caregiver is told");
 });

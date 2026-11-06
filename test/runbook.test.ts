@@ -324,11 +324,13 @@ test("the caregivers' guide covers the daily path, the invite, ntfy and the tunn
   assert.match(doc, /testing only|test only|Testing only/i);
   assert.match(doc, /no named tunnel/i);
   assert.match(doc, /category-only/i);
-  // A decision cannot be taken from a notification, and the guide says the
-  // approval card is not on screen yet rather than promising a tap that is not
-  // there (PLAN §16 P4-07).
+  // A decision cannot be taken from a notification; the guide names the Agent
+  // screen's proposal card as the place a caregiver decides.
   assert.match(doc, /never.*notification|never.*in a notification/i);
-  assert.match(doc, /approval card is not on screen yet/);
+  assert.match(doc, /Waiting for your confirmation/);
+  assert.match(doc, /\bConfirm\b/);
+  assert.match(doc, /\bDecline\b/);
+  assert.match(doc, /24 hours/);
   // The partner-delivery claim stays with P0-10.
   assert.match(doc, /P0-10/);
 });

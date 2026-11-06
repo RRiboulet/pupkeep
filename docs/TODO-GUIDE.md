@@ -44,9 +44,11 @@ not stored); the agent can only propose (`create_appointment`,
 `request_feeding_schedule_change`), and a caregiver's
 `POST /api/approvals/confirm` runs the stored action in one commit with its own
 revision check, activity line, notification and `app.approval` thread entry,
-while a double confirm replays the stored result. There is no approval card UI
-yet (the Agent screen is a placeholder), and `request_history_correction` is
-carried because history is append-only and no correction writer exists. **P4-08**
+while a double confirm replays the stored result. The carried browser half has
+landed: the **Agent** screen now renders the shared thread, its tool cards and
+the pending-proposal cards (Confirm/Decline), so a caregiver decides in the app.
+`request_history_correction` is still carried because history is append-only and
+no correction writer exists. **P4-08**
 is complete: `app.usage` is a baseline, not a ledger (the month's spend is
 `harness.usage()` minus where the month began), a paid model's message is refused
 verbatim at the cap while a free one runs, `secrets.json` is the only credential
