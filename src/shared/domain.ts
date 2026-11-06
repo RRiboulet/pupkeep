@@ -42,6 +42,8 @@ export const SHOWERS_SCHEMA_VERSION = 1 as const;
  * document is valid as version 2, so `migrate` only restamps it.
  */
 export const WALKS_SCHEMA_VERSION = 2 as const;
+/** Appointments (P4-01): a wall-clock promise anchored in a zone snapshot. */
+export const CALENDAR_SCHEMA_VERSION = 1 as const;
 
 export type MemberProfile = { id: string; name: string };
 
@@ -393,6 +395,84 @@ export type Showers = {
   schemaVersion: typeof SHOWERS_SCHEMA_VERSION;
   /** Append order; a reader sorts by `localDate`/`at` where it needs chronology. */
   showers: Shower[];
+  createdAt: string;
+};
+
+/**
+ * An appointment's lifecycle (PLAN §8.3). A cancellation is a **state change**:
+ * the record and its history stay readable, and the schedule simply stops
+ * carrying it. `completed` is accepted by the parser for a future writer
+ * (P4-02/P4-03); P4-01 writes only `scheduled` and `cancelled`.
+ */
+export type AppointmentStatus = "scheduled" | "cancelled" | "completed";
+
+/**
+ * One appointment (PLAN §8.1, §8.3, §8.4, §16 P4-01).
+ *
+ * The time is stored as **household wall clock plus a zone snapshot** — never as
+ * a bare UTC instant. A 09:00 vet visit must stay at 09:00 on the household's
+ * clock through a DST change; an instant written at booking time with the
+ * offset of that day would show 08:00 or 10:00 after the transition. The
+ * instant is therefore derived on read (`appointmentInstant`), the same rule
+ * that governs a meal slot (§8.4). This is the deliberate difference from the
+ * sketch in §8.3, which showed only `startsAt`.
+ *
+ * `timezone` is the household zone **at the last write**. The UI renders times
+ * in the household zone; an edit therefore re-anchors the wall clock in the
+ * zone the caregiver is reading. An appointment booked in Paris keeps 09:00
+ * Paris if the household later moves — history does not move with the household.
+ *
+ * `rev` is the optimistic-concurrency revision: an update or cancel with a
+ * stale one is refused with the current record, never applied silently (§7.4).
+ */
+export type Appointment = {
+  id: string;
+  /** One line of caregiver text; quoted wherever it is shown. */
+  title: string;
+  /** `YYYY-MM-DD` on the household's calendar. */
+  localDate: string;
+  /** `HH:MM` on the household's clock. */
+  timeLocal: string;
+  /** IANA zone snapshot; the derived instant is computed in this zone. */
+  timezone: string;
+  /** Whole minutes; the end time is derived, never stored. */
+  durationMin: number;
+  location?: string;
+  vetName?: string;
+  notes?: string;
+  status: AppointmentStatus;
+  /**
+   * Minutes before the appointment to remind, from
+   * `app.household.settings.appointmentReminderOffsetsMin` by default. `[]`
+   * means no reminders — never "unset".
+   */
+  reminderOffsetsMin: number[];
+  /**
+   * Pi Durable task ids of the reminders armed for this record, owned by the
+   * hidden system conversation (§12.2). Empty until P4-03; persisted here so a
+   * reschedule or a cancel can target (and no-op) the old tasks.
+   */
+  reminderTaskIds: number[];
+  /** Config member id, or `null` for the household fallback (§9.2). */
+  createdBy: string | null;
+  createdByLabel: string;
+  /** Server clock of the **last** write (create, update or cancel). */
+  updatedAt: string;
+  /** Revision, not schema version. */
+  rev: number;
+  /** HTTP idempotency key or the agent tool's task id of the last write (§7.3). */
+  actionId: string;
+};
+
+/**
+ * `app.calendar`: the appointments (P4-01). Never pruned in v1; a cancelled
+ * appointment stays in the list so its history remains readable. Readers sort
+ * by the derived instant, not by append order.
+ */
+export type Calendar = {
+  schemaVersion: typeof CALENDAR_SCHEMA_VERSION;
+  /** Append order; a reader sorts by the derived instant where it needs chronology. */
+  appointments: Appointment[];
   createdAt: string;
 };
 

@@ -2,12 +2,12 @@
 //
 // The first boot is one commit: two ownerless conversations (the human-facing
 // thread and the hidden system thread) and the household, puppy, activity,
-// commands, feeding and notifications documents. A crash therefore leaves
-// either all of it or none of it; a second boot reads the household and only
-// repairs what is missing — including `app.feeding` for a database that
-// predates P1-14 and `app.notifications` for one that predates P2-02, so an
-// upgraded phone gets the meal-slot wizard and the feed service instead of a
-// 503 on the care view.
+// commands, feeding, notifications, walks, growth, training, showers and
+// calendar documents. A crash therefore leaves either all of it or none of it;
+// a second boot reads the household and only repairs what is missing —
+// including `app.feeding` for a database that predates P1-14 and
+// `app.notifications` for one that predates P2-02, so an upgraded phone gets
+// the meal-slot wizard and the feed service instead of a 503 on the care view.
 //
 // The household is the authority for display names after a profile exists.
 // `config.json` is the authority for auth identities and roles: it seeds a
@@ -18,6 +18,7 @@ import type { Context } from "@earendil-works/chord";
 import type { ConversationId, Harness } from "@earendil-works/pi-durable";
 import type {
   Activity,
+  Calendar,
   Commands,
   Feeding,
   Growth,
@@ -29,9 +30,11 @@ import type {
   Puppy,
   Walks,
 } from "../../shared/domain.ts";
+import { isIanaZone } from "../../shared/profile.ts";
 import { activeMembers, reconcileMembers, type AppConfig, type Reconciliation } from "../config.ts";
 import {
   ActivityDoc,
+  CalendarDoc,
   CommandsDoc,
   FeedingDoc,
   GrowthDoc,
@@ -42,6 +45,7 @@ import {
   PuppyDoc,
   WalksDoc,
   emptyActivity,
+  emptyCalendar,
   emptyCommands,
   emptyFeeding,
   emptyGrowth,
@@ -51,8 +55,8 @@ import {
   emptyNotifications,
   emptyPuppy,
   emptyWalks,
-  isIanaZone,
   parseActivity,
+  parseCalendar,
   parseCommands,
   parseFeeding,
   parseGrowth,
@@ -168,6 +172,10 @@ function initialShowers(createdAt: string): Showers {
   return { ...emptyShowers(), createdAt };
 }
 
+function initialCalendar(createdAt: string): Calendar {
+  return { ...emptyCalendar(), createdAt };
+}
+
 function initialNotifications(createdAt: string): Notifications {
   return { ...emptyNotifications(), createdAt };
 }
@@ -228,6 +236,9 @@ export async function bootstrapSession(
     if ((await harness.snapshot(ShowersDoc, context)) !== undefined) {
       throw new BootstrapError("app.household is missing but app.showers exists; refusing to reset it");
     }
+    if ((await harness.snapshot(CalendarDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.calendar exists; refusing to reset it");
+    }
 
     const createdAt = now().toISOString();
     const timezone = options.timezone ?? defaultTimezone();
@@ -250,6 +261,7 @@ export async function bootstrapSession(
       Object.assign(await tx.doc(GrowthDoc), initialGrowth(createdAt));
       Object.assign(await tx.doc(TrainingDoc), initialTraining(createdAt));
       Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
+      Object.assign(await tx.doc(CalendarDoc), initialCalendar(createdAt));
 
       return { shared: shared.id, system: system.id };
     }, context);
@@ -272,6 +284,7 @@ export async function bootstrapSession(
         "app.growth",
         "app.training",
         "app.showers",
+        "app.calendar",
       ],
       clearedSystemModel,
     };
@@ -366,6 +379,11 @@ export async function bootstrapSession(
   if (showersSnapshot !== undefined && !showers) {
     throw new BootstrapError("app.showers is not a shape this build understands; refusing to reset it");
   }
+  const calendarSnapshot = await harness.snapshot(CalendarDoc, context);
+  const calendar = calendarSnapshot === undefined ? undefined : parseCalendar(calendarSnapshot);
+  if (calendarSnapshot !== undefined && !calendar) {
+    throw new BootstrapError("app.calendar is not a shape this build understands; refusing to reset it");
+  }
 
   const docsCreated: string[] = [];
   if (!puppy) docsCreated.push("app.puppy");
@@ -377,6 +395,7 @@ export async function bootstrapSession(
   if (!growth) docsCreated.push("app.growth");
   if (!training) docsCreated.push("app.training");
   if (!showers) docsCreated.push("app.showers");
+  if (!calendar) docsCreated.push("app.calendar");
 
   if (membersChanged || docsCreated.length > 0) {
     const createdAt = now().toISOString();
@@ -394,6 +413,7 @@ export async function bootstrapSession(
       if (!growth) Object.assign(await tx.doc(GrowthDoc), initialGrowth(createdAt));
       if (!training) Object.assign(await tx.doc(TrainingDoc), initialTraining(createdAt));
       if (!showers) Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
+      if (!calendar) Object.assign(await tx.doc(CalendarDoc), initialCalendar(createdAt));
     }, context);
   }
 

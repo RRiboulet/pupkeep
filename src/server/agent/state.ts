@@ -36,6 +36,7 @@ const PROFILE_KINDS = new Set([
   "app.growth",
   "app.training",
   "app.showers",
+  "app.calendar",
 ]);
 
 export interface ProfileStateOptions {

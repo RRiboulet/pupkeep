@@ -12,8 +12,12 @@ service, the shower HTTP/tools/Pup card, and the Phase 3 test slice. Every care
 surface is agent-accessible, Gate G3 is covered by `test/dual-path.test.ts`
 (the shared harness lives in `test/support/app.ts`), and the shower interval is
 pinned across a DST change, a month end and a leap day. Phase 4 (calendar,
-reminders, push, approvals) starts at **P4-01**. P0-03/P0-08/P0-10 remain
-device-gated partner checks and do not block the host-side work.
+reminders, push, approvals) has started: **P4-01** is complete —
+`app.calendar` stores a wall clock plus a zone snapshot, derives the instant on
+read, and its service creates, updates and cancels with revision checks. The
+next task is **P4-02** (appointment HTTP, agent tools and the Calendar UI).
+P0-03/P0-08/P0-10 remain device-gated partner checks and do not block the
+host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The
