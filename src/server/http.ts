@@ -2390,8 +2390,12 @@ async function handleModelsRead(deps: HttpDeps, res: ServerResponse): Promise<vo
   const now = new Date(deps.now?.() ?? Date.now());
   const cache = deps.modelCache === undefined ? undefined : await deps.modelCache.read();
   const current = await readThreadModel(deps.thread);
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
   const budget = await readBudget(deps.thread.harness, deps.thread.context, now);
   sendJson(res, 200, {
+    // The household revision the cap write echoes (§7.4); one read, so a stale
+    // draft is refused rather than silently applied.
+    householdRev: household.rev,
     current:
       current === undefined
         ? null
