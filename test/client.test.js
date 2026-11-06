@@ -29,6 +29,8 @@ const { CHART_SIZE, chartGeometry, daysBetweenLocalDates, formatKg, measurementR
 const { boardGroups, customMilestone, noteUpdate, rowMetaText, statusUpdate } = await import("../web/training.js");
 const { Showers } = await import("../web/views/showers.js");
 const { dateText } = await import("../web/clock.js");
+const { INVITE_TTL_MINUTES, inviteBody, inviteLinkOf } = await import("../web/household.js");
+const { Invite } = await import("../web/views/invite.js");
 const {
   allowlistLines,
   budgetBody,
@@ -1261,6 +1263,22 @@ test("a failed re-read after a successful log is not reported as a failed log", 
 });
 
 /** Any string in the vnode tree contains `needle` (a render smoke test, no DOM). */
+/** The first vnode whose component type is `type` (by name), depth-first. */
+function findVnode(node, type) {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findVnode(child, type);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (node && typeof node === "object") {
+    if (node.type?.name === type) return node;
+    return findVnode(node.props?.children, type);
+  }
+  return undefined;
+}
+
 function vnodeText(node, needle) {
   if (typeof node === "string") return node.includes(needle);
   if (Array.isArray(node)) return node.some((child) => vnodeText(child, needle));
@@ -1877,4 +1895,82 @@ test("the settings card renders the model section, hides owner controls from a p
   assert.ok(vnodeText(partnerView, "Model and budget"), "the partner sees the card");
   assert.ok(vnodeText(partnerView, "Only the owner can change the cap or the model."));
   assert.ok(!vnodeText(partnerView, "Save cap"), "no owner control for a member");
+});
+
+// --- the partner invite (P4-09) ---------------------------------------------
+
+test("the invite helpers send a trimmed name and return the link, not a bare code", () => {
+  assert.deepEqual(inviteBody("  Sam  "), { displayName: "Sam" });
+  assert.deepEqual(inviteBody(undefined), { displayName: "" });
+  assert.equal(INVITE_TTL_MINUTES, 15, "the copy states the server's invite lifetime");
+  assert.equal(inviteLinkOf({ code: "abc", link: "http://100.x.y.z:8787/invite?code=abc" }), "http://100.x.y.z:8787/invite?code=abc");
+  assert.equal(inviteLinkOf({ code: "abc" }), null);
+  assert.equal(inviteLinkOf(undefined), null);
+});
+
+test("the invite card is owner-only, shows the link once and explains its lifetime", async () => {
+  const calls = [];
+  const invite = new Invite({ role: "owner" });
+  invite.request = async (path, options) => {
+    calls.push({ path, options });
+    return {
+      status: 200,
+      ok: true,
+      body: { code: "code-1", link: "http://100.x.y.z:8787/invite?code=code-1" },
+    };
+  };
+  invite.setState = (patch) => Object.assign(invite.state, patch);
+
+  // A partner gets no invite controls at all (the route refuses them anyway);
+  // the role comes from the settings screen's one role read, not a second fetch.
+  assert.equal(new Invite({ role: "member" }).render(), null, "a partner sees no invite card");
+  assert.ok(vnodeText(invite.render(), "Invite your partner"));
+  assert.deepEqual(calls, [], "the card asks for nothing until the owner acts");
+
+  invite.setState({ name: "  Sam  " });
+  await invite.createInvite();
+  const posted = calls.find((call) => call.path === "/api/invites");
+  assert.deepEqual(posted.options.body, { displayName: "Sam" });
+  assert.equal(posted.options.idempotencyKey, undefined, "the route does not dedupe, so no key is advertised");
+  assert.equal(invite.state.link, "http://100.x.y.z:8787/invite?code=code-1");
+  assert.match(invite.state.message, /works once and expires in 15 minutes/);
+  assert.ok(vnodeText(invite.render(), "shown once"), "the link is presented as a one-time credential");
+  // A second press clears the previous link before minting.
+  invite.setState({ name: "" });
+  await invite.createInvite();
+  assert.match(invite.state.error, /Enter your partner's name/);
+
+  // Once the partner has joined, the card says so instead of offering a code
+  // that could only fill the last slot twice.
+  const full = new Invite({ role: "owner", full: true });
+  assert.ok(vnodeText(full.render(), "Your partner has joined"));
+  assert.ok(!vnodeText(full.render(), "Create a one-time invite"));
+});
+
+test("the invite lifetime in the client copy matches the server's constant", async () => {
+  // A third copy of the number with nothing pinning it would drift silently, and
+  // the card and the guide would then state a false lifetime to a user.
+  const { INVITE_TTL_MS } = await import("../src/server/auth.ts");
+  assert.equal(INVITE_TTL_MINUTES * 60_000, INVITE_TTL_MS);
+});
+
+test("settings embeds the invite card with the role and the filled-household flag", async () => {
+  // The guide's day-one step depends on this card being *on* Settings with the
+  // right props; a card that only exists in its own unit test cannot be found by
+  // a caregiver.
+  setState({ profile: profileOf() });
+  const settings = new Settings({});
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+
+  settings.setState({ role: "owner", models: modelsView() });
+  const oneMember = findVnode(settings.render(), "Invite");
+  assert.ok(oneMember, "the settings screen renders the invite card");
+  assert.equal(oneMember.props.role, "owner");
+  assert.equal(oneMember.props.full, false, "a one-caregiver household can still invite");
+
+  const fullProfile = profileOf({ members: [{ id: "owner", name: "Alex" }, { id: "partner", name: "Sam" }] });
+  setState({ profile: fullProfile });
+  settings.setState({ role: "owner" });
+  const twoMembers = findVnode(settings.render(), "Invite");
+  assert.equal(twoMembers.props.full, true, "both slots filled: the card says the partner has joined");
 });

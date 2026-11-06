@@ -210,8 +210,8 @@ probe with the app schema. P1-04 calls P1-05's pid lock, starts `cloudflared` on
 through the §6.7 wrapper, owns the boot script, and starts `sshd` on demand with
 the Tailscale address **re-resolved**. P1-07 owns the harness sequence and the
 backup job. P1-06 and P1-10 treat Web Push as HTTPS-only, and the partner's daily
-client as a Safari tab, not an installed PWA. P1-13 and P4-09 write these into the
-runbook.
+client as a Safari tab, not an installed PWA. P1-13 writes the operator's copy,
+P4-09 the caregivers' (`docs/access-and-notifications.md`).
 
 **Not decided here, and who revisits this.** The partner's acceptance (P0-10 —
 it amends the Access and Notifications rows in place when it runs); the `rclone`
@@ -374,7 +374,10 @@ pupkeep/
 ├── test/
 ├── docs/
 │   ├── PLAN.md                # this file
-│   └── PHONE-RUNBOOK.md
+│   ├── PHONE-RUNBOOK.md       # the operator's copy (P1-13, P5-04)
+│   ├── access-and-notifications.md  # the caregivers' copy (P4-09)
+│   ├── partner-ios-checklist.md     # the P0-10 device check
+│   └── TODO-GUIDE.md          # how to pick the next task
 ├── package.json
 ├── package-lock.json
 ├── README.md
@@ -1695,9 +1698,21 @@ Pi Pocket style, simplified for two caregivers:
 - The owner creates a **one-time invite** for the partner. The invite is a
   ≥128-bit token/link (not a guessable short code), has a role (`member`), an
   expiry (15 min by default), and is stored as a hash. Tokens are origin-agnostic;
-  cookies are origin-scoped. Onboard on the daily Tailscale origin; use a
-  separate test invite for the quick tunnel.
+  cookies are origin-scoped. Onboard on the daily Tailscale origin.
+  **A "separate test invite" for the quick tunnel cannot exist** with the cap
+  below: the household is full once the partner joins, an invite is refused
+  while it is full, and no route removes a member. P4-09 recorded the real test
+  path instead — the **existing owner link** on the tunnel origin, which is what
+  an owner session on that origin is (a device trusted with it for the test,
+  then signed out or the token rotated).
 - Max two members: owner + one member.
+  **Member recovery is not implemented in v1:** the owner reissue path covers
+  the owner only, `/invite` always creates a new member row, and there is no
+  member re-auth or remove-member route. A partner whose cookie is lost (a
+  cleared browser, a home-screen clip over HTTP with its own jar) needs the
+  operator to free the slot in `config.json` and re-invite them. Carried to the
+  security review (P5-06); the generated invite links are origin-agnostic, so a
+  member *link* can be added later without changing the storage shape.
 - No email or password in v1. The owner link is the key; keep it private.
 - **`config.json` owns auth identities and roles.** `app.household` owns display
   profiles only. Removing a member deletes their auth row **and** purges all
@@ -4463,9 +4478,82 @@ process kill; both clients see the same state; the partner notification
       needs is already in `src/shared/provider-errors.ts`); the 80% "agent header"
       warning has no header yet — the Settings card shows it; and no phone has run
       it.
-- [ ] **P4-09** Tailscale runbook for daily access; ntfy onboarding; Cloudflare
+- [x] **P4-09** Tailscale runbook for daily access; ntfy onboarding; Cloudflare
       quick-tunnel runbook for testing; PWA install/push test; named tunnel
       deferred until a domain exists.
+      **Landed:** `docs/access-and-notifications.md` — the **caregivers'** copy,
+      distinct from P1-13's operator runbook: who needs what; day one (the owner
+      sign-in, first-run setup, the one-time invite, the partner joining the same
+      tailnet and bookmarking the address); the iOS truth (a Safari tab, because
+      an HTTP home-screen clip gets its own cookie jar and no worker); every day;
+      the three notification paths with the in-app centre as the record, the host
+      phone's Termux:API notifications, and the partner's **ntfy** onboarding
+      (generate a ≥128-bit random topic, subscribe in the app, paste it in
+      Settings, send a test, rotation if it leaks, category-only text, tap-through
+      only); the Cloudflare quick-tunnel **test** path (separate test invite,
+      PWA install/Web Push per platform, iOS 16.4 + Add to Home Screen, the URL
+      changes on restart so push must re-subscribe); a user-level troubleshooting
+      table; and an explicit "what this does not claim" section (P0-10's partner
+      delivery, no Web Push on Tailscale HTTP, no named tunnel until a domain
+      exists, no decision in a notification). The same change adds the Settings
+      **invite card** (`web/views/invite.js` + `web/household.js`, shell cache
+      v12): the guide's day-one step was a `POST /api/invites` the owner had no
+      screen for, and §13.1 already promised an invite in Settings.
+      Decisions: (1) **two documents, two audiences** — this guide never repeats
+      the host install, backup or sshd steps; it paraphrases the access and
+      notification rules for the two caregivers (who are also the owners), names
+      the host phone when a step is host-level, and defers every host action to
+      the operator runbook. (2) **the guide is
+      written against what is on screen**: it says the approval card is not there
+      yet rather than promising a tap (P4-07's carried UI), and it names P0-10 as
+      the device check rather than claiming the partner's iPhone is proven.
+      (3) **the invite card shows the link once**, in a readonly input (the daily
+      origin is plain HTTP, so `navigator.clipboard` is unavailable and a "copy"
+      button would silently fail), it never re-reads or logs the code, and it
+      takes the caller's role from the Settings screen's one role read rather
+      than a second `/api/session` fetch.
+      (4) **the guide keeps the plan's shapes**: `100.x.y.z` and
+      `https://<random>.trycloudflare.com` are placeholders, never a live
+      address or origin, and no topic, token or invite value appears in it.
+      **Verified:** `test/runbook.test.ts` gained three tests — the guide covers
+      the daily path, the invite, ntfy and the tunnel test (including "HTTP, not
+      HTTPS", "testing only", "no named tunnel", category-only text, the missing
+      approval card and P0-10), it carries no token/invite/ntfy-topic value and no
+      real tailnet or tunnel origin, and PLAN §16 ticks P4-09 with §4 listing the
+      guide; `test/client.test.js` covers the invite card's session gate, its
+      request body, the shown-once link and the TTL copy; `test/pwa.test.ts`
+      pins the two new shell modules in the precache. The suite is 776/776 and
+      `npm run typecheck` passes.
+      **Review follow-ups (adversarial + complexity):** the tunnel test path was
+      corrected — a "separate test invite" **cannot exist** (two-member cap, no
+      remove-member route), so the guide and §14.1 now say the test device signs
+      in with the **existing owner link** on the tunnel origin and what that
+      implies for the device, and §14.1 records that **member recovery is not
+      implemented in v1** (a lost partner cookie needs the operator to free the
+      slot and re-invite); the tunnel test step now
+      swaps the existing owner link onto the tunnel origin instead of reissuing it
+      (a reissue signs the owner out on the daily address and voids outstanding
+      invites — the review caught the guide contradicting the runbook and
+      understating the cost); the ntfy entropy claim matches the generator's
+      alphabet (25 lowercase characters ≈ 128 bits, not 22), and the guide says
+      the topic rides the encrypted backup with `push.json`; the invite card takes
+      `role`/`full` from Settings (one role read for the screen, no second
+      `/api/session`, and "Your partner has joined" once the slot is filled); the
+      card no longer sends an unused `Idempotency-Key`, refuses a mint with no
+      link returned instead of telling the owner to send nothing, and no longer
+      claims the partner can sign in again; the quoted notification text is exact;
+      an impossible troubleshooting row is replaced; external facts (ntfy's 12 h
+      cache, the iOS clip's cookie jar, iOS 16.4) are attributed to P0-10; a test
+      pins `INVITE_TTL_MS` to the client's `INVITE_TTL_MINUTES`; and a Settings
+      render test pins the card's wiring (present, with `role` and `full`), which
+      the prose-only doc tests could not.
+      **Not verified / carried out:** no device walk — the guide is written from
+      the code and the Phase 0 evidence, and a real partner iPhone has not
+      followed it (that is **P0-10**, and P5-04 turns both documents into a
+      verified procedure); the ntfy topic generator command is Termux/desktop
+      shell only, because an iPhone user needs any password generator and this
+      guide cannot test the app's UI; and the approval card the guide defers to
+      is still P4-07's carried thread UI.
 - [ ] **P4-10** Tests: reminder after restart, cancel removes pending, dedupe/tag,
       approval does not execute before confirm, double confirm is idempotent.
 

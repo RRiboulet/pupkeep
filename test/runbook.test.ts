@@ -293,3 +293,65 @@ echo "$!" > "$(awk '$1 == "PidFile" { print $2 }' "$2")"`,
   const viaIfconfig = await rf(join(data, "sshd", "sshd_config"), "utf8");
   assert.match(viaIfconfig, /^ListenAddress 100\.101\.102\.70$/m);
 });
+
+// --- P4-09: the caregivers' access and notification guide -------------------
+
+const ACCESS_GUIDE = "docs/access-and-notifications.md";
+
+test("the caregivers' guide covers the daily path, the invite, ntfy and the tunnel test", async () => {
+  const doc = await read(ACCESS_GUIDE);
+  for (const needle of [
+    // Daily access, and the invite flow the Settings card implements.
+    "tailscale",
+    "100.x.y.z",
+    "Invite your partner",
+    "15 minutes",
+    // The three notification paths, with the in-app centre named as the record.
+    "notification centre",
+    "Termux:API",
+    "ntfy",
+    "128 bits",
+    // The test path and its two limits.
+    "--access cloudflare",
+    "https://<random>.trycloudflare.com",
+    "notifications on this device",
+    "iOS 16.4",
+  ]) {
+    assert.ok(doc.includes(needle), `the guide must mention ${needle}`);
+  }
+  // The limits that keep the product honest for a *user* (not only an operator).
+  assert.match(doc, /HTTP, not HTTPS/);
+  assert.match(doc, /testing only|test only|Testing only/i);
+  assert.match(doc, /no named tunnel/i);
+  assert.match(doc, /category-only/i);
+  // A decision cannot be taken from a notification, and the guide says the
+  // approval card is not on screen yet rather than promising a tap that is not
+  // there (PLAN §16 P4-07).
+  assert.match(doc, /never.*notification|never.*in a notification/i);
+  assert.match(doc, /approval card is not on screen yet/);
+  // The partner-delivery claim stays with P0-10.
+  assert.match(doc, /P0-10/);
+});
+
+test("the caregivers' guide carries no credential, topic or real host address", async () => {
+  const doc = await read(ACCESS_GUIDE);
+  // Same guardrail as the operator runbook: reference secrets by path or shape.
+  assert.doesNotMatch(doc, /[?&](token|invite|code)=[A-Za-z0-9_%.-]{4,}/, "no token, invite or code value");
+  assert.doesNotMatch(doc, /\b100\.\d{1,3}\.\d{1,3}\.\d{1,3}:8787/, "use 100.x.y.z in examples");
+  assert.match(doc, /100\.x\.y\.z:8787/);
+  assert.doesNotMatch(doc, /https:\/\/[a-z0-9-]+\.trycloudflare\.com/, "no live tunnel origin");
+  assert.match(doc, /https:\/\/<random>\.trycloudflare\.com/);
+  // An ntfy topic is a bearer secret; the guide must talk about it, never show one.
+  assert.doesNotMatch(doc, /\bntfy\.sh\/[A-Za-z0-9_-]{22,}/, "no real ntfy topic");
+});
+
+test("the plan records P4-09 as landed and lists the guide in the layout", async () => {
+  const plan = await read("docs/PLAN.md");
+  const entry = /- \[x\] \*\*P4-09\*\*[\s\S]*?(?=\n- \[)/.exec(plan);
+  assert.ok(entry, "PLAN §16 must tick P4-09");
+  // The two limits the task exists to keep straight.
+  assert.match(entry[0], /P0-10/);
+  assert.match(entry[0], /named tunnel/i);
+  const layout = plan.slice(plan.indexOf("## 4. Repository layout"), plan.indexOf("## 5. Devcontainer"));
+  assert.ok(layout.includes("access-and-notifications.md"), "PLAN §4 must list the caregivers' guide");
+});
