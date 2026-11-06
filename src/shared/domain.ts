@@ -429,22 +429,6 @@ export type AppointmentStatus = "scheduled" | "cancelled" | "completed";
  * `rev` is the optimistic-concurrency revision: an update or cancel with a
  * stale one is refused with the current record, never applied silently (§7.4).
  */
-/**
- * One armed appointment reminder (P4-03). The pair `(taskId)` and the offset
- * are unique: two tasks for one offset would double the reminder, and the same
- * task twice could not be retired once. `dueAt` is epoch milliseconds: the
- * appointment's derived instant minus the offset — the one value a task may
- * sleep on (§8.4).
- */
-export type AppointmentReminderRef = {
-  /** Pi Durable task id; the task is owned by the system conversation. */
-  taskId: number;
-  /** Minutes before the appointment this task reminds at. */
-  offsetMin: number;
-  /** Derived start instant minus `offsetMin`, epoch milliseconds. */
-  dueAt: number;
-};
-
 export type Appointment = {
   id: string;
   /** One line of caregiver text; quoted wherever it is shown. */
@@ -484,6 +468,22 @@ export type Appointment = {
   rev: number;
   /** HTTP idempotency key or the agent tool's task id of the last write (§7.3). */
   actionId: string;
+};
+
+/**
+ * One armed appointment reminder (P4-03). The pair `(taskId)` and the offset
+ * are unique: two tasks for one offset would double the reminder, and the same
+ * task twice could not be retired once. `dueAt` is epoch milliseconds: the
+ * appointment's derived instant minus the offset — the one value a task may
+ * sleep on (§8.4).
+ */
+export type AppointmentReminderRef = {
+  /** Pi Durable task id; the task is owned by the system conversation. */
+  taskId: number;
+  /** Minutes before the appointment this task reminds at. */
+  offsetMin: number;
+  /** Derived start instant minus `offsetMin`, epoch milliseconds. */
+  dueAt: number;
 };
 
 /**

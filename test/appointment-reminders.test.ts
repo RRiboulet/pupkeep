@@ -136,7 +136,10 @@ test("a waking task decides due, passed or stale before it decides anything else
     offsetMin: 60,
     dueAt: START_AT - 60 * 60_000,
   };
-  const calendar = { appointments: [appointment()] };
+  const armed = appointment({
+    reminders: [{ taskId: 1, offsetMin: 60, dueAt: START_AT - 60 * 60_000 }],
+  });
+  const calendar = { appointments: [armed] };
 
   assert.deepEqual(appointmentReminderDecision(calendar, input, input.dueAt), {
     kind: "due",
@@ -154,12 +157,12 @@ test("a waking task decides due, passed or stale before it decides anything else
     "a wake after the visit started is not a reminder",
   );
   assert.equal(
-    appointmentReminderDecision({ appointments: [appointment({ rev: 1 })] }, input, input.dueAt).kind,
+    appointmentReminderDecision({ appointments: [appointment({ ...armed, rev: 1 })] }, input, input.dueAt).kind,
     "rescheduled",
   );
   assert.equal(
     appointmentReminderDecision(
-      { appointments: [appointment({ timeLocal: "11:00" })] },
+      { appointments: [appointment({ ...armed, timeLocal: "11:00" })] },
       input,
       input.dueAt,
     ).kind,
@@ -167,12 +170,17 @@ test("a waking task decides due, passed or stale before it decides anything else
     "the same offset against a moved start instant is a stale arm",
   );
   assert.equal(
-    appointmentReminderDecision({ appointments: [appointment({ status: "cancelled" })] }, input, input.dueAt).kind,
+    appointmentReminderDecision({ appointments: [appointment({ ...armed, status: "cancelled" })] }, input, input.dueAt).kind,
     "cancelled",
   );
   assert.equal(
-    appointmentReminderDecision({ appointments: [appointment({ status: "completed" })] }, input, input.dueAt).kind,
+    appointmentReminderDecision({ appointments: [appointment({ ...armed, status: "completed" })] }, input, input.dueAt).kind,
     "completed",
+  );
+  assert.equal(
+    appointmentReminderDecision({ appointments: [appointment({ reminders: [] })] }, input, input.dueAt).kind,
+    "rescheduled",
+    "a restore that dropped the ref does not fire",
   );
   assert.equal(appointmentReminderDecision({ appointments: [] }, input, input.dueAt).kind, "missing");
 });
@@ -399,6 +407,22 @@ test("a reschedule arms new tasks, returns the old ids and retires them", async 
       assert.deepEqual(state.outcome, { status: "aborted" });
     }
 
+    // A replay of the edit carries the recorded ids: aborting them again is a
+    // no-op, never an error (the task is already terminal).
+    const replay = await updateAppointment(fixture.opened.harness, context, {
+      actor: alex,
+      actionId: "http:a-2",
+      id: created.id,
+      rev: created.rev,
+      fields: { ...FIELDS, timeLocal: "11:00" },
+      now: new Date(fixture.clock.now()),
+    });
+    assert.equal(replay.kind, "replayed");
+    if (replay.kind === "replayed") {
+      assert.deepEqual(replay.retiredTaskIds, oldIds);
+      assert.deepEqual(await retireAppointmentReminders(fixture.opened.harness, replay.retiredTaskIds, context), []);
+    }
+
     // The new arm still wakes at its own instant.
     fixture.opened.harness.resume();
     const fresh = updated.appointment.reminders.find((ref) => ref.offsetMin === 60);
@@ -434,6 +458,32 @@ test("a task that survives the abort (a crash) no-ops instead of reminding", asy
     });
     // A cancelled record has no pending reminders.
     assert.deepEqual((await readCalendar(fixture.opened.harness, context)).appointments[0]?.reminders, []);
+  });
+});
+
+test("a superseded update task that survives its abort no-ops as rescheduled", async () => {
+  await withAppointmentReminders(async (fixture) => {
+    const created = await create(fixture);
+    const oldReminder = created.reminders.find((ref) => ref.offsetMin === 60);
+    assert.ok(oldReminder);
+
+    const updated = await updateAppointment(fixture.opened.harness, context, {
+      actor: alex,
+      actionId: "http:a-2",
+      id: created.id,
+      rev: created.rev,
+      fields: { ...FIELDS, timeLocal: "11:00" },
+      now: new Date(fixture.clock.now()),
+    });
+    assert.equal(updated.kind, "changed");
+    // Deliberately skip `retireAppointmentReminders`: this is the crash window.
+    fixture.opened.harness.resume();
+    fixture.clock.advanceTo(oldReminder.dueAt);
+    const state = await stateOf(fixture.opened.harness, oldReminder.taskId, fixture.clock);
+    assert.deepEqual(state.outcome, {
+      status: "completed",
+      result: { kind: "rescheduled", appointmentId: "appointment-1" },
+    });
   });
 });
 

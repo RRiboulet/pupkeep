@@ -192,6 +192,11 @@ test("a stored record always carries its offsets, and an empty list means off", 
   assert.equal(parseAppointment({ ...appointment(), reminders: [{ ...refs[0], taskId: 0 }] }), undefined);
   assert.equal(parseAppointment({ ...appointment(), reminders: [{ ...refs[0], offsetMin: -1 }] }), undefined);
   assert.equal(parseAppointment({ ...appointment(), reminders: [{ ...refs[0], dueAt: 1.5 }] }), undefined);
+  assert.equal(
+    parseAppointment({ ...appointment(), reminders: [{ ...refs[0], offsetMin: 120 }] }),
+    undefined,
+    "a ref for an offset the record does not configure is refused",
+  );
 });
 
 test("reminder offsets are distinct whole minutes within 30 days, in the caller's order", () => {

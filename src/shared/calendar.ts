@@ -301,6 +301,11 @@ export function parseAppointment(raw: unknown): Appointment | undefined {
   if (!isStatus(status)) return undefined;
   const reminders = parseAppointmentReminderRefs(record.reminders);
   if (!reminders) return undefined;
+  // A ref names a reminder **for one of this record's offsets**: a ref for an
+  // offset the record no longer configures is a task the household cannot
+  // explain, and the two lists must not be able to disagree in a stored record.
+  const offsets = new Set(fields.reminderOffsetsMin);
+  if (reminders.some((ref) => !offsets.has(ref.offsetMin))) return undefined;
 
   const createdByLabel = displayText(record.createdByLabel);
   if (createdByLabel === undefined) return undefined;

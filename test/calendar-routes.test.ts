@@ -23,7 +23,7 @@ import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
 import { APPOINTMENT_RULE } from "../src/shared/calendar.ts";
 import type { Appointment } from "../src/shared/domain.ts";
 import type { AppointmentView, CalendarView } from "../src/server/domain/calendar.ts";
-import { startTestApp, type TestApp } from "./support/app.ts";
+import { startTestApp, until, type TestApp } from "./support/app.ts";
 
 const context = BACKGROUND_CONTEXT;
 /** 23:30Z is already 30 October in Paris: the default range starts there. */
@@ -323,6 +323,35 @@ test("an update bumps the revision; a stale one carries the current appointment"
       ).status,
       404,
     );
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("an update retires the replaced reminder tasks through the HTTP path", async () => {
+  const fixture = await startCalendarApp();
+  try {
+    const created = (await (
+      await post(fixture, "/api/appointments", fixture.cookies.owner, { key: "a-1", body: fields() })
+    ).json()) as CreateAnswer;
+    const oldIds = created.appointment.reminders.map((ref) => ref.taskId);
+    assert.equal(oldIds.length, 2, "both default offsets are ahead of the fixed clock");
+
+    const updated = await post(fixture, "/api/appointments/update", fixture.cookies.owner, {
+      key: "a-2",
+      body: { id: created.appointment.id, rev: 0, ...fields({ title: "Vet visit (moved)" }) },
+    });
+    assert.equal(updated.status, 200);
+
+    // The route retires after the commit; without that call the old tasks would
+    // sleep until their stale instant (the wake check is only a safety net).
+    const states = await until(async () => {
+      const current = await Promise.all(oldIds.map((id) => fixture.app.app.getTask(id as never, context)));
+      return current.every((state) => state?.state.status === "terminal") ? current : undefined;
+    });
+    for (const state of states) {
+      assert.deepEqual(state?.state.outcome, { status: "aborted" });
+    }
   } finally {
     await fixture.stop();
   }

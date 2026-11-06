@@ -3955,7 +3955,9 @@ process kill; both clients see the same state; the partner notification
       The task id alone cannot say which offset it belongs to or whether it is the
       same arm, and a later cancel needs all of it; the field replaces P4-01's
       `reminderTaskIds`, so the document moves to version 2 and `migrate` adds an
-      empty list (P4-01 never armed a task). (2) **the due instant is derived**:
+      empty list (P4-01 never armed a task). The parser refuses a ref whose
+      offset the record does not configure, so the two lists cannot disagree in
+      a stored document. (2) **the due instant is derived**:
       the record's start in its own zone minus the offset, so a DST change cannot
       move a reminder; an offset already past, or a visit already started, arms
       nothing rather than firing late. (3) **the task's input carries the
@@ -3975,7 +3977,7 @@ process kill; both clients see the same state; the partner notification
       before the terminal commit. (7) appointments need no boot planner: their
       tasks persist in SQLite and the refs live on the record, so P4-04's planner
       story is the feeding schedule's.
-      **Verified:** 8 new tests in `test/appointment-reminders.test.ts` — the
+      **Verified:** 9 new tests in `test/appointment-reminders.test.ts` — the
       arming plan (skip past, DST-side due instant, stop at the start), the wake
       decisions (due/passed/rescheduled by revision and by moved instant/
       cancelled/completed/missing), one background task per future offset owned
@@ -3983,15 +3985,24 @@ process kill; both clients see the same state; the partner notification
       committing its decision and writing nothing, a replay arming nothing new, a
       reschedule arming new tasks and retiring the old ids to `aborted`, a task
       that survives the abort no-opping as `cancelled`, and a cancel returning
-      the ids and retiring them; plus the version-1 → version-2 document
-      migration in `test/calendar.test.ts`. The suite is 645/645 and
-      `npm run typecheck` passes.
+      the ids and retiring them, a replayed edit carrying the recorded ids and
+      re-aborting them harmlessly, an updated task that survives its abort
+      no-opping as `rescheduled`, the route retiring the replaced tasks to
+      `aborted` (in `test/calendar-routes.test.ts`), and the parser refusing a
+      ref for an offset the record does not configure; plus the version-1 →
+      version-2 document migration in `test/calendar.test.ts`. The suite is
+      647/647 and `npm run typecheck` passes.
       **Not verified / carried out:** delivery (P4-05); the agent's appointment
       writes and their approval (P4-07); a task whose definition is missing is
       blocked by the scheduler rather than recreated (no reconciliation pass
       exists for appointments, and none is needed while the refs and tasks
       persist); `abortTask` requires scheduling to be enabled, which the server
-      does on start; and no phone has run it.
+      does on start; and no phone has run it. **For P4-05:** the task reads the
+      calendar outside its terminal commit, so a supersede that lands between
+      that read and the commit can leave a `due` outcome for a moved or
+      cancelled visit. Nothing delivers today; when delivery lands, re-check the
+      record (or the ref/rev) in the commit that writes the intent, or accept the
+      window explicitly.
 - [ ] **P4-04** Daily feed planner + feed reminder tasks; stale windows; no
       duplicate planner; boot reconciliation; skip past offsets. Builds on
       P2-09's task, `planFeedReminders`/`armFeedReminders` and
@@ -4004,7 +4015,10 @@ process kill; both clients see the same state; the partner notification
       task committed before delivery existed (deliver them, or state that they
       were never delivered).
 - [ ] **P4-05** `app.notifications` + outbox + Web Push + VAPID + service worker;
-      server dedupe key authoritative. Inherits P2-02's version-1 document (the
+      server dedupe key authoritative. Inherits P4-03's appointment task, whose
+      `due` result is decided from a snapshot read outside the terminal commit:
+      delivery must re-check the record/ref in the intent commit (a supersede can
+      land in that window), and the task's version bump adds the intent write. Inherits P2-02's version-1 document (the
       committed intents, the category-only title catalog and the dedupe key) and
       adds the outbox/delivery fields as version 2 with a `migrate`.
 - [ ] **P4-06** Notification centre, prefs, test notification, badge; host

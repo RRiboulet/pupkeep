@@ -20,7 +20,6 @@
 // write the intents before the terminal commit. Today a due reminder commits its
 // decision as the task's terminal result and writes nothing.
 
-import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTask } from "@earendil-works/pi-durable";
 import type { Appointment, Calendar } from "../../shared/domain.ts";
 import { CalendarDoc } from "../domain/docs.ts";
@@ -86,8 +85,14 @@ export type AppointmentReminderResult =
   /** The calendar document or the record is absent (a partial restore). */
   | { kind: "missing"; appointmentId: string };
 
-/** The derived start instant of a stored appointment, in its own zone (§8.4). */
-function startMs(appointment: Appointment): number {
+/**
+ * The derived start instant of a stored appointment, in its own zone (§8.4).
+ * The one wall-clock conversion for the reminder path: the arming rule and the
+ * waking rule must compute the same instant, or every task would look stale.
+ */
+export function appointmentStartMs(
+  appointment: Pick<Appointment, "localDate" | "timeLocal" | "timezone">,
+): number {
   return instantAtLocalWallClock(appointment.localDate, appointment.timeLocal, appointment.timezone).getTime();
 }
 
@@ -110,7 +115,18 @@ export function appointmentReminderDecision(
   if (appointment.status === "completed") return { kind: "completed", appointmentId: input.appointmentId };
   if (appointment.rev !== input.rev) return { kind: "rescheduled", appointmentId: input.appointmentId };
 
-  const startsAt = startMs(appointment);
+  // The record must still list this arm: a hand-edited restore can keep its
+  // `rev` while dropping the ref, and a task its record no longer names is not
+  // the household's reminder. This is also what makes the refs load-bearing —
+  // a write that replaced them without bumping `rev` (it cannot) would be caught.
+  const armed = appointment.reminders.some(
+    (ref) => ref.offsetMin === input.offsetMin && ref.dueAt === input.dueAt,
+  );
+  if (!armed) return { kind: "rescheduled", appointmentId: input.appointmentId };
+
+  const startsAt = appointmentStartMs(appointment);
+  // Backstop for a document edited outside the service (a hand-edited restore
+  // keeps its `rev`); every ordinary edit bumps `rev` and is caught above.
   const dueAt = startsAt - input.offsetMin * 60_000;
   if (dueAt !== input.dueAt) return { kind: "rescheduled", appointmentId: input.appointmentId };
   // The visit is under way (or over); a phone that was off does not announce it.
@@ -177,13 +193,3 @@ export const AppointmentReminder = defineTask<
   abort: (_task, runtime, context) =>
     runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
 });
-
-/**
- * The extension every server process installs (the feeding task is registered
- * beside it in `createReminders`). Tasks are resolved by name whichever
- * conversation selects the extension, so the hidden system conversation needs no
- * selection of its own.
- */
-export function createAppointmentReminder(): Extension<ToolRegistration> {
-  return { name: "appointment-reminders", tasks: [AppointmentReminder] };
-}

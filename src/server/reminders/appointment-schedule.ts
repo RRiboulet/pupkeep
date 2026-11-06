@@ -28,16 +28,11 @@ import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import type { Harness } from "@earendil-works/pi-durable";
 import type { Appointment, AppointmentReminderRef, Household } from "../../shared/domain.ts";
 import { UnavailableError } from "../domain/errors.ts";
-import { instantAtLocalWallClock } from "../domain/time.ts";
 import {
   AppointmentReminder,
+  appointmentStartMs,
   type AppointmentReminderInput,
 } from "./appointment-reminder.ts";
-
-/** The derived start instant of an appointment, in its own zone. */
-function startMs(appointment: Pick<Appointment, "localDate" | "timeLocal" | "timezone">): number {
-  return instantAtLocalWallClock(appointment.localDate, appointment.timeLocal, appointment.timezone).getTime();
-}
 
 /**
  * The reminders a write wants, pure so the arming rule and the tests agree: one
@@ -49,7 +44,7 @@ export function planAppointmentReminders(
   appointment: Pick<Appointment, "id" | "rev" | "localDate" | "timeLocal" | "timezone" | "reminderOffsetsMin">,
   now: Date,
 ): AppointmentReminderInput[] {
-  const startsAt = startMs(appointment);
+  const startsAt = appointmentStartMs(appointment);
   const nowMs = now.getTime();
   if (startsAt <= nowMs) return [];
   const plan: AppointmentReminderInput[] = [];
