@@ -4018,10 +4018,11 @@ process kill; both clients see the same state; the partner notification
       midnight + 1 minute, capped at six hours), and `reconcileFeedReminders`
       (one commit: reuse or replace the planner, then arm the day);
       `app.household.feedPlannerTaskId` with `HOUSEHOLD_SCHEMA_VERSION` 4 and the
-      migration; `armFeedReminders` accepts the dead task ids the caller read
-      outside the commit; boot reconciliation in `startApp` after bootstrap and
-      before `resume()`; and the timezone write re-arms today's refs in its own
-      commit. Registered beside the feed and appointment tasks in
+      migration; `armFeedReminders` reads the refs' task state at its start and
+      replaces a dead ref, before its own first write; boot reconciliation in
+      `startApp` after bootstrap and before `resume()`; and the timezone write
+      re-arms today's refs in its own commit, passing the new zone before
+      storing it. Registered beside the feed and appointment tasks in
       `createReminders`.
       Decisions: (1) **one looping planner, not one task per day.** The id lives
       in the household, reconciliation reuses it while live and replaces it when
@@ -4049,7 +4050,8 @@ process kill; both clients see the same state; the partner notification
       re-planning the same day), `feedPlannerWake`'s chunk/midnight arithmetic, a
       timezone change re-arming in the new zone, and a reopen keeping the same
       planner and refs; plus the household v1/v2→v4 and v3→v4 migrations in
-      `test/setup.test.ts`/`test/reminders.test.ts`. The suite is 654/654 and
+      `test/setup.test.ts`/`test/reminders.test.ts`, with the document version
+      pinned to the schema version. The suite is 654/654 and
       `npm run typecheck` passes.
       **Not verified / carried out:** delivery is P4-05 (which also inherits the
       P4-03 note about re-checking the record in the intent commit, and the

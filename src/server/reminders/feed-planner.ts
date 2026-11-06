@@ -21,7 +21,7 @@
 // zone change is noticed within a chunk rather than a day.
 
 import type { Context } from "@earendil-works/chord";
-import type { ConversationId, Harness, TaskId } from "@earendil-works/pi-durable";
+import type { ConversationId, TaskId } from "@earendil-works/pi-durable";
 import { defineTask } from "@earendil-works/pi-durable";
 import { dateMinusDays } from "../../shared/dates.ts";
 import { FeedingDoc, HouseholdDoc, type DocStore } from "../domain/docs.ts";
@@ -45,16 +45,6 @@ export type FeedPlannerCheckpoint =
       plannedDate?: string;
     }
   | { phase: "plan" };
-
-/**
- * What a plan run delivered; committed nowhere (the checkpoint carries the
- * durable state), but useful to the task's terminal receipt if it is ever
- * aborted mid-run and to the tests that drive the task.
- */
-export type FeedPlannerResult = {
-  kind: "planned" | "idle" | "unavailable";
-  localDate: string;
-};
 
 /**
  * The instant the planner should next reconsider: local midnight of the day
@@ -82,7 +72,7 @@ export function feedPlannerWake(
  * crash; the plan commit is idempotent (`armFeedReminders` reuses a live task
  * for the same instant), so a rerun cannot double a reminder.
  */
-export const FeedPlanner = defineTask<Record<string, never>, FeedPlannerCheckpoint, FeedPlannerResult>({
+export const FeedPlanner = defineTask<Record<string, never>, FeedPlannerCheckpoint, never>({
   name: FEED_PLANNER_TASK,
   version: FEED_PLANNER_VERSION,
   initial: () => ({ phase: "wait" }),
@@ -119,22 +109,15 @@ export const FeedPlanner = defineTask<Record<string, never>, FeedPlannerCheckpoi
         await runtime.commit(() => ({ status: "running", checkpoint: { phase: "wait" } }), context);
         return;
       }
-      // A ref whose task went terminal is dead even though it names the right
-      // instant: read the task states before the commit, where a table read is
-      // still allowed (`ReadAfterWrite` once the plan writes), and hand them to
-      // the arming rule so the day repairs itself rather than trusting a ghost.
-      const deadTaskIds: number[] = [];
-      for (const ref of household.feedReminders) {
-        const record = await runtime.getTask(ref.taskId as TaskId, context);
-        if (record === undefined || record.state.status === "terminal") deadTaskIds.push(ref.taskId);
-      }
       await runtime.commit(async (tx) => {
         // The documents are re-read inside the commit: the snapshot above only
         // decided that they exist, and the zone may have moved since.
         const draft = await tx.doc(HouseholdDoc);
         const current = localDateAt(now, draft.timezone);
         const slots = (await tx.doc(FeedingDoc)).slots;
-        await armFeedReminders(tx, draft, slots, now, deadTaskIds);
+        // The arm reads the refs' task state before its first write, so a dead
+        // ref is replaced by this day's plan rather than trusted.
+        await armFeedReminders(tx, draft, slots, now);
         // The state returned from the commit replaces the checkpoint, so the
         // next wake knows today is done and sleeps to midnight.
         return { status: "running", checkpoint: { phase: "wait", plannedDate: current } };
@@ -165,7 +148,7 @@ export type FeedPlannerReconciliation = {
 };
 
 export async function reconcileFeedReminders(
-  store: DocStore & Pick<Harness, "getTask">,
+  store: DocStore,
   context: Context,
   now: Date,
 ): Promise<FeedPlannerReconciliation> {
@@ -176,27 +159,24 @@ export async function reconcileFeedReminders(
     return { createdPlanner: false, plannerTaskId: null, armedReminders: 0 };
   }
 
-  // Task state is read **outside** the commit: a table read after a document
-  // write throws `ReadAfterWrite`, and the arm below must not trust a ref whose
-  // task has gone terminal (the P2-09 carried note).
-  const deadTaskIds: number[] = [];
-  for (const ref of existing.feedReminders) {
-    const record = await store.getTask(ref.taskId as TaskId, context);
-    if (record === undefined || record.state.status === "terminal") deadTaskIds.push(ref.taskId);
-  }
-
   return store.commit(async (tx) => {
     const household = await tx.doc(HouseholdDoc);
     if (household.systemConversationId <= 0) {
       return { createdPlanner: false, plannerTaskId: null, armedReminders: 0 };
     }
     let plannerTaskId = household.feedPlannerTaskId;
-    let createdPlanner = false;
+    // Read the planner's state early: every table read must precede the first
+    // write of this commit. Only a task that can still run counts as the
+    // planner; a terminal one is gone, and a task blocked by a missing
+    // definition keeps its live record (the scheduler reports it), so it is
+    // reused rather than duplicated.
     const current = plannerTaskId === null ? undefined : await tx.task(plannerTaskId as TaskId);
-    // Only a task that can still run counts as the planner. A terminal one is
-    // gone; a task blocked by a missing definition keeps its live record, and the
-    // scheduler reports it (`inspect`), so it is reused rather than duplicated.
     const live = current !== undefined && current.state.status !== "terminal";
+
+    const before = new Set(household.feedReminders.map((ref) => ref.taskId));
+    await armFeedReminders(tx, household, (await tx.doc(FeedingDoc)).slots, now);
+
+    let createdPlanner = false;
     if (!live) {
       plannerTaskId = Number(
         await tx.createTask(
@@ -212,9 +192,6 @@ export async function reconcileFeedReminders(
       household.feedPlannerTaskId = plannerTaskId;
       createdPlanner = true;
     }
-
-    const before = new Set(household.feedReminders.map((ref) => ref.taskId));
-    await armFeedReminders(tx, household, (await tx.doc(FeedingDoc)).slots, now, deadTaskIds);
     const armedReminders = household.feedReminders.filter((ref) => !before.has(ref.taskId)).length;
     return { createdPlanner, plannerTaskId, armedReminders };
   }, context);

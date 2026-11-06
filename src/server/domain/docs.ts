@@ -174,7 +174,7 @@ export function emptyWalks(): Walks {
 
 export const HouseholdDoc = defineDoc<Household>({
   kind: "app.household",
-  version: 3,
+  version: 4,
   scope: "session",
   initial: emptyHousehold,
   // A version-1 document (P1-08) predates `rev` and the timezone confirmation:

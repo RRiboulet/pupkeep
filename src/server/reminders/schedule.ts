@@ -21,7 +21,7 @@
 // is not armed at all: a phone that boots at noon must not fire this morning's
 // missed reminders in a burst (§12.2).
 
-import type { ConversationId, Tx } from "@earendil-works/pi-durable";
+import type { ConversationId, TaskId, Tx } from "@earendil-works/pi-durable";
 import type { FeedReminderRef, Household, MealSlot } from "../../shared/domain.ts";
 import { parseFeedReminderRefs } from "../domain/docs.ts";
 import { DomainConflictError, UnavailableError } from "../domain/errors.ts";
@@ -60,14 +60,15 @@ export function planFeedReminders(
   household: Pick<Household, "timezone" | "settings">,
   slots: readonly MealSlot[],
   now: Date,
+  timezone: string = household.timezone,
 ): FeedReminderInput[] {
-  const localDate = localDateAt(now, household.timezone);
+  const localDate = localDateAt(now, timezone);
   const delayMs = reminderDelayMs(household);
   const cutoff = now.getTime() - FEED_REMINDER_GRACE_MS;
   const plan: FeedReminderInput[] = [];
   for (const slot of slots) {
     if (!slot.active) continue;
-    const dueAt = instantAtLocalWallClock(localDate, slot.timeLocal, household.timezone).getTime() + delayMs;
+    const dueAt = instantAtLocalWallClock(localDate, slot.timeLocal, timezone).getTime() + delayMs;
     if (dueAt < cutoff) continue;
     plan.push({ slotId: slot.id, label: slot.label, localDate, dueAt });
   }
@@ -97,14 +98,10 @@ export async function armFeedReminders(
   slots: readonly MealSlot[],
   now: Date,
   /**
-   * Refs whose task the caller has already found dead (terminal or missing).
-   * Read **outside** the commit: a table read after a document write throws
-   * `ReadAfterWrite`, so the transaction cannot inspect task state itself. Boot
-   * reconciliation and the daily planner read them; an ordinary schedule save
-   * passes none and relies on the due instant (a dead task for a still-future
-   * slot is replaced at the next plan or boot).
+   * The zone the plan is for. The timezone write passes the new zone before
+   * storing it, so the due instants are the ones the caregiver will live in.
    */
-  deadTaskIds: readonly number[] = [],
+  timezone: string = household.timezone,
 ): Promise<void> {
   // A household without its hidden thread has not booted; creating a task now
   // would either fail or attach it to nothing. Refuse rather than half-arm.
@@ -114,22 +111,27 @@ export async function armFeedReminders(
     throw new UnavailableError("the household is not ready for reminders yet; retry after boot");
   }
 
-  const plan = planFeedReminders(household, slots, now);
-  const localDate = localDateAt(now, household.timezone);
+  const plan = planFeedReminders(household, slots, now, timezone);
+  const localDate = localDateAt(now, timezone);
   const existing = household.feedReminders;
   const kept = existing.filter((ref) => ref.localDate > localDate);
+
+  // A ref outlives its task: a fired or aborted task is terminal while the ref
+  // still names the right instant. Read every ref's state **now**, before the
+  // first write of this commit (a table read after a write is `ReadAfterWrite`),
+  // so a dead task is replaced rather than trusted.
+  const dead = new Set<number>();
+  for (const ref of existing) {
+    const record = await tx.task(ref.taskId as TaskId);
+    if (record === undefined || record.state.status === "terminal") dead.add(ref.taskId);
+  }
 
   const armed: FeedReminderRef[] = [];
   for (const item of plan) {
     const current = existing.find((ref) => ref.slotId === item.slotId && ref.localDate === item.localDate);
-    if (
-      current !== undefined &&
-      current.dueAt === item.dueAt &&
-      !deadTaskIds.includes(current.taskId)
-    ) {
-      // The same slot, instant and a task the caller found alive: this already
-      // is today's reminder. A ref whose task went terminal is dead even though
-      // it still names the right instant.
+    if (current !== undefined && current.dueAt === item.dueAt && !dead.has(current.taskId)) {
+      // The same slot, instant and a live task: this already is today's
+      // reminder. A ref whose task went terminal is replaced below.
       armed.push(current);
       continue;
     }

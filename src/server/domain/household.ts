@@ -164,20 +164,19 @@ export async function updateHouseholdTimezone(
         if (draft.rev !== input.rev) throw new StaleRevisionError("the household changed since it was read");
 
         const before = draft.timezone;
-        draft.timezone = input.timezone;
-        draft.timezoneConfirmedAt = now.toISOString();
-        draft.rev = input.rev + 1;
-
         const changed = before !== input.timezone;
         if (changed) {
           // P4-04: the meal reminders are wall-clock instants in the household
-          // zone, so a zone change makes today's arms stale. Re-arm in this
-          // commit (the plan skips instants already past); the old tasks carry a
-          // different `dueAt` and no-op when they wake, and the daily planner
-          // picks the new zone up at its next wake.
+          // zone, so a zone change makes today's arms stale. Re-arm for the new
+          // zone **before** storing it — the arm reads task state, which must
+          // precede this commit's writes — and the old tasks no-op when they
+          // wake because their `dueAt` no longer matches.
           const feeding = await tx.doc(FeedingDoc);
-          await armFeedReminders(tx, draft, feeding.slots, now);
+          await armFeedReminders(tx, draft, feeding.slots, now, input.timezone);
         }
+        draft.timezone = input.timezone;
+        draft.timezoneConfirmedAt = now.toISOString();
+        draft.rev = input.rev + 1;
         appendActivity(
           await tx.doc(ActivityDoc),
           activityEntry({

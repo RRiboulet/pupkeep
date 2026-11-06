@@ -29,6 +29,7 @@ import {
   HouseholdDoc,
   PuppyDoc,
   emptyFeeding,
+  emptyHousehold,
   parseFeeding,
   parseHousehold,
 } from "../src/server/domain/docs.ts";
@@ -94,6 +95,8 @@ test("a version-1 household migrates to rev 0 and an unconfirmed timezone", () =
       agentBudgetUsd: 10,
     },
   };
+  assert.equal(HouseholdDoc.definition.version, 4, "the document version tracks the schema version");
+  assert.equal(emptyHousehold().schemaVersion, 4);
   const migrated = migrate(legacy as never, 1);
   assert.equal(migrated.schemaVersion, 4);
   assert.equal(migrated.rev, 0);
