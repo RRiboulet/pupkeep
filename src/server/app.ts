@@ -52,6 +52,7 @@ import { createGrowthTools } from "./agent/growth-tools.ts";
 import { createTrainingTools } from "./agent/training-tools.ts";
 import { createShowerTools } from "./agent/shower-tools.ts";
 import { createCalendarTools } from "./agent/calendar-tools.ts";
+import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
 import { createProfileTools } from "./agent/tools.ts";
 import { createReminders } from "./reminders/feed-reminder.ts";
 import {
@@ -492,6 +493,26 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         count: bootstrapped.nameDrift.length,
       });
     }
+  }
+
+  // P4-04: one commit that repairs the day's reminders and makes sure exactly
+  // one planner exists. After bootstrap (the household is there) and before
+  // scheduling starts. A failure is not fatal — the next boot and the next
+  // schedule write both arm — but it is reported, never swallowed.
+  try {
+    const reconciliation = await reconcileFeedReminders(
+      opened.harness,
+      context,
+      new Date(options.now?.() ?? Date.now()),
+    );
+    logger.info("feed planner reconciliation", {
+      createdPlanner: reconciliation.createdPlanner,
+      armedReminders: reconciliation.armedReminders,
+    });
+  } catch (error) {
+    logger.warn("could not reconcile the feed planner; reminders may wait for the next schedule save", {
+      error,
+    });
   }
 
   // A failed Session closes itself; this is the only place the process learns

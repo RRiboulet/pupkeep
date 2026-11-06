@@ -29,11 +29,13 @@ import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type Writ
 import { isIanaZone } from "../../shared/profile.ts";
 import {
   ActivityDoc,
+  FeedingDoc,
   HouseholdDoc,
   parseHousehold,
   parseMemberProfiles,
   type DocStore,
 } from "./docs.ts";
+import { armFeedReminders } from "../reminders/schedule.ts";
 import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
 
 /** `app.household` is missing or unreadable; retry once the server has booted. */
@@ -167,6 +169,15 @@ export async function updateHouseholdTimezone(
         draft.rev = input.rev + 1;
 
         const changed = before !== input.timezone;
+        if (changed) {
+          // P4-04: the meal reminders are wall-clock instants in the household
+          // zone, so a zone change makes today's arms stale. Re-arm in this
+          // commit (the plan skips instants already past); the old tasks carry a
+          // different `dueAt` and no-op when they wake, and the daily planner
+          // picks the new zone up at its next wake.
+          const feeding = await tx.doc(FeedingDoc);
+          await armFeedReminders(tx, draft, feeding.slots, now);
+        }
         appendActivity(
           await tx.doc(ActivityDoc),
           activityEntry({

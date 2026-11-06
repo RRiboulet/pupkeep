@@ -22,6 +22,8 @@
 //   * `app.calendar` moved to version 2 when P4-03 replaced `reminderTaskIds`
 //     with the armed reminder refs; `migrate` adds the empty list, because P4-01
 //     never armed a task.
+//   * `app.household` moved to version 4 when P4-04 added `feedPlannerTaskId`;
+//     `migrate` starts it null and the next boot reconciliation arms the planner.
 // A phone that ran an older build therefore keeps its household and profile
 // instead of failing boot.
 //
@@ -111,6 +113,7 @@ export function emptyHousehold(): Household {
     createdAt: "",
     settings: { ...DEFAULT_HOUSEHOLD_SETTINGS, appointmentReminderOffsetsMin: [...DEFAULT_HOUSEHOLD_SETTINGS.appointmentReminderOffsetsMin] },
     feedReminders: [],
+    feedPlannerTaskId: null,
   };
 }
 
@@ -179,18 +182,22 @@ export const HouseholdDoc = defineDoc<Household>({
   // it. A version-2 document (P1-14) only lacks the reminder ids. In both cases
   // boot must not invent a confirmation, and the roster is not revised.
   migrate(value, fromVersion) {
-    if (fromVersion !== 1 && fromVersion !== 2) {
+    if (fromVersion !== 1 && fromVersion !== 2 && fromVersion !== 3) {
       throw new Error(`app.household has no migration from version ${fromVersion}`);
     }
     const migrated = {
       ...(value as unknown as Record<string, unknown>),
       schemaVersion: HOUSEHOLD_SCHEMA_VERSION,
       ...(fromVersion === 1 ? { rev: 0, timezoneConfirmedAt: null } : {}),
-      feedReminders: [],
+      // Versions 1 and 2 predate the slot-reminder refs; version 3 predates the
+      // planner. Neither older build ever armed a planner, so the id starts null
+      // and the next boot reconciliation creates one.
+      ...(fromVersion <= 2 ? { feedReminders: [] } : {}),
+      feedPlannerTaskId: null,
     };
     const parsed = parseHousehold(migrated);
     if (!parsed) {
-      throw new Error(`app.household version ${fromVersion} does not migrate to a valid version 3`);
+      throw new Error(`app.household version ${fromVersion} does not migrate to a valid version 4`);
     }
     return parsed;
   },
@@ -446,6 +453,8 @@ export function parseHousehold(value: unknown): Household | undefined {
   if (!settings) return undefined;
   const feedReminders = parseFeedReminderRefs(record.feedReminders);
   if (!feedReminders) return undefined;
+  const feedPlannerTaskId = record.feedPlannerTaskId;
+  if (feedPlannerTaskId !== null && !isPositiveInteger(feedPlannerTaskId)) return undefined;
   return {
     schemaVersion: HOUSEHOLD_SCHEMA_VERSION,
     rev: record.rev,
@@ -458,6 +467,7 @@ export function parseHousehold(value: unknown): Household | undefined {
     createdAt: record.createdAt,
     settings,
     feedReminders,
+    feedPlannerTaskId,
   };
 }
 

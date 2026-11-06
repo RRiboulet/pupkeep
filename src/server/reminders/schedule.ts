@@ -6,7 +6,10 @@
 //
 //   * a reminder is identified by `(slotId, localDate)`. An arm is a task plus a
 //     ref in `app.household`, and an arm with the same due instant **reuses** the
-//     task — saving the same schedule twice must not double every reminder;
+//     task while it is still live — saving the same schedule twice must not
+//     double every reminder. A ref whose task has gone terminal (a fired or
+//     aborted task) is dead, not a reminder: P4-04's reconciliation replaces it,
+//     so a re-save cannot trust a stale id;
 //   * a rescheduled slot gets a new task, and the old one no-ops when it wakes
 //     because its input no longer matches the schedule (`feedReminderDecision`).
 //
@@ -85,15 +88,23 @@ export function planFeedReminders(
  * The ref, not the task table, is the identity: a same-day A→B→A edit can arm a
  * second task with the same input as the first. Both wake and both decide
  * `due`, and delivery stays exactly-once because the server dedupe key (§12.3)
- * is authoritative; P4-04's reconciliation can prune the orphan from the
- * terminal task records. Scanning the task table on every schedule save would
- * buy nothing here.
+ * is authoritative. A ref whose task went terminal is replaced on the next arm;
+ * scanning the whole task table would buy nothing here.
  */
 export async function armFeedReminders(
   tx: Tx,
   household: Household,
   slots: readonly MealSlot[],
   now: Date,
+  /**
+   * Refs whose task the caller has already found dead (terminal or missing).
+   * Read **outside** the commit: a table read after a document write throws
+   * `ReadAfterWrite`, so the transaction cannot inspect task state itself. Boot
+   * reconciliation and the daily planner read them; an ordinary schedule save
+   * passes none and relies on the due instant (a dead task for a still-future
+   * slot is replaced at the next plan or boot).
+   */
+  deadTaskIds: readonly number[] = [],
 ): Promise<void> {
   // A household without its hidden thread has not booted; creating a task now
   // would either fail or attach it to nothing. Refuse rather than half-arm.
@@ -111,8 +122,14 @@ export async function armFeedReminders(
   const armed: FeedReminderRef[] = [];
   for (const item of plan) {
     const current = existing.find((ref) => ref.slotId === item.slotId && ref.localDate === item.localDate);
-    if (current !== undefined && current.dueAt === item.dueAt) {
-      // The same slot, the same instant: this task already is today's reminder.
+    if (
+      current !== undefined &&
+      current.dueAt === item.dueAt &&
+      !deadTaskIds.includes(current.taskId)
+    ) {
+      // The same slot, instant and a task the caller found alive: this already
+      // is today's reminder. A ref whose task went terminal is dead even though
+      // it still names the right instant.
       armed.push(current);
       continue;
     }
