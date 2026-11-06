@@ -24,9 +24,11 @@ import {
 } from "@earendil-works/pi-durable";
 import type { Household, MemberProfile } from "../../shared/domain.ts";
 import {
+  APPROVAL_ENTRY_KIND,
   CHAT_ENTRY_KIND,
   HOUSEHOLD_FALLBACK_LABEL,
   THREAD_TRANSCRIPT_LIMIT,
+  type ApprovalEntryData,
   type ChatEntryData,
   type ThreadSnapshot,
   type TranscriptEntry,
@@ -68,6 +70,25 @@ export function chatDataOf(entry: EntryRecord): ChatEntryData | undefined {
   if (typeof clientMessageId !== "string" || clientMessageId === "") return undefined;
   if (authorId !== null && typeof authorId !== "string") return undefined;
   return { authorId, authorName, text, clientMessageId };
+}
+
+/**
+ * `data` of an `app.approval` entry, or `undefined` for a shape this build does
+ * not understand (a hand-written entry is skipped rather than rendered as a
+ * decision nobody made).
+ */
+export function approvalDataOf(entry: EntryRecord): ApprovalEntryData | undefined {
+  if (entry.kind !== APPROVAL_ENTRY_KIND) return undefined;
+  const data = entry.data as ApprovalEntryData | undefined;
+  if (typeof data !== "object" || data === null) return undefined;
+  const { approvalId, at, status, text, byUserId, byLabel } = data;
+  if (typeof approvalId !== "string" || approvalId === "") return undefined;
+  if (typeof at !== "string" || Number.isNaN(Date.parse(at))) return undefined;
+  if (status !== "confirmed" && status !== "cancelled") return undefined;
+  if (typeof text !== "string") return undefined;
+  if (typeof byLabel !== "string" || byLabel.trim() === "") return undefined;
+  if (byUserId !== null && typeof byUserId !== "string") return undefined;
+  return { approvalId, at, status, text, byUserId, byLabel };
 }
 
 /** Household profile of a member id — the only label source (§9.2). */
@@ -231,6 +252,24 @@ export async function readThreadSnapshot(thread: ThreadRef, seq: number): Promis
         authorName: labelFor(household, chat.authorId),
         text: chat.text,
         clientMessageId: chat.clientMessageId,
+      });
+      continue;
+    }
+    const approval = approvalDataOf(entry);
+    if (approval) {
+      // §9.3's outcome entry: no model content, and the label is resolved
+      // through the household now rather than trusted from the stored copy.
+      transcript.push({
+        kind: "approval",
+        entryId: entry.id,
+        // The entry carries no model content, so the app-built deciding instant
+        // is the only stamp it has.
+        at: approval.at,
+        approvalId: approval.approvalId,
+        status: approval.status,
+        text: approval.text,
+        byUserId: approval.byUserId,
+        byLabel: labelFor(household, approval.byUserId),
       });
       continue;
     }

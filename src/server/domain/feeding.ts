@@ -21,14 +21,14 @@
 
 import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
-import type { JsonObject } from "@earendil-works/pi-durable";
+import type { JsonObject, Tx } from "@earendil-works/pi-durable";
 import type { FeedEvent, Feeding, MealSlot, NotificationIntent } from "../../shared/domain.ts";
 import { MEAL_SCHEDULE_RULE, parseFeedEvent, parseFeedEvents, parseMealSlots } from "../../shared/feeding.ts";
 import { notificationIntent, notificationKey } from "../../shared/notifications.ts";
 import { appendNotificationIntents } from "../notifications/intents.ts";
 import { armFeedReminders } from "../reminders/schedule.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
-import type { ActorResolver } from "./actor.ts";
+import type { ActorRef, ActorResolver } from "./actor.ts";
 import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type WriteOutcome } from "./commands.ts";
 import { ActivityDoc, FeedingDoc, HouseholdDoc, NotificationsDoc, parseFeeding, type DocStore } from "./docs.ts";
 import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
@@ -64,14 +64,72 @@ export type MealSlotWrite = {
   readonly now?: Date;
 };
 
+/**
+ * The commit half of a schedule save, shared by the wizard's route and an
+ * approved agent proposal (§9.3, §10.3). Runs entirely inside the caller's
+ * transaction: the schedule, today's re-armed reminders and the activity line
+ * land together or not at all.
+ */
+export type MealSlotCommit = {
+  /** Already resolved from the household this transaction reads (§9.2). */
+  readonly actor: ActorRef;
+  readonly actionId: string;
+  /** The revision the caller read; a stale one writes nothing. */
+  readonly rev: number;
+  /** One to twelve slots, at least one active, distinct times (§8.1). */
+  readonly slots: unknown;
+  readonly now: Date;
+};
+
 function mealCount(count: number): string {
   return `${count} ${count === 1 ? "meal" : "meals"}`;
 }
 
 /**
- * Replace the schedule. The whole list is written rather than patched slot by
- * slot: the wizard edits one schedule, and one commit is what a caregiver's
- * save means (§7.2). A replay of the same key and body returns the recorded
+ * Replace the schedule inside the caller's commit. The whole list is written
+ * rather than patched slot by slot: the wizard edits one schedule, and one
+ * commit is what a caregiver's save means (§7.2). The parser runs here, after
+ * the caller's idempotency lookup, so the document can never hold a schedule no
+ * reader can parse.
+ */
+export async function updateMealSlotsIn(tx: Tx, input: MealSlotCommit): Promise<{ rev: number; count: number }> {
+  const slots = parseMealSlots(input.slots);
+  if (!slots) throw new DomainConflictError(MEAL_SCHEDULE_RULE);
+  const household = await tx.doc(HouseholdDoc);
+  const draft = await tx.doc(FeedingDoc);
+  if (draft.rev !== input.rev) throw new StaleRevisionError("the meal schedule changed since it was read");
+
+  const first = draft.slots.length === 0;
+
+  // P2-09: the same commit arms today's feeding reminders on the hidden system
+  // conversation (§12.2). A reschedule re-arms; an unchanged schedule reuses the
+  // tasks it already has. It runs before the schedule write because it reads the
+  // reminder tasks' state, and a table read after a write is `ReadAfterWrite`.
+  await armFeedReminders(tx, household, slots, input.now);
+
+  draft.slots = slots;
+  draft.rev = input.rev + 1;
+
+  appendActivity(
+    await tx.doc(ActivityDoc),
+    activityEntry({
+      kind: "feeding.slots",
+      // Counts only: a slot label is caregiver free text and does not belong in
+      // a one-line feed a partner reads at a glance.
+      summary: first
+        ? `${input.actor.label} set the meal schedule (${mealCount(slots.length)})`
+        : `${input.actor.label} updated the meal schedule (${mealCount(slots.length)})`,
+      actorId: input.actor.id,
+      actorLabel: input.actor.label,
+      now: input.now,
+    }),
+  );
+  return { rev: draft.rev, count: slots.length };
+}
+
+/**
+ * Replace the schedule from a route or a tool: one idempotent commit around
+ * `updateMealSlotsIn`. A replay of the same key and body returns the recorded
  * success even though its own commit bumped the revision.
  */
 export async function updateMealSlots(
@@ -87,42 +145,16 @@ export async function updateMealSlots(
       { store, context },
       { key: input.actionId, requestHash: requestHashOf(request), now },
       async (tx) => {
-        // Validated inside the callback, after the idempotency lookup: the
-        // document may never hold a schedule no reader can parse.
-        const slots = parseMealSlots(input.slots);
-        if (!slots) throw new DomainConflictError(MEAL_SCHEDULE_RULE);
         const household = await tx.doc(HouseholdDoc);
         const actor = await input.actor(tx, household);
-        const draft = await tx.doc(FeedingDoc);
-        if (draft.rev !== input.rev) throw new StaleRevisionError("the meal schedule changed since it was read");
-
-        const first = draft.slots.length === 0;
-
-        // P2-09: the same commit arms today's feeding reminders on the hidden
-        // system conversation (§12.2). A reschedule re-arms; an unchanged
-        // schedule reuses the tasks it already has. It runs before the schedule
-        // write because it reads the reminder tasks' state, and a table read
-        // after a write is `ReadAfterWrite`.
-        await armFeedReminders(tx, household, slots, now);
-
-        draft.slots = slots;
-        draft.rev = input.rev + 1;
-
-        appendActivity(
-          await tx.doc(ActivityDoc),
-          activityEntry({
-            kind: "feeding.slots",
-            // Counts only: a slot label is caregiver free text and does not
-            // belong in a one-line feed a partner reads at a glance.
-            summary: first
-              ? `${actor.label} set the meal schedule (${mealCount(slots.length)})`
-              : `${actor.label} updated the meal schedule (${mealCount(slots.length)})`,
-            actorId: actor.id,
-            actorLabel: actor.label,
-            now,
-          }),
-        );
-        return { rev: draft.rev, count: slots.length };
+        const committed = await updateMealSlotsIn(tx, {
+          actor,
+          actionId: input.actionId,
+          rev: input.rev,
+          slots: input.slots,
+          now,
+        });
+        return { rev: committed.rev, count: committed.count };
       },
     );
   } catch (error) {

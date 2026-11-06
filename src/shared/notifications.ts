@@ -43,15 +43,17 @@ export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
 
 /**
  * The categories this build commits intents for — P2-02 writes `fed`; P4-05 adds
- * the reminder and approval ones. The intent parser refuses anything else: a
- * Phase 2 build must not store an intent it cannot deliver. Widening the set
- * also needs a `NOTIFICATION_TITLES` entry; the document version bump is for
- * changing that catalog's text or the intent's shape, not for the widening.
+ * the reminder ones and P4-07 the `approval` proposal. The intent parser refuses
+ * anything else: an earlier build must not store an intent it cannot deliver.
+ * Widening the set also needs a `NOTIFICATION_TITLES` entry; the document version
+ * bump is for changing that catalog's text or the intent's shape, not for the
+ * widening.
  */
 export const NOTIFICATION_INTENT_CATEGORIES = [
   "appointment",
   "feed_overdue",
   "fed",
+  "approval",
   "test",
 ] as const satisfies readonly NotificationCategory[];
 export type NotificationIntentCategory = (typeof NOTIFICATION_INTENT_CATEGORIES)[number];
@@ -66,6 +68,7 @@ export const NOTIFICATION_TITLES: Readonly<Record<NotificationIntentCategory, st
   appointment: "Appointment reminder",
   feed_overdue: "A meal is overdue",
   fed: "A meal was logged",
+  approval: "A confirmation is waiting",
   test: "Test notification",
 });
 
@@ -108,6 +111,7 @@ export const NOTIFICATION_PRIORITY: Readonly<Record<NotificationIntentCategory, 
   appointment: "high",
   feed_overdue: "high",
   fed: "default",
+  approval: "high",
   test: "default",
 });
 

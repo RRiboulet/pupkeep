@@ -1,6 +1,7 @@
 # Todo guide — how to work the Pupkeep plan
 
-**Status:** Phase 3 complete on `main` through P3-08. Phase 1 is complete on
+**Status:** Phase 3 complete on `main` through P3-08, and Phase 4 through
+P4-07. Phase 1 is complete on
 `main` through P1-14, and G1 is covered by the suite (`test/e2e.test.ts` is the
 slice end to end, `test/setup.test.ts` the first-run setup). Phase 2 is complete
 on `main` through P2-09 (`app.feeding`, the feed service, routes, tools and UI,
@@ -12,15 +13,15 @@ service, the shower HTTP/tools/Pup card, and the Phase 3 test slice. Every care
 surface is agent-accessible, Gate G3 is covered by `test/dual-path.test.ts`
 (the shared harness lives in `test/support/app.ts`), and the shower interval is
 pinned across a DST change, a month end and a leap day. Phase 4 (calendar,
-reminders, push, approvals) has started: **P4-01** and **P4-02** are complete.
+reminders, push, approvals) is in progress through **P4-07**.
 `app.calendar` stores a wall clock plus a zone snapshot, derives the instant on
 read, and its service creates, updates and cancels with revision checks. The
 HTTP surface serves a ranged read, the next appointment, and create/update/
 cancel with the stale-409-carrying-the-record rule; the Calendar screen renders
 the month grid, agenda, detail and form, and Today shows the next appointment.
 The agent has the free `list_appointments` read and a `get_context` line; its
-appointment **write** tools wait for P4-07's approval path, because a schedule
-change needs a human confirmation. **P4-03** is complete: `app.reminder` tasks
+appointment **write** tools are propose-only and landed with P4-07's approval
+path, because a schedule change needs a human confirmation. **P4-03** is complete: `app.reminder` tasks
 are armed in the same commit on the hidden system conversation, their refs live
 on the appointment, a reschedule or cancel retires the old tasks (and a task
 that survives the abort no-ops on its revision check), and past offsets are
@@ -36,8 +37,17 @@ caregiver in their terminal commit, and the service worker shows the
 category-only title. **P4-06** is complete: a top-level notification centre with
 per-member items and a nav badge, Settings prefs/test/push/ntfy, and delivery to
 ntfy (the partner's daily path) and the host's Termux:API. The partner-device
-claim remains gated on P0-10 and was not tested here. The next task is **P4-07**
-(approvals: `app.approvals`, propose tools, confirm/cancel). P0-03/P0-08/P0-10
+claim remains gated on P0-10 and was not tested here. **P4-07** is complete:
+`app.approvals` holds complete, validated proposals with a 24h expiry (derived,
+not stored); the agent can only propose (`create_appointment`,
+`update_appointment`, `request_cancel_appointment`,
+`request_feeding_schedule_change`), and a caregiver's
+`POST /api/approvals/confirm` runs the stored action in one commit with its own
+revision check, activity line, notification and `app.approval` thread entry,
+while a double confirm replays the stored result. There is no approval card UI
+yet (the Agent screen is a placeholder), and `request_history_correction` is
+carried because history is append-only and no correction writer exists. The next
+task is **P4-08** (budget, model picker, provider keys). P0-03/P0-08/P0-10
 remain device-gated partner checks and do not block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`

@@ -13,12 +13,15 @@ complete on `main` through P3-08; Gate G3 is covered by
 P2-09. **P4-01** (`app.calendar` and its service), **P4-02** (appointment HTTP,
 the calendar read tool and the Calendar UI), **P4-03** (appointment reminder
 tasks on the hidden system conversation), **P4-04** (the daily feed planner and
-boot reconciliation), **P4-05** (the notification outbox, Web Push and VAPID)
-and **P4-06** (the notification centre, prefs, the badge, ntfy and the host's
-Termux:API) are complete; the next task is **P4-07** (`app.approvals`, the
-propose tools and confirm/cancel). The agent's appointment *write* tools wait for
-P4-07's approval path, so the calendar extension ships reads only. The
-partner-delivery claim is gated on P0-10 and is unproven. G1's host-side criteria are covered by
+boot reconciliation), **P4-05** (the notification outbox, Web Push and VAPID),
+**P4-06** (the notification centre, prefs, the badge, ntfy and the host's
+Termux:API) and **P4-07** (`app.approvals`, the propose-only tools, the confirm
+and cancel routes) are complete; the next task is **P4-08** (budget, model picker
+and provider keys). The agent can only *propose* an appointment or meal-schedule
+change; a caregiver's confirmation route executes the stored action in one
+commit. The approval centre has no browser UI yet (the Agent screen is still a
+placeholder), so a confirmation is an HTTP call until the thread's cards land.
+The partner-delivery claim is gated on P0-10 and is unproven. G1's host-side criteria are covered by
 `test/e2e.test.ts` and `test/setup.test.ts`.
 The devcontainer is `.devcontainer/` (Node 24, pi `1.5.0`,
 sqlite3/cloudflared/rclone/tmux/gh, plus the host tools); `postCreate.sh` runs

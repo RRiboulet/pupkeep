@@ -805,6 +805,7 @@ test("a database from before P1-14 boots through the household migration and get
     assert.equal(boot.created, false, "the household was migrated, not reset");
     assert.deepEqual(boot.docsCreated.sort(), [
       "app.activity",
+      "app.approvals",
       "app.calendar",
       "app.commands",
       "app.feeding",

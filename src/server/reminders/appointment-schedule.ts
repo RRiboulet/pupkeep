@@ -21,8 +21,9 @@
 //
 // No task is ever created from a tool call (`api.createTask`): tools never touch
 // the reminder table. The only creator is this domain function, called inside a
-// commit by the HTTP writer (and, later, by an approved tool execution), which
-// passes the hidden system conversation as the owner and `background: true`.
+// commit by the HTTP writer and by P4-07's confirming commit (which runs the
+// same domain function a caregiver's save does), passing the hidden system
+// conversation as the owner and `background: true`.
 
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import type { Harness } from "@earendil-works/pi-durable";

@@ -41,6 +41,10 @@ const PROFILE_KINDS = new Set([
   // and the nav badge must refresh without a reload. The frame is a signal; the
   // profile it carries is unchanged and still applied (equal revisions count).
   "app.notifications",
+  // P4-07: a proposal or a decision is state the other caregiver must see
+  // without a reload (the thread entry arrives on the thread stream; this frame
+  // is how a pending-proposal list refreshes).
+  "app.approvals",
 ]);
 
 export interface ProfileStateOptions {
