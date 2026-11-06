@@ -814,6 +814,7 @@ test("a database from before P1-14 boots through the household migration and get
       "app.puppy",
       "app.showers",
       "app.training",
+      "app.usage",
       "app.walks",
     ]);
 

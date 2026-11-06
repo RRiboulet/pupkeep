@@ -56,6 +56,9 @@ import { createShowerTools } from "./agent/shower-tools.ts";
 import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { createApprovalTools } from "./agent/approval-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
+import { reconcileUsageMonth } from "./domain/usage.ts";
+import { createAppModels, providersWithKeys, type AppModels } from "./models/collection.ts";
+import { PROBE_FRESH_MS, probeAndCache } from "./models/probe-run.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
 import {
@@ -105,6 +108,12 @@ export interface AppOptions {
   /** Cap for `harness.close()`; see DEFAULT_CLOSE_TIMEOUT_MS. */
   closeTimeoutMs?: number;
   models?: Models | (() => Models);
+  /**
+   * Run §11.2's startup probe once this boot. Defaults to **true only when the
+   * catalog was built from `secrets.json`**: an injected catalog is a test's
+   * scripted one, where a probe would spend the fixture's responses.
+   */
+  startupProbe?: boolean;
   /** Extensions to install; the app always adds the profile tools. */
   registry?: Registry<ToolRegistration>;
   settings?: HarnessSettings | (() => HarnessSettings | undefined);
@@ -382,6 +391,24 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   const registry = options.registry ?? createRegistry<ToolRegistration>();
   installAppExtensions(registry);
 
+  // P4-08: the provider catalog and its credentials. Keys come from
+  // secrets.json through a CredentialStore (never the environment), and an
+  // injected catalog is a test's: every provider it names counts as configured.
+  let catalog: AppModels | undefined;
+  try {
+    if (options.models === undefined) {
+      catalog = await createAppModels(stores.secrets);
+    } else {
+      const injected = typeof options.models === "function" ? options.models() : options.models;
+      catalog = {
+        models: injected,
+        configured: new Set(injected.getModels().map((model) => model.provider)),
+      };
+    }
+  } catch (error) {
+    logger.warn("could not build the provider catalog; the thread will start without a model", { error });
+  }
+
   const parked = new Map<string, ParkedTask>();
   const report = (error: unknown, info: ReportInfo): void => {
     if (info.type === "task_parked") {
@@ -401,7 +428,14 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   try {
     opened = await (deps.openHarness ?? openHarness)({
       path: dataPaths(directory.path).database,
-      ...(options.models !== undefined ? { models: options.models } : {}),
+      // The harness needs the same catalog the routes use: in production it is
+      // the one built from `secrets.json` above, and an injected catalog is a
+      // test's. Without it no configured model could ever be called.
+      ...(options.models !== undefined
+        ? { models: options.models }
+        : catalog !== undefined
+          ? { models: catalog.models }
+          : {}),
       registry,
       settings: threadSettings(options),
       ...(options.now !== undefined ? { now: options.now } : {}),
@@ -548,6 +582,17 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     });
   }
 
+  // P4-08: the monthly baseline is repaired from `harness.usage()` — the ledger —
+  // before anything reads it. A rollover, a restore that reported less spend, or
+  // a database from before `app.usage` all land here; the read is outside a
+  // commit, so this must not be inside the bootstrap.
+  try {
+    const usage = await reconcileUsageMonth(opened.harness, context, new Date(options.now?.() ?? Date.now()));
+    logger.info("usage baseline", { month: usage.snapshot.month, baselineCostUsd: usage.snapshot.baselineCostUsd });
+  } catch (error) {
+    logger.warn("could not read the usage baseline; the budget will read it on first use", { error });
+  }
+
   // A failed Session closes itself; this is the only place the process learns
   // that it must exit rather than keep a dead harness behind a live port.
   void opened.harness.closed.then(
@@ -664,7 +709,11 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
 
     try {
       const household = await readHousehold(thread.harness, thread.context);
-      const model = pickInitialModel(await stores.models.read(), options.models);
+      const model = pickInitialModel(
+        await stores.models.read(),
+        catalog?.models,
+        catalog?.configured,
+      );
       const configured = await configureSharedThread(thread, {
         instructions: SHARED_THREAD_INSTRUCTIONS,
         ...(model ? { model: { provider: model.provider, modelId: model.modelId } } : {}),
@@ -692,9 +741,25 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         auth,
         thread,
         bus,
+        ...(catalog !== undefined
+          ? {
+              models: catalog.models,
+              // Read live, not the boot snapshot: a key saved from Settings must
+              // count for the next probe without a restart. An injected catalog
+              // is a test's, so its providers count as configured there.
+              modelProviders: async () =>
+                options.models === undefined
+                  ? providersWithKeys(stores.secrets)
+                  : catalog!.configured,
+            }
+          : {}),
+        secrets: stores.secrets,
+        modelCache: stores.models,
         submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
         notificationLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),
+        // A probe spends a provider call; a loop must not burn the budget.
+        probeLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),
         allowedOrigins: () => bindOrigins(options.host, boundPort),
         logger,
         push: stores.push,
@@ -706,6 +771,36 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       const bound = Number(new URL(listener.url).port);
       if (Number.isInteger(bound) && bound > 0) boundPort = bound;
       logger.info("listening", { url: listener.url });
+
+      // P4-08: §11.2's bounded startup probe, once per boot and never on the
+      // critical path. It caches `models.json` for the next pick and the Settings
+      // screen; the attached model is not switched mid-session (a picker change
+      // is the owner's decision, and the next boot reads the fresh allowlist).
+      //
+      // Only a catalog built from real keys is probed: an injected one is a
+      // test's scripted catalog, where a probe would spend the fixture's scripted
+      // responses and change what the suite is asserting.
+      if ((options.startupProbe ?? options.models === undefined) && catalog !== undefined && catalog.configured.size > 0) {
+        void probeAndCache(stores.models, {
+          models: catalog.models,
+          configured: catalog.configured,
+          // Frequent reboots must not re-spend a provider call per paid
+          // candidate: a verified verdict is trusted for a few hours.
+          freshWithinMs: PROBE_FRESH_MS,
+          ...(options.now !== undefined ? { now: options.now } : {}),
+        })
+          .then((run) => {
+            logger.info("model probe", {
+              probed: run.results.length,
+              allowed: run.allowlist.allowed.map((entry) => entry.id),
+              dropped: run.allowlist.dropped.map((entry) => entry.id),
+              skippedProviders: run.skipped.length,
+            });
+          })
+          .catch((error: unknown) => {
+            logger.warn("the startup model probe failed; the cached allowlist stands", { error });
+          });
+      }
     } catch (error) {
       logger.error("could not bind the HTTP listener", { error });
       profileState?.stop();

@@ -30,6 +30,21 @@ const { boardGroups, customMilestone, noteUpdate, rowMetaText, statusUpdate } = 
 const { Showers } = await import("../web/views/showers.js");
 const { dateText } = await import("../web/clock.js");
 const {
+  allowlistLines,
+  budgetBody,
+  budgetPercent,
+  budgetStateText,
+  currentModelText,
+  modelChoiceBody,
+  modelOptionText,
+  money,
+  parseCapInput,
+  probeResultLines,
+  probeText,
+  providerKeyBody,
+  spendText,
+} = await import("../web/models.js");
+const {
   dueText,
   earlierCount,
   intervalText,
@@ -1734,4 +1749,132 @@ test("the notifications route is a real hash route, not a fallback to Today", as
   const { hashRoute } = await import("../web/store.js");
   assert.equal(hashRoute("#notifications"), "notifications");
   assert.equal(hashRoute("#settings"), "settings");
+});
+
+// --- models and budget (P4-08) ----------------------------------------------
+
+function modelsView(overrides = {}) {
+  return {
+    householdRev: 4,
+    role: "owner",
+    current: { id: "opencode-go/mimo-v2.6-flash", paid: true, price: { input: 0.14, output: 0.28 } },
+    providers: { "opencode-go": true, openrouter: false },
+    allowlist: {
+      allowed: [{ id: "opencode-go/mimo-v2.6-flash", verifiedAt: "2026-10-29T12:00:00.000Z" }],
+      unverified: [{ id: "opencode-go/glm-5.3-flash", reason: "inconclusive" }],
+      dropped: [{ id: "opencode-go/minimax-m3.1-flash-free", status: "deprecated" }],
+    },
+    probe: {
+      checkedAt: "2026-10-29T12:00:00.000Z",
+      results: [
+        { id: "opencode-go/mimo-v2.6-flash", status: "ok", toolCall: true, latencyMs: 812, usage: { cost: 0.002 } },
+        { id: "opencode-go/glm-5.3-flash", status: "rate_limited", toolCall: false, latencyMs: 900 },
+      ],
+    },
+    candidates: [
+      { id: "opencode-go/mimo-v2.6-flash", paid: true, price: { input: 0.14, output: 0.28 } },
+      { id: "opencode-go/beam-free", paid: false, price: { input: 0, output: 0 } },
+    ],
+    budget: { month: "2026-10", spentUsd: 8.5, capUsd: 10, ratio: 0.85, state: "warn", paidAllowed: true },
+    ...overrides,
+  };
+}
+
+test("model copy: prices, the current model and the spend line", () => {
+  assert.equal(money(8.5), "8.50");
+  assert.equal(money(-1), "0.00");
+  assert.equal(money(Number.NaN), "0.00");
+  assert.equal(modelOptionText({ id: "a/b", paid: false, price: { input: 0, output: 0 } }), "a/b (free) — free");
+  assert.equal(
+    modelOptionText({ id: "a/b", paid: true, price: { input: 0.14, output: 0.28 } }),
+    "a/b — $0.14 in / $0.28 out per 1M tokens",
+  );
+  assert.match(currentModelText(modelsView()), /Using opencode-go\/mimo-v2\.6-flash/);
+  assert.match(currentModelText({ current: null }), /No model is attached yet/);
+  assert.equal(spendText(modelsView().budget), "$8.50 of $10.00 in 2026-10");
+});
+
+test("the budget's thresholds read as sentences, and the bar never overfills", () => {
+  assert.match(budgetStateText("ok"), /Within the monthly budget/);
+  assert.match(budgetStateText("warn"), /80%/);
+  assert.match(budgetStateText("blocked"), /used up.*free model/i);
+  assert.equal(budgetPercent({ spentUsd: 8.5, capUsd: 10 }), 85);
+  assert.equal(budgetPercent({ spentUsd: 30, capUsd: 10 }), 100, "an over-spend is a full bar");
+  assert.equal(budgetPercent({ spentUsd: 1, capUsd: 0 }), 0, "a zero cap has no ratio");
+  assert.equal(budgetPercent(null), 0);
+});
+
+test("the allowlist's three buckets read as reasons a caregiver can act on", () => {
+  const lines = allowlistLines(modelsView());
+  assert.deepEqual(
+    lines.map((line) => line.kind),
+    ["allowed", "unverified", "dropped"],
+  );
+  assert.match(lines[0].text, /usable/);
+  assert.match(lines[1].text, /inconclusive/);
+  assert.match(lines[2].text, /deprecated/);
+  const never = allowlistLines({ allowlist: { allowed: [], unverified: [{ id: "x/y", reason: "never_probed" }], dropped: [] } });
+  assert.match(never[0].text, /never been checked/);
+});
+
+test("the probe summary states the spend exception the plan requires", () => {
+  const text = probeText(modelsView().probe);
+  assert.match(text, /Checked 2026-10-29T12:00:00\.000Z: 2 model\(s\), 0\.00 spent/);
+  assert.match(text, /not counted in the monthly budget/);
+  assert.match(probeText(null), /No check has run yet/);
+  assert.equal(probeResultLines(modelsView().probe)[0].text, "opencode-go/mimo-v2.6-flash: ok (tool call ok), 812 ms");
+});
+
+test("the card's request bodies are the server's shapes, and a cap is whole cents", () => {
+  assert.deepEqual(providerKeyBody("opencode-go", "sk-1"), { provider: "opencode-go", key: "sk-1" });
+  assert.deepEqual(providerKeyBody("opencode-go", ""), { provider: "opencode-go", key: null }, "an empty field clears");
+  assert.deepEqual(modelChoiceBody("opencode-go/beam-free"), { model: "opencode-go/beam-free" });
+  assert.deepEqual(budgetBody(4, 7.5), { rev: 4, capUsd: 7.5 });
+  assert.equal(parseCapInput("10"), 10);
+  assert.equal(parseCapInput(" 7.50 "), 7.5);
+  assert.equal(parseCapInput("0"), 0);
+  assert.equal(parseCapInput(""), undefined);
+  assert.equal(parseCapInput("1.234"), undefined);
+  assert.equal(parseCapInput("-2"), undefined);
+  assert.equal(parseCapInput("lots"), undefined);
+});
+
+test("the settings card renders the model section, hides owner controls from a partner, and saves a cap", async () => {
+  setState({ profile: profileOf() });
+  const calls = [];
+  const view = modelsView();
+  const settings = new Settings({});
+  settings.request = async (path, options) => {
+    calls.push({ path, options });
+    if (path === "/api/models") return { status: 200, ok: true, body: view };
+    if (path === "/api/budget") return { status: 200, ok: true, body: { budget: { ...view.budget, capUsd: 7.5 } } };
+    return { status: 200, ok: true, body: {} };
+  };
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({ models: view, role: "owner", capDraft: "10" });
+
+  const vnode = settings.render();
+  for (const text of [
+    "Model and budget",
+    "Provider keys",
+    "Choose the model",
+    "Check models now",
+    "Monthly cap (USD)",
+    "Using opencode-go/mimo-v2.6-flash",
+  ]) {
+    assert.ok(vnodeText(vnode, text), `missing ${text}`);
+  }
+
+  settings.setState({ capDraft: "7.50" });
+  await settings.saveCap();
+  const budgetCall = calls.find((call) => call.path === "/api/budget");
+  assert.deepEqual(budgetCall.options.body, { rev: 4, capUsd: 7.5 });
+
+  // A partner sees the state and no owner buttons (the route's own `role`).
+  assert.ok(!calls.some((call) => call.path === "/api/session"), "the card needs no second request for the role");
+  settings.setState({ role: "member" });
+  const partnerView = settings.render();
+  assert.ok(vnodeText(partnerView, "Model and budget"), "the partner sees the card");
+  assert.ok(vnodeText(partnerView, "Only the owner can change the cap or the model."));
+  assert.ok(!vnodeText(partnerView, "Save cap"), "no owner control for a member");
 });

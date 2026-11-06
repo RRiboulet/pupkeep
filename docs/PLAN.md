@@ -928,7 +928,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.notifications` | Per-user in-app items + push outbox | Dedupe key (server-authoritative), read state, per-intent delivery state (pending/sent/failed/dropped, attempts, backoff) |
 | `app.activity` | Last N human-readable events | Built by domain functions, not the LLM |
 | `app.approvals` | Proposals (the complete, validated action), status, requester and decider, the executed result, revision, 24h expiry | Proposed by the agent and never executed by it; a caregiver's confirm runs it in one commit; `expired` is **derived** from the expiry instant and the deciding clock, never stored; a live pending proposal is never pruned |
-| `app.usage` | Derived monthly spend snapshot | `harness.usage()` is authoritative; this is a cache, never a second ledger |
+| `app.usage` | The current household month and the session-total spend where it began (`baselineCostUsd`, `observedAt`) | `harness.usage()` is authoritative; the month's spend is the **derived** `total − baseline`, never stored; boot repairs the baseline on a month rollover or a total that went backwards (a restore), and a repair can only under-count |
 | `app.commands` | HTTP idempotency keys/results | Key + request hash + result + 24h expiry; committed with the action |
 
 P1-08 defines the first four documents; P1-14 adds `app.feeding` with the meal
@@ -939,7 +939,7 @@ the measurement history; P3-04 adds `app.training` with the milestone states
 and the household's own entries (the catalog lives in the build); P3-06 adds
 `app.showers` with the shower history; P4-01 adds `app.calendar` with the
 appointments; P4-07 adds `app.approvals` with the proposals, the decisions and
-the executed result. Each
+the executed result; P4-08 adds `app.usage` with the monthly baseline. Each
 value carries `schemaVersion: 1` and its Pi Durable document version is 1; a
 future change increments both and adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
@@ -1365,7 +1365,10 @@ hand-rolled HTTP:
 
 Keys live in `~/.pupkeep/secrets.json` (0600) on the phone, or `.env` in
 development. They are not written to SQLite, logs or the off-device database
-backup. The agent never sees them.
+backup. The agent never sees them. P4-08 builds the collection with a
+`CredentialStore` over that file and an `AuthContext` that resolves **nothing**
+from the environment, so a stray shell variable can never become the
+household's key; only OpenCode Go and OpenRouter are registered.
 
 ### 11.2 Model allowlist
 
@@ -1426,7 +1429,18 @@ force the household onto the least-proven free model.
   fallback model”; automatic cross-provider failover is deferred.
 - The monthly baseline is stored in the derived `app.usage` doc (`month`,
   `baselineCostUsd`) and rebuilt from `harness.usage()` after a crash; it is
-  never a second ledger.
+  never a second ledger. P4-08 implements exactly that: the doc holds
+  `{month, baselineCostUsd, observedAt}`, the month's spend is the derived
+  `sessionTotal − baseline`, and the baseline is repaired on boot (and on any
+  read) when the household month rolls over or the total went **backwards**
+  (a restore) — both repairs can only under-count, never fake a credit.
+- **Enforcement is server-side.** A submission is refused with
+  `409 budget_exhausted` when the cap is reached and the configured model is
+  paid (the price comes from the provider catalog, and an unknown model is
+  treated as paid); a free model's turn still goes through, per the rule above.
+  The picker applies the same rule to a *switch*, and the cap is owner-only
+  (`PATCH /api/budget`, the household revision + an idempotency key). 80% warns
+  in the Settings card and in the endpoints the agent surfaces read.
 
 ### 11.4 Cost controls
 
@@ -4349,14 +4363,106 @@ process kill; both clients see the same state; the partner notification
       `request_history_correction` tool and its writer are carried (see decision
       7); P4-10 owns the end-to-end "approval does not execute before confirm"
       case on top of this suite; and no phone has run it.
-- [ ] **P4-08** Budget with `harness.usage()` authoritative + model picker +
+- [x] **P4-08** Budget with `harness.usage()` authoritative + model picker +
       provider keys + usage UI. Re-probe the allowlist with the **app schema**
       (P0-05's result shape) rather than trusting the spike's catalog probe, and
       show the last probe result in Settings. Supplies the `Models` collection to
       `createPiAiProbeCall(models)` — credentials come from `secrets.json` via
       P1-05, never the environment — and reads/writes the cache P1-05 owns. Probe
-      spend is **not** in `harness.usage()`; record it in the ledger or state the
-      exception.
+      spend is **not** in `harness.usage()`; the results report it and the UI
+      states the exception.
+      **Landed:** `src/shared/usage.ts` (`budgetView`, `BUDGET_WARN_RATIO`,
+      `isFreeModel`, `isAgentBudget`, `isUsageMonth`), `UsageSnapshot` in
+      `src/shared/domain.ts`, `UsageDoc`/`emptyUsage`/`parseUsage` in
+      `domain/docs.ts` (created and repaired by bootstrap); `domain/usage.ts`
+      (`readBudget`, `reconcileUsageMonth`, `harnessSpendUsd`, `localMonthAt`);
+      `updateAgentBudget` in `domain/household.ts`; the submission gate in
+      `handleMessage` (`409 budget_exhausted` on a paid model at the cap);
+      `GET /api/budget` + `PATCH /api/budget` (owner); the provider catalog
+      (`src/server/models/collection.ts`: a `CredentialStore` over
+      `secrets.json`, an `AuthContext` that resolves no environment, OpenCode Go +
+      OpenRouter only); `src/server/models/probe-run.ts` (§11.2's live
+      candidates, keyed-provider filtering, `checkedAt`-guarded cache writes,
+      `allowlistOf`); `pickInitialModel`'s configured-provider fence and
+      `modelIsPaid` (fail-closed); the startup probe in `app.ts`; routes
+      `GET /api/models`, `PUT /api/models/keys`, `POST /api/models/probe`,
+      `PATCH /api/models/current`; `web/models.js` and the Settings model card
+      (current model + price, the spend bar with the 80%/100% copy, the cap
+      field, write-only key fields, "check models now" with the last results, and
+      the picker); shell cache v11.
+      Decisions: (1) **`app.usage` is a baseline, not a ledger**: it stores the
+      household month and the session-total spend where that month began, and the
+      month's spend is the derived `total − baseline`. Boot (and every read)
+      repairs the baseline on a rollover or a backwards total, and both repairs
+      only under-count. (2) **The 80%/100% rule is enforced, not displayed**: a
+      paid model's submission is refused with `409 budget_exhausted` (and nothing
+      is placed), a free model still runs, and the picker refuses a paid *switch*
+      at the cap. The price comes from the catalog and an unknown model counts as
+      paid. (3) **Keys are read through a `CredentialStore` and no environment is
+      consulted** — a stray `OPENCODE_API_KEY` cannot become the household's key —
+      and only the plan's two providers are registered. (4) **A missing key is not
+      a model verdict**: the probe skips a keyless provider instead of recording
+      `unauthorized` (a dropping status) and erasing the allowlist, and
+      `pickInitialModel` will not attach a model whose provider has no key. (5)
+      **The probe is §11.2's live rows only**, off the critical path, once per
+      boot plus on demand, cache-guarded by `checkedAt`; probe spend is outside
+      `harness.usage()` and the Settings copy says so rather than adding a second
+      ledger. (6) **The picker is allowlist-gated**: an unprobed model is refused
+      with a sentence pointing at the check. (7) **The Settings card reads
+      `GET /api/models` and `GET /api/session`**: the session read is what tells
+      the card to hide an owner-only control, while the server still refuses the
+      write for a member (§14.1). (8) **The startup probe is skipped for an
+      injected catalog** (a test's), because it would consume the fixture's
+      scripted responses.
+      **Verified:** 35 new tests — 10 in `test/usage.test.ts` (the thresholds
+      including a zero cap and a negative spend, the catalog's free/paid decision,
+      the usage document's shape, spend summed over every harness bucket, a fresh
+      household's baseline, `total − baseline`, a month rollover, a restore that
+      reports less spend, and the cap writer's one-commit/replay/stale/refused
+      paths), 4 in `test/budget-routes.test.ts` (both caregivers read, a member's
+      write is 403, the stale 409 carries the care view, a paid message refused at
+      the cap while a free one passes and a raised cap unblocks it, and 80% only
+      warns), 7 in `test/models.test.ts` (the credential store, a stored key
+      winning over a real environment variable, the two registered providers, the
+      keyless-provider skip, the empty run keeping the cached allowlist, the merge
+      rules, and the `checkedAt` cache guard), 5 in `test/model-routes.test.ts`
+      (the read with no model attached, the key route never echoing the key and
+      clearing it, the probe route owner-only with its results, the picker
+      refusing an unprobed or unknown model and attaching an allowed one, and a
+      paid model refused at the cap while a free one is accepted) and 6 in
+      `test/client.test.js` (the price/current/spend copy, the threshold sentences
+      and the bar's clamp, the allowlist reasons, the probe summary's spend
+      exception, the request bodies and cap parsing, and the card rendering with
+      the owner controls hidden from a partner), plus the review follow-ups'
+      tests (a live `providersWithKeys`, the cache merge over history, and the
+      boot probe's freshness window). The suite is 769/769 and
+      `npm run typecheck` passes.
+      **Review follow-ups (adversarial + complexity):** the probe's configured
+      providers are read **live** from `secrets.json` (the boot snapshot froze
+      them, so a key saved from Settings was invisible to the check and the
+      picker until a restart — the one real bug the review found); the probe cache
+      write now merges over the previous results, so a run that skips a provider
+      (no key, or a fresh verdict) cannot erase that provider's last-known-good;
+      an upgrade from a pre-P4-08 database baselines at the harness's current
+      total instead of zero, so all-time spend is not counted against the current
+      month; the boot probe trusts a verified verdict for six hours (`check now`
+      always probes), which bounds the one automatic model call §11.4 allows; the
+      picker disables a model whose provider has no key ("Add a key first"); the
+      rollover repair answers with the document its commit read rather than the
+      pre-commit snapshot; paid/free is one rule (`modelIsPaid` delegates to
+      `isFreeModel`, and the candidate list uses it); the submission gate reads
+      the model first and the budget only for a paid one; the caller's `role` rides
+      `GET /api/models` so the card needs no second request; and the reads that
+      can commit (a rollover repair) say so at their route.
+      **Not verified / carried out:** no live provider prose — the devcontainer
+      has no keys, so the probe is proven against a scripted catalog with the real
+      `createPiAiProbeCall` seam, and the live allowlist will be whatever the
+      phone's first boot records (the catalog's prices and deprecations move);
+      §11.3's "retry with fallback model" needs the Agent screen's error state,
+      which is still P1-10's placeholder, so it is carried (the classification it
+      needs is already in `src/shared/provider-errors.ts`); the 80% "agent header"
+      warning has no header yet — the Settings card shows it; and no phone has run
+      it.
 - [ ] **P4-09** Tailscale runbook for daily access; ntfy onboarding; Cloudflare
       quick-tunnel runbook for testing; PWA install/push test; named tunnel
       deferred until a domain exists.

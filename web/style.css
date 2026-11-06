@@ -965,3 +965,54 @@ a.button {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* --- models and budget (P4-08) ------------------------------------------- */
+
+/* A native <progress>: CSS-alone styling, so the CSP's "no inline styles" holds. */
+.budget-bar {
+  display: block;
+  width: 100%;
+  height: 0.6rem;
+  margin: 0.35rem 0 0.5rem;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  appearance: none;
+  background: rgba(36, 28, 51, 0.12);
+}
+
+.budget-bar::-webkit-progress-bar {
+  background: rgba(36, 28, 51, 0.12);
+}
+
+.budget-bar::-webkit-progress-value {
+  background: var(--accent);
+}
+
+.budget-bar::-moz-progress-bar {
+  background: var(--accent);
+}
+
+/* The partner's screen is a Safari tab on a phone: keep the list compact. */
+.model-list {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.model-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.92rem;
+}
+
+.model-list--notes li {
+  display: block;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}

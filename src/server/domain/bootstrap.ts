@@ -29,6 +29,7 @@ import type {
   MemberProfile,
   Notifications,
   Puppy,
+  UsageSnapshot,
   Walks,
 } from "../../shared/domain.ts";
 import { isIanaZone } from "../../shared/profile.ts";
@@ -45,6 +46,7 @@ import {
   TrainingDoc,
   NotificationsDoc,
   PuppyDoc,
+  UsageDoc,
   WalksDoc,
   emptyActivity,
   emptyApprovals,
@@ -57,6 +59,7 @@ import {
   emptyTraining,
   emptyNotifications,
   emptyPuppy,
+  emptyUsage,
   emptyWalks,
   parseActivity,
   parseApprovals,
@@ -70,8 +73,10 @@ import {
   parseMemberProfiles,
   parseNotifications,
   parsePuppy,
+  parseUsage,
   parseWalks,
 } from "./docs.ts";
+import { harnessSpendUsd, localMonthAt } from "./usage.ts";
 
 export class BootstrapError extends Error {
   constructor(message: string) {
@@ -188,6 +193,16 @@ function initialApprovals(createdAt: string): Approvals {
   return { ...emptyApprovals(), createdAt };
 }
 
+/**
+ * The monthly baseline starts at **zero spend** for the current household month,
+ * so a fresh database counts the whole month. A restore (or a build that
+ * predates the document) is repaired by `reconcileUsageMonth` at the first
+ * read/boot check rather than here: boot has no harness usage read.
+ */
+function initialUsage(createdAt: string, month: string, baselineCostUsd = 0): UsageSnapshot {
+  return { ...emptyUsage(), month, baselineCostUsd, observedAt: createdAt };
+}
+
 function initialWalks(createdAt: string): Walks {
   return { ...emptyWalks(), createdAt };
 }
@@ -250,8 +265,12 @@ export async function bootstrapSession(
     if ((await harness.snapshot(ApprovalsDoc, context)) !== undefined) {
       throw new BootstrapError("app.household is missing but app.approvals exists; refusing to reset it");
     }
+    if ((await harness.snapshot(UsageDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.usage exists; refusing to reset it");
+    }
 
-    const createdAt = now().toISOString();
+    const createdAtInstant = now();
+    const createdAt = createdAtInstant.toISOString();
     const timezone = options.timezone ?? defaultTimezone();
     // Validate the zone before it is persisted; a bad value would break every
     // local-date computation later.
@@ -274,6 +293,7 @@ export async function bootstrapSession(
       Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
       Object.assign(await tx.doc(CalendarDoc), initialCalendar(createdAt));
       Object.assign(await tx.doc(ApprovalsDoc), initialApprovals(createdAt));
+      Object.assign(await tx.doc(UsageDoc), initialUsage(createdAt, localMonthAt(createdAtInstant, timezone)));
 
       return { shared: shared.id, system: system.id };
     }, context);
@@ -298,6 +318,7 @@ export async function bootstrapSession(
         "app.showers",
         "app.calendar",
         "app.approvals",
+        "app.usage",
       ],
       clearedSystemModel,
     };
@@ -397,6 +418,15 @@ export async function bootstrapSession(
   if (calendarSnapshot !== undefined && !calendar) {
     throw new BootstrapError("app.calendar is not a shape this build understands; refusing to reset it");
   }
+  const usageSnapshot = await harness.snapshot(UsageDoc, context);
+  const usage = usageSnapshot === undefined ? undefined : parseUsage(usageSnapshot);
+  if (usageSnapshot !== undefined && !usage) {
+    throw new BootstrapError("app.usage is not a shape this build understands; refusing to reset it");
+  }
+  // A database from before P4-08 has spend the harness remembers and no baseline.
+  // Start the baseline at that total, so an upgrade does not count all-time spend
+  // against the current month; a fresh install has nothing to carry.
+  const upgradeBaseline = usage === undefined && usageSnapshot === undefined ? harnessSpendUsd(await harness.usage(context)) : 0;
   const approvalsSnapshot = await harness.snapshot(ApprovalsDoc, context);
   const approvals = approvalsSnapshot === undefined ? undefined : parseApprovals(approvalsSnapshot);
   if (approvalsSnapshot !== undefined && !approvals) {
@@ -415,9 +445,11 @@ export async function bootstrapSession(
   if (!showers) docsCreated.push("app.showers");
   if (!calendar) docsCreated.push("app.calendar");
   if (!approvals) docsCreated.push("app.approvals");
+  if (!usage) docsCreated.push("app.usage");
 
   if (membersChanged || docsCreated.length > 0) {
-    const createdAt = now().toISOString();
+    const createdAtDate = now();
+    const createdAt = createdAtDate.toISOString();
     await harness.commit(async (tx) => {
       if (membersChanged) {
         const draft = await tx.doc(HouseholdDoc);
@@ -434,6 +466,12 @@ export async function bootstrapSession(
       if (!showers) Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
       if (!calendar) Object.assign(await tx.doc(CalendarDoc), initialCalendar(createdAt));
       if (!approvals) Object.assign(await tx.doc(ApprovalsDoc), initialApprovals(createdAt));
+      if (!usage) {
+        Object.assign(
+          await tx.doc(UsageDoc),
+          initialUsage(createdAt, localMonthAt(createdAtDate, household.timezone), upgradeBaseline),
+        );
+      }
     }, context);
   }
 
