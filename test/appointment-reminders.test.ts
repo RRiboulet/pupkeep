@@ -29,6 +29,7 @@ import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import { createReminders } from "../src/server/reminders/feed-reminder.ts";
 import {
   APPOINTMENT_REMINDER_TASK,
+  APPOINTMENT_START_GRACE_MS,
   appointmentReminderDecision,
   type AppointmentReminderInput,
 } from "../src/server/reminders/appointment-reminder.ts";
@@ -155,6 +156,42 @@ test("a waking task decides due, passed or stale before it decides anything else
     appointmentReminderDecision(calendar, input, START_AT).kind,
     "passed",
     "a wake after the visit started is not a reminder",
+  );
+
+  // The at-the-start offset (0) is the visit starting, not a countdown to it:
+  // its own instant is `startsAt`, so it fires there and within the grace, and is
+  // refused once the visit has been under way for longer than that.
+  const atStart: AppointmentReminderInput = {
+    appointmentId: "appointment-1",
+    rev: 0,
+    offsetMin: 0,
+    dueAt: START_AT,
+  };
+  const armedAtStart = appointment({
+    reminders: [{ taskId: 2, offsetMin: 0, dueAt: START_AT }],
+  });
+  assert.equal(
+    appointmentReminderDecision({ appointments: [armedAtStart] }, atStart, START_AT).kind,
+    "due",
+    "the reminder at the start instant fires",
+  );
+  assert.equal(
+    appointmentReminderDecision(
+      { appointments: [armedAtStart] },
+      atStart,
+      START_AT + APPOINTMENT_START_GRACE_MS - 1,
+    ).kind,
+    "due",
+    "a wake a moment late still says the visit is starting",
+  );
+  assert.equal(
+    appointmentReminderDecision(
+      { appointments: [armedAtStart] },
+      atStart,
+      START_AT + APPOINTMENT_START_GRACE_MS + 1,
+    ).kind,
+    "passed",
+    "past the grace the visit has started without us",
   );
   assert.equal(
     appointmentReminderDecision({ appointments: [appointment({ ...armed, rev: 1 })] }, input, input.dueAt).kind,

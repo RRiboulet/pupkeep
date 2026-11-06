@@ -43,6 +43,16 @@ export const APPOINTMENT_REMINDER_VERSION = 2;
 export const APPOINTMENT_REMINDER_SLEEP_CHUNK_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * How late an "at the start" reminder (offset 0) may still fire. The pre-visit
+ * offsets are pointless once the visit has started, but offset 0 **is** the
+ * visit starting — the calendar form offers it as "At the start" — so without a
+ * grace it could never fire at all: the task wakes at the start instant, and any
+ * clock reading at or after that would read as "passed". A few minutes keeps a
+ * slightly late wake useful and still refuses a phone that boots mid-visit.
+ */
+export const APPOINTMENT_START_GRACE_MS = 5 * 60 * 1000;
+
+/**
  * The task's input, fixed when the appointment armed it. `rev` is the
  * appointment revision that armed it; `dueAt` is the derived start instant minus
  * `offsetMin` (§12.2).
@@ -135,8 +145,15 @@ export function appointmentReminderDecision(
   // keeps its `rev`); every ordinary edit bumps `rev` and is caught above.
   const dueAt = startsAt - input.offsetMin * 60_000;
   if (dueAt !== input.dueAt) return { kind: "rescheduled", appointmentId: input.appointmentId };
-  // The visit is under way (or over); a phone that was off does not announce it.
-  if (nowMs >= startsAt) return { kind: "passed", appointmentId: input.appointmentId, startsAt };
+  // A pre-visit reminder is pointless once the visit is under way — a phone that
+  // was off does not announce a visit that already started. The at-the-start
+  // offset is the exception: its own instant *is* the start, so it fires within
+  // a short grace rather than being born expired.
+  // `dueAt === startsAt` is exactly the offset-0 arm; everything else has its
+  // own earlier instant and expires the moment the visit begins.
+  const passed =
+    input.dueAt === startsAt ? nowMs > startsAt + APPOINTMENT_START_GRACE_MS : nowMs >= startsAt;
+  if (passed) return { kind: "passed", appointmentId: input.appointmentId, startsAt };
 
   return {
     kind: "due",

@@ -1506,6 +1506,11 @@ displayed but not pushed in v1.
   A task parked by `restartLimit` is surfaced via `onReport` and can be retried
   with `harness.retryTask(id)`.
 - Grace windows: appointments if still upcoming; feeds within a few hours.
+  **The at-the-start offset (0) is the exception** (P4-10): its own instant *is*
+  the appointment's start, so a strictly-upcoming rule would make the calendar
+  form's "At the start" preset a reminder that could never fire. It fires at the
+  start and stays useful for a five-minute grace, and is refused once the visit
+  has been under way longer than that.
 - Reminder sleeps are chunked (≤6h) and re-armed after a clock jump.
 
 ### 12.3 Outbox, Web Push and ntfy
@@ -4376,8 +4381,9 @@ process kill; both clients see the same state; the partner notification
       caregiver tapping; the `approval` notification's real ntfy/push/host
       delivery is P0-10/P4-09's device check like every other category; the
       `request_history_correction` tool and its writer are carried (see decision
-      7); P4-10 owns the end-to-end "approval does not execute before confirm"
-      case on top of this suite; and no phone has run it.
+      7); P4-10 keeps the approval sentences here rather than duplicating them
+      (it adds the reminder lifecycle and the dedupe/tag case); and no phone has
+      run it.
 - [x] **P4-08** Budget with `harness.usage()` authoritative + model picker +
       provider keys + usage UI. Re-probe the allowlist with the **app schema**
       (P0-05's result shape) rather than trusting the spike's catalog probe, and
@@ -4554,8 +4560,52 @@ process kill; both clients see the same state; the partner notification
       shell only, because an iPhone user needs any password generator and this
       guide cannot test the app's UI; and the approval card the guide defers to
       is still P4-07's carried thread UI.
-- [ ] **P4-10** Tests: reminder after restart, cancel removes pending, dedupe/tag,
+- [x] **P4-10** Tests: reminder after restart, cancel removes pending, dedupe/tag,
       approval does not execute before confirm, double confirm is idempotent.
+      **Landed:** `test/phase4.test.ts` — the Gate G4 lifecycle across a real
+      close/reopen of one SQLite file: an appointment armed with two offsets, the
+      harness closed while both tasks sleep, reopened, `resume()`d, and only then
+      the clock advanced (the 60-minute reminder fires for both caregivers, its
+      dedupe key carries the offset and the start instant, the start-instant one
+      follows, and a third open at a later clock writes nothing again); a
+      cancelled appointment whose armed tasks were retired never reminds after a
+      reopen (the tasks are terminal, not sleeping, and walking past both instants
+      writes no intent); and the server-side dedupe key drops a repeated append.
+      `test/outbox.test.ts` gained the named dedupe/tag case: one action appended
+      twice is one item and **one** push whose display `tag` is the dedupe key and
+      whose title is the category text. The approval sentences Gate G4 also names
+      stay where P4-07 pinned them (`test/approvals.test.ts`,
+      `test/approval-routes.test.ts`: nothing executes before a confirm, a double
+      confirm replays, an expired proposal is refused).
+      **Bug found and fixed here:** the calendar form offers **"At the start"**
+      (offset 0), but the waking decision treated `now >= startsAt` as passed, so
+      an offset-0 task — whose own instant *is* the start — could never fire. The
+      decision now fires it at the start and within a five-minute grace
+      (`APPOINTMENT_START_GRACE_MS`), while every pre-visit offset keeps its strict
+      "not once the visit has begun" rule; the pure decision test pins both
+      boundaries, and §12.2 records the exception.
+      Decisions: (1) **the restart is a close, not a simulated SIGKILL**: a task
+      whose sleep was committed and whose decision was not is exactly what either
+      leaves behind, and the durable store is what the next open re-registers
+      through `resume()`. (2) **the device legs stay unclaimed**: a real
+      Termux:API notification, Web Push over the quick tunnel and the partner's
+      iPhone receipt are P0-10/P4-09's checks, and the outbox suites already drive
+      the Termux and ntfy commands against stubs — no test contacts a real push
+      service, ntfy topic or provider key.
+      **Verified:** `npm run typecheck`; `npm test` 780/780 (4 new tests: three in
+      `test/phase4.test.ts`, one in `test/outbox.test.ts`), plus the tightened
+      `test/appointment-reminders.test.ts` boundary cases.
+      **Review follow-ups (adversarial):** the third-boot leg now asserts the
+      armed tasks are **terminal** before the clock moves, because an intent count
+      alone would pass even if a task re-ran (a duplicate write carries the same
+      dedupe key and is dropped); both caregivers' dedupe keys are asserted, not
+      only the owner's; and §12.2 records the grace-window edge case (editing or
+      cancelling inside the five minutes retires the arm, and a re-arm refuses an
+      instant already due, so the start reminder is deliberately lost).
+      **Not verified / carried out:** the three device legs above (no phone, no
+      tunnel, no real ntfy topic here); the partner's iPhone remains **P0-10**;
+      and a live `harness.resume()` on a phone while a reminder sleeps is P5-01's
+      kill/restart matrix on the real device.
 
 **Gate G4:** reminder fires after a restart; cancel removes it; the host’s
 Termux:API local notification works; Web Push is proven over the quick tunnel;
