@@ -19,6 +19,10 @@
 //   GET  /api/puppy              the care state: puppy, roster, meals, setup
 //   PATCH /api/puppy             edit the profile (rev + Idempotency-Key)
 //   PATCH /api/household         set/confirm the timezone (rev + Idempotency-Key)
+//   GET  /api/models             model, allowlist, last probe, key presence, budget
+//   PUT  /api/models/keys        set or clear a provider key (owner; never echoed)
+//   POST /api/models/probe       run the allowlist probe now (owner; rate-limited)
+//   PATCH /api/models/current    pick the thread's model (owner; allowlist + budget)
 //   GET  /api/budget             this month's spend against the cap (both caregivers)
 //   PATCH /api/budget            set the monthly cap (owner; rev + Idempotency-Key)
 //   PATCH /api/feeding/slots     set the meal schedule (rev + Idempotency-Key)
@@ -70,7 +74,7 @@ import {
   CALENDAR_WINDOW_RULE,
   parseCalendarWindow,
 } from "../shared/calendar.ts";
-import type { AgentEvent } from "@earendil-works/pi-durable";
+import type { AgentEvent, ConversationId } from "@earendil-works/pi-durable";
 import { HOUSEHOLD_FALLBACK_LABEL, THREAD_POLL_MAX_MS, type ThreadSnapshot } from "../shared/chat.ts";
 import {
   MEAL_SCHEDULE_RULE,
@@ -101,7 +105,7 @@ import type { ActorResolver } from "./domain/actor.ts";
 import type { Logger } from "./log.ts";
 import type { JsonFileStore } from "./json-file.ts";
 import type { Models } from "@earendil-works/pi-ai";
-import { isNtfyTopic, type PushConfig } from "./config.ts";
+import { isNtfyTopic, type PushConfig, type SecretsConfig } from "./config.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { isPushEndpoint } from "./push/web-push.ts";
 import type { NotificationIntent } from "../shared/domain.ts";
@@ -125,6 +129,11 @@ import {
 import { updateAgentBudget, updateHouseholdTimezone } from "./domain/household.ts";
 import { readBudget } from "./domain/usage.ts";
 import { modelIsPaid } from "./agent/model.ts";
+import { isProviderId, PROVIDERS } from "./models/collection.ts";
+import { allowlistOf, probeAndCache, PROBE_CANDIDATES } from "./models/probe-run.ts";
+import type { ModelProbeCache } from "./models/cache.ts";
+import type { Allowlist } from "./models/allowlist.ts";
+import { probeRefOf } from "./agent/model.ts";
 import { readProfile, updatePuppyProfile } from "./domain/profile.ts";
 import { logMeasurement, readGrowthView, type MeasurementOutcome } from "./domain/growth.ts";
 import {
@@ -235,6 +244,8 @@ export interface HttpDeps {
   readonly signInLimiter: RateLimiter;
   /** The test button's limiter (it causes an external ntfy/Web Push call). */
   readonly notificationLimiter?: RateLimiter;
+  /** The probe's limiter: one press spends a provider call per model. */
+  readonly probeLimiter?: RateLimiter;
   /** Origins mutations may come from; a function because the tunnel origin moves. */
   readonly allowedOrigins: () => readonly string[];
   readonly logger: Logger;
@@ -246,6 +257,12 @@ export interface HttpDeps {
    * every model look paid, which is the fail-closed direction.
    */
   readonly models?: Models;
+  /** Providers with a stored key; absent means "unknown", which is read as none. */
+  readonly modelProviders?: ReadonlySet<string>;
+  /** `secrets.json`: provider keys are written here and never echoed. */
+  readonly secrets?: JsonFileStore<SecretsConfig>;
+  /** `models.json`: the probe cache the picker reads and a probe rewrites. */
+  readonly modelCache?: JsonFileStore<ModelProbeCache>;
   /** Long-poll wait; capped to THREAD_POLL_MAX_MS. */
   readonly pollTimeoutMs?: number;
   /** The server clock, injected in tests; the wall clock otherwise (P2-03's day view). */
@@ -651,6 +668,29 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/models" && req.method === "GET") {
+      // The partner may see the model and the spend (§11.3); the writes below
+      // are owner-only by the §14.1 matrix.
+      requireCare(session);
+      await handleModelsRead(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/models/keys" && req.method === "PUT") {
+      await handleProviderKey(deps, req, res, requireAction(requireCare(session), "providers"));
+      return;
+    }
+
+    if (pathname === "/api/models/probe" && req.method === "POST") {
+      await handleModelProbe(deps, req, res, requireAction(requireCare(session), "models"));
+      return;
+    }
+
+    if (pathname === "/api/models/current" && req.method === "PATCH") {
+      await handleModelPick(deps, req, res, requireAction(requireCare(session), "models"));
+      return;
+    }
+
     if (pathname === "/api/approvals" && req.method === "GET") {
       requireCare(session);
       await handleApprovalsRead(deps, res);
@@ -734,6 +774,7 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
         "appointments GET /api/appointments, GET /api/appointments/next, " +
         "POST /api/appointments, POST /api/appointments/update, POST /api/appointments/cancel, " +
         "approvals GET /api/approvals, POST /api/approvals/confirm, POST /api/approvals/cancel, " +
+        "models GET /api/models, PUT /api/models/keys, POST /api/models/probe, PATCH /api/models/current, " +
         "push GET /api/push/public-key, POST /api/push/subscriptions, POST /api/push/unsubscribe, " +
         "and notifications GET /api/notifications, GET /api/notifications/unread, " +
         "POST /api/notifications/read, POST /api/notifications/test, " +
@@ -2300,6 +2341,207 @@ async function handleAppointmentCancel(
     now: new Date(deps.now?.() ?? Date.now()),
   });
   await respondToAppointmentWrite(deps, res, outcome);
+}
+
+// --- models and providers (P4-08) --------------------------------------------
+
+/** One catalog price, as the picker shows it. Never a key, never a usage secret. */
+function priceOf(models: Models | undefined, provider: string, modelId: string): { input: number; output: number } | null {
+  const cost = models?.getModel(provider, modelId)?.cost;
+  return cost ? { input: cost.input, output: cost.output } : null;
+}
+
+/** The §11.2 candidates with their prices, for the picker's copy. */
+function candidateViews(models: Models | undefined): Array<Record<string, unknown>> {
+  return PROBE_CANDIDATES.map((target) => {
+    const price = priceOf(models, target.provider, target.model);
+    return {
+      id: `${target.provider}/${target.model}`,
+      provider: target.provider,
+      model: target.model,
+      price,
+      paid: !(price !== null && price.input === 0 && price.output === 0),
+    };
+  });
+}
+
+/** The allowlist as the Settings sheet reads it: ids and reasons, no secrets. */
+function allowlistView(allowlist: Allowlist): Record<string, unknown> {
+  return {
+    allowed: allowlist.allowed.map((entry) => ({ id: entry.id, verifiedAt: entry.verifiedAt ?? null })),
+    unverified: allowlist.unverified.map((item) => ({ id: item.entry.id, reason: item.reason })),
+    dropped: allowlist.dropped.map((entry) => ({ id: entry.id, status: entry.status })),
+  };
+}
+
+/** Which providers have a key. The key itself never leaves `secrets.json`. */
+async function providerView(secrets: JsonFileStore<SecretsConfig> | undefined): Promise<Record<string, boolean>> {
+  const keyed = secrets === undefined ? new Set<string>() : new Set(Object.keys((await secrets.read()).providerKeys));
+  return Object.fromEntries(PROVIDERS.map((provider) => [provider, keyed.has(provider)]));
+}
+
+/**
+ * Everything the Settings card needs in one read: the configured model, the
+ * allowlist with its reasons, the last probe, the provider key **presence** and
+ * this month's budget (§11.3: both caregivers may see the current model and the
+ * spend; only the owner may change them).
+ */
+async function handleModelsRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  const cache = deps.modelCache === undefined ? undefined : await deps.modelCache.read();
+  const current = await readThreadModel(deps.thread);
+  const budget = await readBudget(deps.thread.harness, deps.thread.context, now);
+  sendJson(res, 200, {
+    current:
+      current === undefined
+        ? null
+        : {
+            ...current,
+            id: `${current.provider}/${current.modelId}`,
+            paid: modelIsPaid(deps.models, current),
+            price: priceOf(deps.models, current.provider, current.modelId),
+          },
+    providers: await providerView(deps.secrets),
+    allowlist: allowlistView(cache === undefined ? { allowed: [], unverified: [], dropped: [] } : allowlistOf(cache)),
+    // An untouched cache (the store's initial value) is "never probed", not a
+    // probe at the epoch.
+    probe: cache === undefined || cache.results.length === 0 ? null : { checkedAt: cache.checkedAt, results: cache.results },
+    candidates: candidateViews(deps.models),
+    budget,
+  });
+}
+
+/**
+ * Set or clear one provider's API key (owner-only, §14.1 `providers`). The key is
+ * written to `secrets.json` (0600, serialized) and **never** echoed: the answer
+ * carries only which providers are configured, so a log line or a screenshot of
+ * the screen cannot leak it.
+ */
+async function handleProviderKey(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  if (deps.secrets === undefined) throw new UnavailableError("the secrets file is not available; retry after boot");
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a provider key change is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["provider", "key"]);
+  if (!isProviderId(record.provider)) {
+    throw new ConflictError(`a provider is one of ${PROVIDERS.join(", ")}`);
+  }
+  const provider = record.provider;
+  const key = record.key;
+  if (key !== null && (typeof key !== "string" || key.trim() === "" || key.trim().length > 512 || /[\u0000-\u001f\u007f]/.test(key))) {
+    throw new ConflictError("a provider key is one line of text, or null to clear it");
+  }
+  await deps.secrets.update((config) => {
+    const providerKeys = { ...config.providerKeys };
+    if (key === null) delete providerKeys[provider];
+    else providerKeys[provider] = (key as string).trim();
+    return { ...config, providerKeys };
+  });
+  // The credential is read per request, so a saved key takes effect immediately
+  // for the next probe and the next message.
+  sendJson(res, 200, { providers: await providerView(deps.secrets) });
+}
+
+/**
+ * Run the allowlist probe now (owner-only). It costs one provider call per
+ * candidate on a configured provider, so it is rate-limited like the notification
+ * test; its spend is outside `harness.usage()` and is reported per result rather
+ * than added to the budget (§11.2's stated exception).
+ */
+async function handleModelProbe(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  if (deps.modelCache === undefined || deps.models === undefined) {
+    throw new UnavailableError("the model catalog is not available; retry after boot");
+  }
+  if (deps.probeLimiter !== undefined && !deps.probeLimiter.hit(`model-probe:${session.memberId}`)) {
+    throw new RateLimitError("too many probes; wait a minute");
+  }
+  const configured = deps.modelProviders ?? new Set<string>();
+  const run = await probeAndCache(deps.modelCache, {
+    models: deps.models,
+    configured,
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
+  });
+  sendJson(res, 200, {
+    checkedAt: run.checkedAt,
+    providers: run.providers,
+    skipped: run.skipped.map((target) => `${target.provider}/${target.model}`),
+    results: run.results,
+    allowlist: allowlistView(run.allowlist),
+  });
+}
+
+/**
+ * Pick the shared thread's model (owner-only, §14.1 `models`). Two fences: the
+ * model must be on the allowlist (a live tool-calling probe said yes), and a
+ * **paid** model is refused while the budget is at its cap (§11.3) — free models
+ * stay selectable there.
+ */
+async function handleModelPick(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  if (deps.models === undefined || deps.modelCache === undefined) {
+    throw new UnavailableError("the model catalog is not available; retry after boot");
+  }
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a model choice is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["model"]);
+  const ref = typeof record.model === "string" ? probeRefOf(record.model) : undefined;
+  if (!ref) throw new ConflictError("a model choice is one \"provider/model\" id");
+  if (deps.models.getModel(ref.provider, ref.modelId) === undefined) {
+    throw new ConflictError("that model is not in the provider catalog");
+  }
+  const cache = await deps.modelCache.read();
+  const allowed = new Set(allowlistOf(cache).allowed.map((entry) => entry.id));
+  if (!allowed.has(`${ref.provider}/${ref.modelId}`)) {
+    throw new DomainConflictError(
+      `${JSON.stringify(record.model)} has not passed a live tool-calling probe; run the check in Settings first`,
+    );
+  }
+  const now = new Date(deps.now?.() ?? Date.now());
+  const budget = await readBudget(deps.thread.harness, deps.thread.context, now);
+  if (!budget.paidAllowed && modelIsPaid(deps.models, ref)) {
+    throw new DomainConflictError(
+      `The monthly agent budget is used up ($${budget.spentUsd.toFixed(2)} of $${budget.capUsd.toFixed(2)}); ` +
+        "the owner can raise it, or choose a free model.",
+    );
+  }
+  const household = await readHousehold(deps.thread.harness, deps.thread.context);
+  const conversation = await deps.thread.harness.conversation(
+    household.conversationId as ConversationId,
+    deps.thread.context,
+  );
+  if (!conversation) throw new ThreadUnavailableError("the shared conversation is missing");
+  await conversation.configure({ model: { provider: ref.provider, modelId: ref.modelId } }, deps.thread.context);
+  sendJson(res, 200, {
+    current: {
+      ...ref,
+      id: `${ref.provider}/${ref.modelId}`,
+      paid: modelIsPaid(deps.models, ref),
+      price: priceOf(deps.models, ref.provider, ref.modelId),
+    },
+    budget,
+  });
 }
 
 // --- approvals (P4-07) -------------------------------------------------------

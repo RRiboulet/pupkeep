@@ -57,6 +57,8 @@ import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { createApprovalTools } from "./agent/approval-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
 import { reconcileUsageMonth } from "./domain/usage.ts";
+import { createAppModels, PROVIDERS, type AppModels } from "./models/collection.ts";
+import { probeAndCache } from "./models/probe-run.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
 import {
@@ -383,6 +385,24 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   const registry = options.registry ?? createRegistry<ToolRegistration>();
   installAppExtensions(registry);
 
+  // P4-08: the provider catalog and its credentials. Keys come from
+  // secrets.json through a CredentialStore (never the environment), and an
+  // injected catalog is a test's: every provider it names counts as configured.
+  let catalog: AppModels | undefined;
+  try {
+    if (options.models === undefined) {
+      catalog = await createAppModels(stores.secrets);
+    } else {
+      const injected = typeof options.models === "function" ? options.models() : options.models;
+      catalog = {
+        models: injected,
+        configured: new Set(injected.getModels().map((model) => model.provider)),
+      };
+    }
+  } catch (error) {
+    logger.warn("could not build the provider catalog; the thread will start without a model", { error });
+  }
+
   const parked = new Map<string, ParkedTask>();
   const report = (error: unknown, info: ReportInfo): void => {
     if (info.type === "task_parked") {
@@ -402,7 +422,14 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   try {
     opened = await (deps.openHarness ?? openHarness)({
       path: dataPaths(directory.path).database,
-      ...(options.models !== undefined ? { models: options.models } : {}),
+      // The harness needs the same catalog the routes use: in production it is
+      // the one built from `secrets.json` above, and an injected catalog is a
+      // test's. Without it no configured model could ever be called.
+      ...(options.models !== undefined
+        ? { models: options.models }
+        : catalog !== undefined
+          ? { models: catalog.models }
+          : {}),
       registry,
       settings: threadSettings(options),
       ...(options.now !== undefined ? { now: options.now } : {}),
@@ -676,7 +703,11 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
 
     try {
       const household = await readHousehold(thread.harness, thread.context);
-      const model = pickInitialModel(await stores.models.read(), options.models);
+      const model = pickInitialModel(
+        await stores.models.read(),
+        catalog?.models,
+        catalog?.configured,
+      );
       const configured = await configureSharedThread(thread, {
         instructions: SHARED_THREAD_INSTRUCTIONS,
         ...(model ? { model: { provider: model.provider, modelId: model.modelId } } : {}),
@@ -700,22 +731,18 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       // The actual bound port can differ from `options.port` (port 0 in tests);
       // the origin list follows whatever the listener really bound.
       let boundPort = options.port;
-      // Resolved once for the budget's paid/free check and (P4-08b) the picker.
-      // A throwing catalog factory is the same as no catalog: fail closed.
-      let catalog: Models | undefined;
-      try {
-        catalog = typeof options.models === "function" ? options.models() : options.models;
-      } catch {
-        catalog = undefined;
-      }
       const handler = createAppHandler({
         auth,
         thread,
         bus,
-        ...(catalog !== undefined ? { models: catalog } : {}),
+        ...(catalog !== undefined ? { models: catalog.models, modelProviders: catalog.configured } : {}),
+        secrets: stores.secrets,
+        modelCache: stores.models,
         submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
         notificationLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),
+        // A probe spends a provider call; a loop must not burn the budget.
+        probeLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),
         allowedOrigins: () => bindOrigins(options.host, boundPort),
         logger,
         push: stores.push,
@@ -727,6 +754,33 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       const bound = Number(new URL(listener.url).port);
       if (Number.isInteger(bound) && bound > 0) boundPort = bound;
       logger.info("listening", { url: listener.url });
+
+      // P4-08: §11.2's bounded startup probe, once per boot and never on the
+      // critical path. It caches `models.json` for the next pick and the Settings
+      // screen; the attached model is not switched mid-session (a picker change
+      // is the owner's decision, and the next boot reads the fresh allowlist).
+      //
+      // Only a catalog built from real keys is probed: an injected one is a
+      // test's scripted catalog, where a probe would spend the fixture's scripted
+      // responses and change what the suite is asserting.
+      if (options.models === undefined && catalog !== undefined && catalog.configured.size > 0) {
+        void probeAndCache(stores.models, {
+          models: catalog.models,
+          configured: catalog.configured,
+          ...(options.now !== undefined ? { now: options.now } : {}),
+        })
+          .then((run) => {
+            logger.info("model probe", {
+              probed: run.results.length,
+              allowed: run.allowlist.allowed.map((entry) => entry.id),
+              dropped: run.allowlist.dropped.map((entry) => entry.id),
+              skippedProviders: run.skipped.length,
+            });
+          })
+          .catch((error: unknown) => {
+            logger.warn("the startup model probe failed; the cached allowlist stands", { error });
+          });
+      }
     } catch (error) {
       logger.error("could not bind the HTTP listener", { error });
       profileState?.stop();
