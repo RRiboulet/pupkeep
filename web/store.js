@@ -10,6 +10,7 @@ export const ROUTES = [
   { id: "calendar", label: "Calendar", view: "Calendar" },
   { id: "pup", label: "Pup", view: "Pup profile" },
   { id: "agent", label: "Agent", view: "Shared thread" },
+  { id: "notifications", label: "Notifications", view: "Notification centre" },
   { id: "settings", label: "Settings", view: "Settings" },
 ];
 
@@ -38,6 +39,11 @@ const state = {
    * happened, re-read if you depend on one the frame does not carry".
    */
   careSeq: 0,
+  /**
+   * The unread notification count for the nav badge (P4-06). Read from the
+   * count-only route; 0 until the first read.
+   */
+  unreadNotifications: 0,
 };
 
 const listeners = new Set();

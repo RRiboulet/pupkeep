@@ -153,7 +153,7 @@ test("the shell mounts and navigates only through module scripts", async () => {
   assert.doesNotMatch(html, /<style[\s>]/i, "inline <style>");
   assert.doesNotMatch(html, /\sstyle\s*=\s*["']/i, "inline style attribute");
   const app = await readFile(join(WEB, "app.js"), "utf8");
-  for (const label of ["Today", "Calendar", "Pup", "Agent", "Settings"]) {
+  for (const label of ["Today", "Calendar", "Pup", "Agent", "Notifications", "Settings"]) {
     assert.ok(app.includes(label), `bottom navigation misses "${label}"`);
   }
 });
@@ -768,7 +768,7 @@ test("install fills exactly PRECACHE, from pristine same-origin 200s", async () 
   const expected = [...worker.precache]
     .map((entry) => new URL(entry, `${ORIGIN}/sw.js`).pathname)
     .sort();
-  assert.equal(expected.length, 29, "the shell is the document, styles, modules, manifest and icons");
+  assert.equal(expected.length, 31, "the shell is the document, styles, modules, manifest and icons");
   assert.deepEqual(worker.cache.paths(), expected, "the cache holds exactly the precache list");
   assert.equal(worker.network.length, worker.precache.length, "one network fetch per entry");
   for (const call of worker.network) {
@@ -1048,6 +1048,9 @@ test("app.js applies every state change in a frame and the last one wins", async
     "Pup",
     "Agent",
     "Settings",
+    "Notifications",
+    "getState",
+    "badgeText",
     "document",
     "navigator",
     "window",
@@ -1066,6 +1069,9 @@ test("app.js applies every state change in a frame and the last one wins", async
     View,
     View,
     View,
+    View,
+    () => state,
+    (count: number) => (count <= 0 ? "" : count > 9 ? "9+" : String(count)),
     document,
     navigator,
     window,

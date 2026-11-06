@@ -14,13 +14,15 @@
 
 import { h, render } from "./vendor/preact.mjs";
 import htm from "./vendor/htm.mjs";
-import { hashRoute, setState, subscribe } from "./store.js";
+import { getState, hashRoute, setState, subscribe } from "./store.js";
 import { startLive } from "./live.js";
 import { Today } from "./views/today.js";
 import { Calendar } from "./views/calendar.js";
 import { Pup } from "./views/pup.js";
 import { Agent } from "./views/agent.js";
 import { Settings } from "./views/settings.js";
+import { Notifications } from "./views/notifications.js";
+import { badgeText } from "./notifications.js";
 
 const html = htm.bind(h);
 
@@ -29,6 +31,7 @@ const VIEWS = new Map([
   ["calendar", Calendar],
   ["pup", Pup],
   ["agent", Agent],
+  ["notifications", Notifications],
   ["settings", Settings],
 ]);
 
@@ -37,10 +40,13 @@ const NAV_ITEMS = [
   { id: "calendar", label: "Calendar" },
   { id: "pup", label: "Pup" },
   { id: "agent", label: "Agent" },
+  { id: "notifications", label: "Notifications" },
   { id: "settings", label: "Settings" },
 ];
 
 function Nav({ route }) {
+  const unread = Number(getState().unreadNotifications ?? 0);
+  const badge = badgeText(unread);
   return html`
     <nav class="bottom-nav" aria-label="Primary">
       ${NAV_ITEMS.map(
@@ -50,9 +56,11 @@ function Nav({ route }) {
             href="#${item.id}"
             class=${`bottom-nav__item${route === item.id ? " is-current" : ""}`}
             aria-current=${route === item.id ? "page" : "false"}
-            aria-label=${item.label}
+            aria-label=${item.id === "notifications" && badge !== "" ? `Notifications, ${unread} unread` : item.label}
           >
-            ${item.label}
+            ${item.label}${item.id === "notifications" && badge !== ""
+              ? html`<span class="badge badge--nav">${badge}</span>`
+              : null}
           </a>
         `,
       )}

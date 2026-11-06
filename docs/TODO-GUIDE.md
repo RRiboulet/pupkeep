@@ -33,9 +33,12 @@ timezone change re-arms today in the same commit. **P4-05** is complete:
 drains pending intents to Web Push with VAPID (generated once into push.json)
 and aes128gcm on `node:crypto`, the reminder tasks write one intent per
 caregiver in their terminal commit, and the service worker shows the
-category-only title. The next task is **P4-06** (the notification centre, prefs,
-test button, badge, host Termux:API and the partner's ntfy topic). P0-03/P0-08/
-P0-10 remain device-gated partner checks and do not block the host-side work.
+category-only title. **P4-06** is complete: a top-level notification centre with
+per-member items and a nav badge, Settings prefs/test/push/ntfy, and delivery to
+ntfy (the partner's daily path) and the host's Termux:API. The partner-device
+claim remains gated on P0-10 and was not tested here. The next task is **P4-07**
+(approvals: `app.approvals`, propose tools, confirm/cancel). P0-03/P0-08/P0-10
+remain device-gated partner checks and do not block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The

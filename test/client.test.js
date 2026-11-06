@@ -1599,3 +1599,139 @@ test("disablePush removes the server record and unsubscribes the browser", async
     { removed: false },
   );
 });
+
+// --- the notification centre and settings (P4-06) ----------------------------
+
+const {
+  badgeText,
+  categoryOptions,
+  intentWhenText,
+  ntfyBody,
+  prefsBody,
+  unreadOf,
+} = await import("../web/notifications.js");
+const { Notifications } = await import("../web/views/notifications.js");
+const { Settings } = await import("../web/views/settings.js");
+
+test("the badge, the unread count and the prefs body are derived, never stored", () => {
+  assert.equal(badgeText(0), "");
+  assert.equal(badgeText(3), "3");
+  assert.equal(badgeText(10), "9+");
+  assert.equal(badgeText(-1), "");
+  const items = [{ readAt: null }, { readAt: "2026-10-29T10:00:00.000Z" }, { readAt: null }];
+  assert.equal(unreadOf(items), 2);
+  assert.equal(unreadOf([]), 0);
+
+  assert.deepEqual(prefsBody(true, ["fed", "fed", "feed_overdue", "walk_reminder"]), {
+    enabled: true,
+    categories: ["fed", "feed_overdue"],
+    // The unknown category is dropped rather than sent.
+  });
+  assert.deepEqual(prefsBody(false, []), { enabled: false, categories: [] });
+  assert.deepEqual(ntfyBody("  "), { topic: null });
+  assert.deepEqual(ntfyBody(" topic "), { topic: "topic" });
+  assert.deepEqual(
+    categoryOptions(["fed"]).map((option) => [option.category, option.checked]),
+    [
+      ["appointment", false],
+      ["feed_overdue", false],
+      ["fed", true],
+      ["approval", false],
+      ["test", false],
+    ],
+  );
+});
+
+test("an intent's time is the household zone, not the device's", () => {
+  assert.equal(intentWhenText("2026-10-30T08:00:00.000Z", "Europe/Paris"), "30 Oct 2026 09:00");
+  // Just after Paris midnight the UTC date is still yesterday: the date and the
+  // time must come from the same zone.
+  assert.equal(intentWhenText("2026-01-01T23:00:00.000Z", "Europe/Paris"), "2 Jan 2026 00:00");
+  assert.equal(intentWhenText("nonsense", "Europe/Paris"), "");
+});
+
+test("the centre renders the member's items, unread state and the badge", () => {
+  setState({ profile: profileOf() });
+  const centre = new Notifications({});
+  centre.setState = (patch) => Object.assign(centre.state, patch);
+  centre.setState({
+    loading: false,
+    unread: 2,
+    items: [
+      {
+        id: "n1",
+        title: "A meal is overdue",
+        body: "Breakfast was not logged by 07:15.",
+        createdAt: "2026-10-30T08:00:00.000Z",
+        readAt: null,
+      },
+      {
+        id: "n2",
+        title: "A meal was logged",
+        body: "Sam fed lunch.",
+        createdAt: "2026-10-30T11:00:00.000Z",
+        readAt: "2026-10-30T11:05:00.000Z",
+      },
+    ],
+  });
+  const vnode = centre.render();
+  for (const text of ["A meal is overdue", "Breakfast was not logged", "Mark all read", "2", "Mark read"]) {
+    assert.ok(vnodeText(vnode, text), `missing ${text}`);
+  }
+  assert.equal(vnodeText(vnode, "n1"), false, "ids are keys, not copy");
+});
+
+test("marking read posts one idempotent request and updates the badge", async () => {
+  const calls = [];
+  const centre = new Notifications({});
+  centre.request = async (path, options) => {
+    calls.push({ path, options });
+    return { status: 200, ok: true, body: { unread: 0 } };
+  };
+  centre.setState = (patch) => Object.assign(centre.state, patch);
+  centre.load = async () => {};
+  setState({ unreadNotifications: 1 });
+  centre.setState({ items: [{ id: "n1", readAt: null }], unread: 1 });
+  await centre.markRead("n1");
+  assert.equal(calls[0].path, "/api/notifications/read");
+  assert.deepEqual(calls[0].options.body, { id: "n1" });
+  assert.equal(typeof calls[0].options.idempotencyKey, "string");
+  assert.equal(getState().unreadNotifications, 0);
+});
+
+test("settings renders the notification card and saves prefs and an empty topic", async () => {
+  setState({ profile: profileOf() });
+  const calls = [];
+  const settings = new Settings({});
+  settings.request = async (path, options) => {
+    calls.push({ path, options });
+    if (path === "/api/notifications/prefs") return { status: 200, ok: true, body: { prefs: { enabled: true, categories: ["fed"] } } };
+    if (path === "/api/notifications/ntfy") return { status: 200, ok: true, body: { topic: null } };
+    return { status: 200, ok: true, body: { prefs: { enabled: true, categories: ["fed"] }, ntfy: "topic-0123456789abcdef" } };
+  };
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({
+    loading: false,
+    supported: false,
+    prefs: { enabled: true, categories: ["fed"] },
+    ntfy: "topic-0123456789abcdef",
+    ntfyDraft: "topic-0123456789abcdef",
+  });
+  const vnode = settings.render();
+  for (const text of ["Which notifications", "ntfy", "Send a test notification", "Not supported", "plain HTTP"]) {
+    if (text === "Not supported" || text === "plain HTTP") continue;
+    assert.ok(vnodeText(vnode, text), `missing ${text}`);
+  }
+  assert.ok(vnodeText(vnode, "cannot receive Web Push"), "the insecure-context copy is shown");
+
+  await settings.savePrefs();
+  assert.deepEqual(calls[0].options.body, { enabled: true, categories: ["fed"] });
+  await settings.saveNtfy("");
+  assert.deepEqual(calls[1].options.body, { topic: null });
+});
+
+test("the notifications route is a real hash route, not a fallback to Today", async () => {
+  const { hashRoute } = await import("../web/store.js");
+  assert.equal(hashRoute("#notifications"), "notifications");
+  assert.equal(hashRoute("#settings"), "settings");
+});

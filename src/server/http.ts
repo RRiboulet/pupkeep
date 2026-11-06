@@ -95,9 +95,18 @@ import {
 import type { ActorResolver } from "./domain/actor.ts";
 import type { Logger } from "./log.ts";
 import type { JsonFileStore } from "./json-file.ts";
-import type { PushConfig } from "./config.ts";
+import { isNtfyTopic, type PushConfig } from "./config.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { isPushEndpoint } from "./push/web-push.ts";
+import type { NotificationIntent } from "../shared/domain.ts";
+import {
+  NOTIFICATION_CATEGORIES,
+  notificationIntent,
+  notificationKey,
+  parseNotificationIntent,
+} from "../shared/notifications.ts";
+import { appendNotificationIntents } from "./notifications/intents.ts";
+import { NotificationsDoc, parseNotifications } from "./domain/docs.ts";
 import { CLIENT_KEY_LIMIT, isCommandKey, type WriteOutcome } from "./domain/commands.ts";
 import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
 import {
@@ -206,6 +215,8 @@ export interface HttpDeps {
   readonly submitLimiter: RateLimiter;
   /** Sign-in/invite rate limiter, keyed per client IP (PLAN §14.2). */
   readonly signInLimiter: RateLimiter;
+  /** The test button's limiter (it causes an external ntfy/Web Push call). */
+  readonly notificationLimiter?: RateLimiter;
   /** Origins mutations may come from; a function because the tunnel origin moves. */
   readonly allowedOrigins: () => readonly string[];
   readonly logger: Logger;
@@ -620,6 +631,42 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/notifications" && req.method === "GET") {
+      await handleNotificationsRead(deps, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/unread" && req.method === "GET") {
+      await handleNotificationsUnread(deps, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/read" && req.method === "POST") {
+      await handleNotificationsReadMark(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/test" && req.method === "POST") {
+      await handleNotificationsTest(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/prefs" && req.method === "GET") {
+      requireCare(session);
+      await handleNotificationsPrefsRead(deps, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/prefs" && req.method === "PATCH") {
+      await handleNotificationsPrefs(deps, req, res, requireAction(requireCare(session), "notification-prefs"));
+      return;
+    }
+
+    if (pathname === "/api/notifications/ntfy" && req.method === "PUT") {
+      await handleNotificationsNtfy(deps, req, res, requireAction(requireCare(session), "notification-prefs"));
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
@@ -633,7 +680,10 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
         "showers GET /api/showers, POST /api/showers, " +
         "appointments GET /api/appointments, GET /api/appointments/next, " +
         "POST /api/appointments, POST /api/appointments/update, POST /api/appointments/cancel, " +
-        "and push GET /api/push/public-key, POST /api/push/subscriptions, POST /api/push/unsubscribe",
+        "push GET /api/push/public-key, POST /api/push/subscriptions, POST /api/push/unsubscribe, " +
+        "and notifications GET /api/notifications, GET /api/notifications/unread, " +
+        "POST /api/notifications/read, POST /api/notifications/test, " +
+        "GET/PATCH /api/notifications/prefs, PUT /api/notifications/ntfy",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -1579,6 +1629,234 @@ async function handleShowerWrite(
     return;
   }
   sendJson(res, 200, { shower: outcome.shower, replayed: outcome.kind === "replayed" });
+}
+
+// --- notifications (P4-06) ---------------------------------------------------
+
+/** The member's default prefs: everything §12.1 offers, enabled. */
+function defaultPrefs(): { enabled: boolean; categories: string[] } {
+  return { enabled: true, categories: [...NOTIFICATION_CATEGORIES] };
+}
+
+/**
+ * What the browser gets: the reader's fields only. The outbox's delivery state
+ * and the dedupe key are server bookkeeping, not the centre's copy.
+ */
+function notificationView(item: NotificationIntent): Record<string, unknown> {
+  return {
+    id: item.id,
+    title: item.title,
+    body: item.body,
+    category: item.category,
+    createdAt: item.createdAt,
+    readAt: item.readAt,
+  };
+}
+
+/** The intents for this member, newest first. The document is append order. */
+function memberItems(items: readonly NotificationIntent[], memberId: string): NotificationIntent[] {
+  return items.filter((item) => item.userId === memberId).reverse();
+}
+
+function unreadCount(items: readonly NotificationIntent[], memberId: string): number {
+  return items.filter((item) => item.userId === memberId && item.readAt === null).length;
+}
+
+/**
+ * The centre's one read: the member's items (newest first), the unread count,
+ * their prefs and their ntfy topic. Only their own items leave the server —
+ * another caregiver's in-app copy is not this member's to read.
+ */
+async function handleNotificationsRead(
+  deps: HttpDeps,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const snapshot = await deps.thread.harness.snapshot(NotificationsDoc, deps.thread.context);
+  const parsed = snapshot === undefined ? undefined : parseNotifications(snapshot);
+  // A missing document is an empty centre, not an error: boot creates it, and a
+  // household that has never had a notification should not see a 503.
+  if (!parsed) {
+    sendJson(res, 200, { items: [], unread: 0 });
+    return;
+  }
+  const items = memberItems(parsed.items, session.memberId);
+  sendJson(res, 200, {
+    items: items.map(notificationView),
+    unread: unreadCount(parsed.items, session.memberId),
+  });
+}
+
+/**
+ * The member's own notification settings: prefs and ntfy topic. A separate
+ * resource from the centre, so a Settings read never pulls the item list (and
+ * the centre never needs push.json to be readable).
+ */
+async function handleNotificationsPrefsRead(
+  deps: HttpDeps,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const config = await deps.push.read();
+  sendJson(res, 200, {
+    prefs: config.prefs[session.memberId] ?? defaultPrefs(),
+    ntfy: config.ntfy[session.memberId]?.topic ?? null,
+  });
+}
+
+/** The nav badge's cheap read: the count only. */
+async function handleNotificationsUnread(
+  deps: HttpDeps,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const snapshot = await deps.thread.harness.snapshot(NotificationsDoc, deps.thread.context);
+  const parsed = snapshot === undefined ? undefined : parseNotifications(snapshot);
+  sendJson(res, 200, { unread: parsed ? unreadCount(parsed.items, session.memberId) : 0 });
+}
+
+/**
+ * Mark one item (by id) or every item read. Idempotent: an already-read item is
+ * left alone, so a double tap is a no-op rather than a second write.
+ */
+async function handleNotificationsReadMark(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a read change is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["id", "all"]);
+  const all = record.all === true;
+  const id = record.id;
+  if (!all && (typeof id !== "string" || id === "")) {
+    throw new ConflictError("a read change needs an item id or all: true");
+  }
+  // The document exists after boot; a read-mark must not create an empty one
+  // (the same create-on-acquire hazard as the reminder checks). Nothing to mark
+  // is an empty answer, not an error.
+  if ((await deps.thread.harness.snapshot(NotificationsDoc, deps.thread.context)) === undefined) {
+    sendJson(res, 200, { unread: 0 });
+    return;
+  }
+  const now = new Date(deps.now?.() ?? Date.now());
+  const unread = await deps.thread.harness.commit(async (tx) => {
+    const draft = await tx.doc(NotificationsDoc);
+    for (const item of draft.items) {
+      if (item.userId !== session.memberId || item.readAt !== null) continue;
+      if (!all && item.id !== id) continue;
+      item.readAt = now.toISOString();
+    }
+    return unreadCount(draft.items, session.memberId);
+  }, deps.thread.context);
+  sendJson(res, 200, { unread });
+}
+
+/**
+ * The Settings test button: commit a `test` intent for the caller and let the
+ * outbox deliver it to whatever transport that member has. The body carries no
+ * care content (§14.3), and the dedupe key is unique per press so a second test
+ * is a second notification rather than a silent drop.
+ */
+async function handleNotificationsTest(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  // The client key makes a retried request one test, not two; a fresh press
+  // sends a fresh key.
+  const key = requireCareMutation(deps, req, session);
+  // The test causes a real external delivery; a loop must not spam ntfy.sh or a
+  // push service. Production always supplies the limiter.
+  if (deps.notificationLimiter !== undefined && !deps.notificationLimiter.hit(`notification-test:${session.memberId}`)) {
+    throw new RateLimitError("too many test notifications; wait a minute");
+  }
+  const now = new Date(deps.now?.() ?? Date.now());
+  const item = notificationIntent({
+    dedupeKey: notificationKey("test", key),
+    category: "test",
+    userId: session.memberId,
+    body: "This is a test notification.",
+    now,
+  });
+  // A retried press with the same key finds its committed item and returns it;
+  // a fresh press has a fresh key and a new item.
+  const stored = await deps.thread.harness.commit(async (tx) => {
+    // Read before the write: a table/document read after this commit writes
+    // would throw `ReadAfterWrite`.
+    const draft = await tx.doc(NotificationsDoc);
+    const existing = draft.items.find((entry) => entry.dedupeKey === item.dedupeKey);
+    // Detach from the draft overlay: the commit is about to settle it.
+    if (existing !== undefined) return parseNotificationIntent(existing) ?? item;
+    await appendNotificationIntents(tx, [item], now);
+    return item;
+  }, deps.thread.context);
+  sendJson(res, 200, { item: stored, replayed: stored.id !== item.id });
+}
+
+/** Replace this member's preferences; the outbox reads them on every pass. */
+async function handleNotificationsPrefs(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a preferences change is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["enabled", "categories"]);
+  if (typeof record.enabled !== "boolean" || !Array.isArray(record.categories)) {
+    throw new ConflictError("preferences need enabled and a category list");
+  }
+  const categories: string[] = [];
+  for (const category of record.categories) {
+    if (typeof category !== "string" || !(NOTIFICATION_CATEGORIES as readonly string[]).includes(category)) {
+      throw new ConflictError("an unknown notification category");
+    }
+    if (!categories.includes(category)) categories.push(category);
+  }
+  const prefs = { enabled: record.enabled, categories };
+  const config = await deps.push.update((current) => ({
+    ...current,
+    prefs: { ...current.prefs, [session.memberId]: { enabled: prefs.enabled, categories: categories as never } },
+  }));
+  sendJson(res, 200, { prefs: config.prefs[session.memberId] });
+}
+
+/** Set or clear this member's ntfy topic (a bearer secret; never logged). */
+async function handleNotificationsNtfy(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("an ntfy change is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["topic"]);
+  const topic = record.topic;
+  if (topic !== null && !isNtfyTopic(topic)) {
+    throw new ConflictError("an ntfy topic is 22 or more letters, digits, dashes or underscores");
+  }
+  const config = await deps.push.update((current) => {
+    const ntfy = { ...current.ntfy };
+    if (topic === null) delete ntfy[session.memberId];
+    else ntfy[session.memberId] = { topic: topic as string };
+    return { ...current, ntfy };
+  });
+  sendJson(res, 200, { topic: config.ntfy[session.memberId]?.topic ?? null });
 }
 
 // --- push subscriptions (P4-05) ---------------------------------------------

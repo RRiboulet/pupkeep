@@ -149,6 +149,11 @@ const HASH = /^[A-Za-z0-9_-]{16,}$/;
 /** An ntfy topic must be unguessable: 22 base64url chars ≈ 132 bits. */
 const NTFY_TOPIC = /^[A-Za-z0-9_-]{22,}$/;
 
+/** Whether `topic` is a storable ntfy topic (the parser's one rule). */
+export function isNtfyTopic(value: unknown): value is string {
+  return typeof value === "string" && NTFY_TOPIC.test(value);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -381,7 +386,7 @@ export function parsePush(raw: unknown): PushConfig | undefined {
     if (!ntfyRecord || typeof ntfyRecord.topic !== "string") return undefined;
     // A short topic is guessable on a public relay — and it also escapes the
     // log scrubber's opaque-value floor.
-    if (!NTFY_TOPIC.test(ntfyRecord.topic)) return undefined;
+    if (!isNtfyTopic(ntfyRecord.topic)) return undefined;
     ntfy[memberId] = { topic: ntfyRecord.topic };
   }
 

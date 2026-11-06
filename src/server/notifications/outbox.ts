@@ -29,6 +29,8 @@ import type { JsonFileStore } from "../json-file.ts";
 import type { Logger } from "../log.ts";
 import { ensureVapid } from "../push/vapid.ts";
 import { sendWebPush, type PushTransport } from "../push/web-push.ts";
+import { sendNtfy, type NtfyTransport } from "./ntfy.ts";
+import { sendTermux, type ExecFile } from "./termux.ts";
 
 /** Give up after this many failed attempts; the in-app item remains. */
 export const OUTBOX_MAX_ATTEMPTS = 5;
@@ -37,6 +39,12 @@ export const OUTBOX_BACKOFF_MS = 60_000;
 export const OUTBOX_MAX_BACKOFF_MS = 30 * 60_000;
 /** §12.3's "bounded error": a sentence, never a provider payload. */
 export const OUTBOX_ERROR_LIMIT = 200;
+/**
+ * One pass handles at most this many intents. Each may try three transports
+ * with timeouts, so an unbounded backlog (a long offline spell) could hold the
+ * drain for minutes; the rest wait for the next pass.
+ */
+export const OUTBOX_BATCH = 25;
 
 export type OutboxOutcome = {
   sent: number;
@@ -83,6 +91,13 @@ export type DrainOptions = {
   readonly now?: Date;
   /** Test seam; the global `fetch` otherwise. */
   readonly transport?: PushTransport;
+  /** ntfy (the partner's daily path). Absent: ntfy is not attempted. */
+  readonly ntfy?: { transport?: NtfyTransport };
+  /**
+   * The host phone's Termux:API transport for the member who runs the server.
+   * Absent off-Termux, which leaves the intent to push/ntfy/in-app.
+   */
+  readonly termux?: { memberId: string; exec: ExecFile; channelReady: boolean };
   readonly logger?: Pick<Logger, "warn">;
 };
 
@@ -97,7 +112,9 @@ export async function drainNotificationOutbox(options: DrainOptions): Promise<Ou
   const document = snapshot === undefined ? undefined : parseNotifications(snapshot);
   if (document === undefined) return NOTHING;
 
-  const candidates = document.items.filter((intent) => deliverableDelivery(intent.delivery, now));
+  const candidates = document.items
+    .filter((intent) => deliverableDelivery(intent.delivery, now))
+    .slice(0, OUTBOX_BATCH);
   if (candidates.length === 0) return NOTHING;
 
   let config: PushConfig;
@@ -107,12 +124,18 @@ export async function drainNotificationOutbox(options: DrainOptions): Promise<Ou
     options.logger?.warn("could not read push.json; notifications wait", { error });
     return { ...NOTHING, skipped: candidates.length };
   }
-  if (config.vapid === null || config.subscriptions.length === 0) {
-    // Nothing to send with yet. The intents stay pending: a later subscription
-    // (P4-06's settings) or the next boot drains them.
-    return { ...NOTHING, skipped: candidates.length };
+  // The key pair is needed only by Web Push; ntfy and the host's Termux:API do
+  // not depend on it, so an unwritable key store must not stop them.
+  let vapid = config.vapid;
+  if (vapid === null && config.subscriptions.length > 0) {
+    // Only Web Push needs the pair; a household that is ntfy/Termux-only must not
+    // generate a key (and write push.json) on every drain.
+    try {
+      vapid = await ensureVapid(options.push);
+    } catch (error) {
+      options.logger?.warn("could not prepare the Web Push key pair; push is skipped", { error });
+    }
   }
-  const vapid = await ensureVapid(options.push);
   const gone = new Set<string>();
   const deliveries = new Map<string, NotificationDelivery>();
   let sent = 0;
@@ -133,9 +156,15 @@ export async function drainNotificationOutbox(options: DrainOptions): Promise<Ou
     const subscriptions = config.subscriptions.filter(
       (subscription) => subscription.memberId === intent.userId && !gone.has(subscription.endpoint),
     );
-    if (subscriptions.length === 0) {
-      // No device for this member (or every one is gone): not a delivery
-      // failure. The in-app item is already visible, and P4-06's ntfy may send.
+    const topic = config.ntfy[intent.userId]?.topic;
+    const host = options.termux !== undefined && options.termux.memberId === intent.userId;
+    // A subscription-only member whose key pair is unavailable is a **pending**
+    // item, not a failed one: the key store may become writable, and burning the
+    // five attempts on a config problem would lose the notification forever.
+    const pushBlocked = subscriptions.length > 0 && vapid === null;
+    if (subscriptions.length === 0 && topic === undefined && !host) {
+      // No device, no topic and not the host: not a delivery failure. The in-app
+      // item is already visible and stays owed.
       skipped += 1;
       continue;
     }
@@ -143,7 +172,11 @@ export async function drainNotificationOutbox(options: DrainOptions): Promise<Ou
     let delivered = false;
     let lastError: string | undefined;
     let lastStatus: number | null = null;
+    // The transport chain: Web Push, then ntfy, then the host's Termux:API. A
+    // transport that succeeds stops the chain, so a member with two configured
+    // paths is not notified twice.
     for (const subscription of subscriptions) {
+      if (vapid === null) break;
       const result = await sendWebPush(
         subscription,
         { title: intent.title, tag: intent.dedupeKey, url: "/" },
@@ -164,6 +197,30 @@ export async function drainNotificationOutbox(options: DrainOptions): Promise<Ou
         lastStatus = result.status;
         lastError = result.error;
       }
+    }
+    if (!delivered && topic !== undefined) {
+      const result = await sendNtfy(topic, intent.category, {
+        ...(options.ntfy?.transport !== undefined ? { transport: options.ntfy.transport } : {}),
+      });
+      if (result.kind === "sent") delivered = true;
+      else {
+        lastStatus = result.status;
+        lastError = result.error ?? (result.status !== null ? `ntfy answered ${result.status}` : "ntfy failed");
+      }
+    }
+    if (!delivered && host && options.termux !== undefined) {
+      const sent = await sendTermux(
+        options.termux.exec,
+        { dedupeKey: intent.dedupeKey, category: intent.category },
+        options.termux.channelReady,
+      );
+      if (sent) delivered = true;
+      else lastError = "the host notification command failed";
+    }
+    if (!delivered && pushBlocked) {
+      // Nothing was tried that could have worked; keep it owed.
+      skipped += 1;
+      continue;
     }
 
     const attempts = intent.delivery.attempts + 1;

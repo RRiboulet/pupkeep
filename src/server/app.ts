@@ -14,7 +14,9 @@
 //   * a normal signal -> close the listener, then the harness, then release the
 //     `server.pid` lock; the lock is released last.
 
+import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type RequestListener, type ServerResponse } from "node:http";
+import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord";
 import type { Models } from "@earendil-works/pi-ai/models";
@@ -29,7 +31,7 @@ import {
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { createLogger, type Logger } from "./log.ts";
-import { dataPaths, dataStores, ensureDataDir, type AppConfig, type DataDir } from "./config.ts";
+import { activeMembers, dataPaths, dataStores, ensureDataDir, type AppConfig, type DataDir } from "./config.ts";
 import type { JsonFileStore } from "./json-file.ts";
 import { Auth, RateLimiter } from "./auth.ts";
 import { acquireLock, SERVER_LOCK_FILE, type LockHandle } from "./lock.ts";
@@ -55,6 +57,12 @@ import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
+import {
+  ensureTermuxChannel,
+  termuxAvailable,
+  TERMUX_TIMEOUT_MS,
+  type ExecFile,
+} from "./notifications/termux.ts";
 import { createProfileTools } from "./agent/tools.ts";
 import { createReminders } from "./reminders/feed-reminder.ts";
 import {
@@ -66,6 +74,12 @@ import {
 /** Long enough to let task code notice its abort, short enough to beat the
  * launcher's 3 s SIGTERM -> SIGKILL ladder (src/launcher/supervisor.ts). */
 export const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
+
+/** The host notification command; a hung command must not hold the outbox. */
+const execFileAsync = promisify(execFile);
+const hostExec = async (file: string, args: readonly string[]): Promise<void> => {
+  await execFileAsync(file, [...args], { timeout: TERMUX_TIMEOUT_MS });
+};
 
 export const EXIT_SESSION_FAILED = 1;
 export const EXIT_BAD_CONFIG = 2;
@@ -613,15 +627,35 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       now: options.now ? () => new Date(options.now!()) : undefined,
     });
 
-    // P4-05: drain the intents committed by care actions and reminder tasks,
-    // once at boot and on every notification commit, with a retry timer for
-    // failed sends. It never fails a care write.
+    // P4-06: the host phone's Termux:API transport. Only the owner's intents go
+    // to it (the host is the owner's phone); outside Termux it is absent and
+    // those intents fall back to push/ntfy/in-app. The channel is created once;
+    // an invalid channel would make Android drop the notification silently.
+    let termux: { memberId: string; exec: ExecFile; channelReady: boolean } | undefined;
+    if (termuxAvailable()) {
+      try {
+        const config = await stores.config.read();
+        const host = activeMembers(config).find((member) => member.role === "owner");
+        if (host) {
+          const channelReady = await ensureTermuxChannel(hostExec);
+          termux = { memberId: host.id, exec: hostExec, channelReady };
+          logger.info("host notifications use Termux:API", { channel: channelReady, member: host.id });
+        }
+      } catch (error) {
+        logger.warn("could not prepare the host notification channel; falling back to push and ntfy", { error });
+      }
+    }
+
+    // P4-05/P4-06: drain the intents committed by care actions and reminder
+    // tasks, once at boot and on every notification commit, with a retry timer
+    // for failed sends. It never fails a care write.
     outbox = startNotificationOutbox({
       harness: opened.harness,
       context,
       push: stores.push,
       logger,
       now: options.now ? () => new Date(options.now!()) : undefined,
+      ...(termux !== undefined ? { termux } : {}),
     });
 
     try {
@@ -656,6 +690,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         bus,
         submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
+        notificationLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),
         allowedOrigins: () => bindOrigins(options.host, boundPort),
         logger,
         push: stores.push,
