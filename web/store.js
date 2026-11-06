@@ -10,6 +10,7 @@ export const ROUTES = [
   { id: "calendar", label: "Calendar", view: "Calendar" },
   { id: "pup", label: "Pup", view: "Pup profile" },
   { id: "agent", label: "Agent", view: "Shared thread" },
+  { id: "notifications", label: "Notifications", view: "Notification centre" },
   { id: "settings", label: "Settings", view: "Settings" },
 ];
 

@@ -18,7 +18,7 @@
 
 import { createHash } from "node:crypto";
 import type { NotificationIntentCategory } from "../../shared/notifications.ts";
-import { NOTIFICATION_TITLES } from "../../shared/notifications.ts";
+import { NOTIFICATION_PRIORITY, NOTIFICATION_TITLES } from "../../shared/notifications.ts";
 
 export const TERMUX_CHANNEL_ID = "pupkeep";
 export const TERMUX_CHANNEL_NAME = "Pupkeep";
@@ -35,7 +35,7 @@ export function termuxAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
 
 /** Priority copy: feeds and vet visits are the ones a caregiver must not miss. */
 export function termuxPriority(category: NotificationIntentCategory): "default" | "high" {
-  return category === "appointment" || category === "feed_overdue" ? "high" : "default";
+  return NOTIFICATION_PRIORITY[category];
 }
 
 /** A stable Android notification id derived from the server's dedupe key. */

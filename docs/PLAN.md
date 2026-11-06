@@ -1487,7 +1487,9 @@ displayed but not pushed in v1.
   `high` 4, `max` 5) and never on extra words. `Click` points at the private
   Tailscale URL, so the partner can act on a notification while the app stays
   unexposed; the topic itself is a bearer secret in `~/.pupkeep` (`0600`), logged
-  only as a prefix. ntfy.sh stores the text for 12 h, so category-only is a
+  only as a prefix. P4-06 sends **no** `Click` header: the app has no public
+  origin configured, and a link to an unknown host would be worse than a
+  tap-through to the app; P4-09 owns adding one. ntfy.sh stores the text for 12 h, so category-only is a
   property of the payload and not of the reader.
 - **The partner’s phone is an iPhone**, where ntfy is tap-through only (no
   `Actions` buttons), so no decision may live in a notification — approvals stay
@@ -4138,11 +4140,14 @@ process kill; both clients see the same state; the partner notification
 - [x] **P4-06** Notification centre, prefs, test notification, badge; host
       Termux:API; ntfy recommended for the partner. The **claim** that it
       delivers to the partner is gated on P0-10 (§2.3); the code is not.
-      **Landed:** the notification routes (`GET /api/notifications`,
-      `GET /api/notifications/unread`, `POST /api/notifications/read`,
-      `POST /api/notifications/test`, `PATCH /api/notifications/prefs`,
-      `PUT /api/notifications/ntfy`) with per-member items, an idempotent read
-      mark and `push.json`-stored prefs/topic; `web/views/notifications.js` (the
+      **Landed:** the notification routes (`GET /api/notifications` returning a
+      reader projection of the member's items, `GET /api/notifications/unread`,
+      `POST /api/notifications/read`, `POST /api/notifications/test`,
+      `GET/PATCH /api/notifications/prefs`, `PUT /api/notifications/ntfy`) with
+      per-member items, an idempotent read mark and `push.json`-stored
+      prefs/topic; `app.notifications` is in the care-frame watcher, so a
+      reminder, a test or a read commit refreshes the centre and badge without a
+      reload; `web/views/notifications.js` (the
       centre) and `web/notifications.js` (helpers + the count-only badge read),
       the shell route/nav badge and the Settings notification card (push
       enable/disable through `web/push.js`, category prefs, ntfy topic, test
@@ -4171,13 +4176,25 @@ process kill; both clients see the same state; the partner notification
       **the partner-delivery claim stays unproven**: the Settings copy says the
       device check is separate (P0-10), and this task shipped no partner-device
       test by instruction.
-      **Verified:** 4 route tests in `test/push.test.ts` (the per-member centre,
-      idempotent read/all, the test intent, prefs/ntfy storage and clearing), 5
-      outbox tests (ntfy-only delivery, push→ntfy fallback + failure recording,
-      Termux delivery with its generic content and stable id, the channel
-      fallback) and 5 client tests (badge/count/prefs bodies, the household-zone
-      time, the centre render, mark-read, the Settings card). The suite is
-      691/691 and `npm run typecheck` passes.
+      **Verified:** 5 route tests in `test/push.test.ts` (the per-member
+      centre's projection, idempotent read/all, the test intent and its replay,
+      prefs/ntfy storage and clearing, the care frame on a notification commit),
+      7 outbox tests (ntfy-only delivery, push→ntfy fallback + failure recording,
+      Termux with and without its channel, a blocked key pair staying pending)
+      and 6 client tests (badge/count/prefs bodies, the household-zone time
+      including the post-midnight boundary, the centre render, mark-read, the
+      Settings card, the notifications hash route). The suite is 694/694 and
+      `npm run typecheck` passes.
+      **Review follow-ups:** notification commits now emit the care frame (the
+      frame is a signal and equal revisions still apply, so the centre re-reads
+      and the badge updates); the centre and Settings read separate resources
+      (items projected without delivery internals vs. prefs/topic); a missing
+      notification document is an empty centre rather than a 503; a
+      subscription-only member with an unreadable key store stays **pending**
+      instead of burning its attempts; a retried test press returns its committed
+      item; the test route is rate-limited; the item time uses one zone for date
+      and clock (the post-midnight boundary); and the category priority table is
+      shared by ntfy and Termux.
       **Not verified / carried out:** real ntfy delivery to the partner's iPhone
       and the host's real `termux-notification` are device checks (P0-10 and the
       phone runbook, P4-09) and were **not** run here; Web Push over the quick

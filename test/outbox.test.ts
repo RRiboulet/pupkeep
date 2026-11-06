@@ -454,6 +454,41 @@ test("a Termux notification omits the channel when it was not created", async ()
   });
 });
 
+test("a subscription-only member stays pending when the key pair cannot be prepared", async () => {
+  await withOutbox(async (fixture) => {
+    const owner = makeSubscription("owner");
+    // A push.json that cannot be written: read answers, update throws.
+    const config = {
+      schemaVersion: 1 as const,
+      vapid: null,
+      subscriptions: [owner.record],
+      prefs: {},
+      ntfy: {},
+    };
+    const readOnly = {
+      read: async () => config,
+      update: async () => {
+        throw new Error("read-only");
+      },
+      path: "push.json",
+    } as unknown as typeof fixture.push;
+    await fixture.seed([intent()]);
+    const calls = capture();
+    const result = await drainNotificationOutbox({
+      store: fixture.opened.harness,
+      context,
+      push: readOnly,
+      now: NOW,
+      transport: calls.transport,
+    });
+    assert.equal(result.skipped, 1, "a key-store problem is not a delivery failure");
+    assert.equal(calls.calls.length, 0);
+    const stored = (await fixture.opened.harness.snapshot(NotificationsDoc, context))?.items as NotificationIntent[];
+    assert.equal(stored[0]!.delivery.state, "pending");
+    assert.equal(stored[0]!.delivery.attempts, 0, "no attempt is burned");
+  });
+});
+
 test("no VAPID pair leaves intents pending rather than failing them", async () => {
   await withOutbox(async (fixture) => {
     await fixture.seed([intent()]);

@@ -14,7 +14,7 @@ import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
 import { NetworkError, newIdempotencyKey, requestJson } from "../client.js";
 import { getState, setState, subscribe } from "../store.js";
-import { badgeText, categoryOptions, intentWhenText, unreadOf } from "../notifications.js";
+import { badgeText, intentWhenText, unreadOf } from "../notifications.js";
 
 const html = htm.bind(h);
 
@@ -25,11 +25,8 @@ export class Notifications extends Component {
   state = {
     items: [],
     unread: 0,
-    prefs: null,
-    ntfy: null,
     loading: true,
     error: null,
-    message: null,
     busy: null,
     seenCare: -1,
   };
@@ -74,8 +71,6 @@ export class Notifications extends Component {
     this.setState({
       items: result.body.items ?? [],
       unread: result.body.unread ?? unreadOf(result.body.items),
-      prefs: result.body.prefs ?? null,
-      ntfy: result.body.ntfy ?? null,
       loading: false,
       error: null,
     });
@@ -85,7 +80,7 @@ export class Notifications extends Component {
   /** Mark one item (or all) read; the server answers the new unread count. */
   async markRead(id, all = false) {
     if (this.state.busy !== null) return;
-    this.setState({ busy: all ? "all" : id, message: null, error: null });
+    this.setState({ busy: all ? "all" : id, error: null });
     let result;
     try {
       result = await this.request("/api/notifications/read", {
@@ -153,9 +148,6 @@ export class Notifications extends Component {
         </p>
         <div class="form__status">
           ${this.state.error ? html`<p class="notice notice--error" role="alert">${this.state.error}</p>` : null}
-          ${!this.state.error && this.state.message
-            ? html`<p class="notice" role="status">${this.state.message}</p>`
-            : null}
         </div>
         <div class="form__actions">
           <button

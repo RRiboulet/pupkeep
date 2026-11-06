@@ -386,7 +386,7 @@ export function parsePush(raw: unknown): PushConfig | undefined {
     if (!ntfyRecord || typeof ntfyRecord.topic !== "string") return undefined;
     // A short topic is guessable on a public relay — and it also escapes the
     // log scrubber's opaque-value floor.
-    if (!NTFY_TOPIC.test(ntfyRecord.topic)) return undefined;
+    if (!isNtfyTopic(ntfyRecord.topic)) return undefined;
     ntfy[memberId] = { topic: ntfyRecord.topic };
   }
 

@@ -22,6 +22,7 @@ import { Pup } from "./views/pup.js";
 import { Agent } from "./views/agent.js";
 import { Settings } from "./views/settings.js";
 import { Notifications } from "./views/notifications.js";
+import { badgeText } from "./notifications.js";
 
 const html = htm.bind(h);
 
@@ -45,7 +46,7 @@ const NAV_ITEMS = [
 
 function Nav({ route }) {
   const unread = Number(getState().unreadNotifications ?? 0);
-  const badge = unread <= 0 ? "" : unread > 9 ? "9+" : String(unread);
+  const badge = badgeText(unread);
   return html`
     <nav class="bottom-nav" aria-label="Primary">
       ${NAV_ITEMS.map(

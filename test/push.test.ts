@@ -46,6 +46,8 @@ import {
   sendWebPush,
 } from "../src/server/push/web-push.ts";
 import { startTestApp } from "./support/app.ts";
+import { watchProfileState } from "../src/server/agent/state.ts";
+import { createLogger } from "../src/server/log.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -344,6 +346,31 @@ test("a subscription is stored per endpoint and member, and only its owner can r
   }
 });
 
+test("a notification commit publishes a care frame, so the centre and badge refresh", async () => {
+  const fixture = await startPushApp();
+  try {
+    const frames: unknown[] = [];
+    const watch = watchProfileState({
+      harness: fixture.app.app,
+      context: BACKGROUND_CONTEXT,
+      bus: { publishState: (profile: unknown) => frames.push(profile) },
+      logger: createLogger({ scope: "test", sink: () => undefined }),
+    });
+    try {
+      await seedIntents(fixture, [notice()]);
+      const deadline = Date.now() + 2000;
+      while (frames.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.ok(frames.length > 0, "app.notifications is one of the documents behind the care frame");
+    } finally {
+      watch.stop();
+    }
+  } finally {
+    await fixture.stop();
+  }
+});
+
 // --- the notification centre (P4-06) ---------------------------------------
 
 import { NotificationsDoc } from "../src/server/domain/docs.ts";
@@ -401,11 +428,17 @@ test("the centre lists only the caller's intents, newest first, with prefs and t
       "the caller's items, newest first, and never another member's",
     );
     assert.equal(body.unread, 2);
-    assert.deepEqual(body.prefs, {
-      enabled: true,
-      categories: ["appointment", "feed_overdue", "fed", "approval", "test"],
+    assert.equal("prefs" in body, false, "the centre is not the Settings resource");
+    assert.equal("ntfy" in body, false, "the bearer topic is not in the item list");
+
+    const settings = await fetch(`${fixture.url}/api/notifications/prefs`, {
+      headers: { Cookie: `${SESSION_COOKIE}=${fixture.owner}` },
     });
-    assert.equal(body.ntfy, null);
+    assert.equal(settings.status, 200);
+    assert.deepEqual(await settings.json(), {
+      prefs: { enabled: true, categories: ["appointment", "feed_overdue", "fed", "approval", "test"] },
+      ntfy: null,
+    });
 
     const partner = await getNotifications(fixture, fixture.partner);
     assert.deepEqual((partner.body.items as { id: string }[]).map((item) => item.id), ["theirs"]);
@@ -460,6 +493,14 @@ test("the test button commits a category-only intent for the caller", async () =
 
     const stored = await fixture.app.app.snapshot(NotificationsDoc, BACKGROUND_CONTEXT);
     assert.equal((stored?.items as NotificationIntent[]).length, 1);
+
+    // A retried press with the same key returns the committed item.
+    const retry = await post(fixture, "/api/notifications/test", fixture.partner, {});
+    assert.equal(retry.status, 200);
+    const replay = (await retry.json()) as { item: NotificationIntent; replayed: boolean };
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.item.id, body.item.id);
+    assert.equal((await fixture.app.app.snapshot(NotificationsDoc, BACKGROUND_CONTEXT))?.items.length, 1);
   } finally {
     await fixture.stop();
   }
@@ -519,8 +560,10 @@ test("preferences and the ntfy topic are stored per member through push.json", a
     });
     assert.equal(saved.status, 200);
     assert.deepEqual(await saved.json(), { topic });
-    const centre = await getNotifications(fixture, fixture.owner);
-    assert.equal(centre.body.ntfy, topic, "the member sees their own topic");
+    const settings = await fetch(`${fixture.url}/api/notifications/prefs`, {
+      headers: { Cookie: `${SESSION_COOKIE}=${fixture.owner}` },
+    });
+    assert.equal(((await settings.json()) as { ntfy: string }).ntfy, topic, "the member sees their own topic");
 
     const cleared = await fetch(`${fixture.url}/api/notifications/ntfy`, {
       method: "PUT",

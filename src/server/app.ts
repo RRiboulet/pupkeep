@@ -690,6 +690,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         bus,
         submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
+        notificationLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),
         allowedOrigins: () => bindOrigins(options.host, boundPort),
         logger,
         push: stores.push,

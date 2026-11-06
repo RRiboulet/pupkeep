@@ -99,6 +99,18 @@ export function notificationKey(...parts: readonly string[]): string {
   return parts.map((part) => encodeURIComponent(part)).join("|");
 }
 
+/**
+ * Urgency per category: appointments and overdue meals are the ones a caregiver
+ * must not miss. It rides on the transport's priority field (ntfy's header,
+ * Termux's `--priority`), never on extra words (§12.3).
+ */
+export const NOTIFICATION_PRIORITY: Readonly<Record<NotificationIntentCategory, "default" | "high">> = Object.freeze({
+  appointment: "high",
+  feed_overdue: "high",
+  fed: "default",
+  test: "default",
+});
+
 /** A fresh intent starts pending: nothing has been sent yet. */
 export function pendingDelivery(): NotificationDelivery {
   return { state: "pending", attempts: 0, lastAttemptAt: null };

@@ -12,17 +12,10 @@
 // always set a new topic.
 
 import type { NotificationIntentCategory } from "../../shared/notifications.ts";
-import { NOTIFICATION_TITLES } from "../../shared/notifications.ts";
+import { NOTIFICATION_PRIORITY, NOTIFICATION_TITLES } from "../../shared/notifications.ts";
 
 export const NTFY_BASE_URL = "https://ntfy.sh";
 export const NTFY_TIMEOUT_MS = 10_000;
-/** §12.3: urgency rides on the priority, never on extra words. */
-export const NTFY_PRIORITY: Readonly<Record<NotificationIntentCategory, "default" | "high">> = Object.freeze({
-  appointment: "high",
-  feed_overdue: "high",
-  fed: "default",
-  test: "default",
-});
 
 export type NtfyTransport = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -31,9 +24,8 @@ export type NtfySendResult =
   | { kind: "failed"; status: number | null; error?: string };
 
 export type NtfyOptions = {
-  readonly baseUrl?: string;
+  /** Test seam; ntfy.sh otherwise. */
   readonly transport?: NtfyTransport;
-  readonly timeoutMs?: number;
 };
 
 /**
@@ -45,18 +37,17 @@ export async function sendNtfy(
   category: NotificationIntentCategory,
   options: NtfyOptions = {},
 ): Promise<NtfySendResult> {
-  const base = options.baseUrl ?? NTFY_BASE_URL;
   const transport = options.transport ?? ((url, init) => fetch(url, init));
   const title = NOTIFICATION_TITLES[category];
   try {
-    const response = await transport(`${base.replace(/\/$/, "")}/${encodeURIComponent(topic)}`, {
+    const response = await transport(`${NTFY_BASE_URL}/${encodeURIComponent(topic)}`, {
       method: "POST",
       headers: {
         Title: title,
-        Priority: NTFY_PRIORITY[category],
+        Priority: NOTIFICATION_PRIORITY[category],
       },
       body: title,
-      signal: AbortSignal.timeout(options.timeoutMs ?? NTFY_TIMEOUT_MS),
+      signal: AbortSignal.timeout(NTFY_TIMEOUT_MS),
     });
     return response.status >= 200 && response.status < 300
       ? { kind: "sent", status: response.status }

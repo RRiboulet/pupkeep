@@ -1644,6 +1644,9 @@ test("the badge, the unread count and the prefs body are derived, never stored",
 
 test("an intent's time is the household zone, not the device's", () => {
   assert.equal(intentWhenText("2026-10-30T08:00:00.000Z", "Europe/Paris"), "30 Oct 2026 09:00");
+  // Just after Paris midnight the UTC date is still yesterday: the date and the
+  // time must come from the same zone.
+  assert.equal(intentWhenText("2026-01-01T23:00:00.000Z", "Europe/Paris"), "2 Jan 2026 00:00");
   assert.equal(intentWhenText("nonsense", "Europe/Paris"), "");
 });
 
@@ -1725,4 +1728,10 @@ test("settings renders the notification card and saves prefs and an empty topic"
   assert.deepEqual(calls[0].options.body, { enabled: true, categories: ["fed"] });
   await settings.saveNtfy("");
   assert.deepEqual(calls[1].options.body, { topic: null });
+});
+
+test("the notifications route is a real hash route, not a fallback to Today", async () => {
+  const { hashRoute } = await import("../web/store.js");
+  assert.equal(hashRoute("#notifications"), "notifications");
+  assert.equal(hashRoute("#settings"), "settings");
 });

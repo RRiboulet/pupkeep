@@ -22,6 +22,16 @@ import { Setup } from "./setup.js";
 
 const html = htm.bind(h);
 
+/** The push helper's reason codes, as a caregiver reads them. */
+const PUSH_REASONS = {
+  push_unsupported: "This page cannot receive Web Push (it needs HTTPS).",
+  permission_denied: "The browser did not grant notification permission.",
+  signed_out: "Please sign in again.",
+  key_unavailable: "The server has no Web Push key yet; try again after a restart.",
+  subscribe_failed: "The browser could not subscribe this device.",
+  save_failed: "The subscription could not be saved.",
+};
+
 export class Settings extends Component {
   state = {
     /** The member's prefs from the server, or null before the read. */
@@ -33,7 +43,6 @@ export class Settings extends Component {
     supported: false,
     pushBusy: false,
     pushMessage: null,
-    loading: true,
     busy: null,
     message: null,
     error: null,
@@ -48,24 +57,23 @@ export class Settings extends Component {
   async load() {
     let result;
     try {
-      result = await this.request("/api/notifications");
+      result = await this.request("/api/notifications/prefs");
     } catch (error) {
-      this.setState({ loading: false, error: error instanceof NetworkError ? error.message : "Could not load your notification settings." });
+      this.setState({ error: error instanceof NetworkError ? error.message : "Could not load your notification settings." });
       return;
     }
     if (result.status === 401) {
-      this.setState({ loading: false, error: "Please sign in again." });
+      this.setState({ error: "Please sign in again." });
       return;
     }
     if (!result.ok || !result.body) {
-      this.setState({ loading: false, error: "Could not load your notification settings." });
+      this.setState({ error: "Could not load your notification settings." });
       return;
     }
     this.setState({
       prefs: result.body.prefs ?? { enabled: true, categories: [] },
       ntfy: result.body.ntfy ?? null,
       ntfyDraft: result.body.ntfy ?? "",
-      loading: false,
       error: null,
     });
   }
@@ -167,7 +175,12 @@ export class Settings extends Component {
     const result = this.props?.push
       ? await this.props.push({ request: this.request })
       : await enablePush({ request: this.request });
-    this.setState({ pushBusy: false, pushMessage: result.reason ?? "This device is subscribed." });
+    this.setState({
+      pushBusy: false,
+      pushMessage: result.reason
+        ? PUSH_REASONS[result.reason] ?? "Notifications could not be enabled."
+        : "This device is subscribed.",
+    });
   }
 
   renderPush() {

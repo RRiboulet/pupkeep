@@ -10,7 +10,7 @@
 // without loading the list. Like `meals.js`, this module imports no Preact.
 
 import { requestJson } from "./client.js";
-import { dateText, localTimeText } from "./clock.js";
+import { dateText, localDate, localTimeText } from "./clock.js";
 import { getState, setState } from "./store.js";
 
 /** §12.1's vocabulary as a caregiver sees it. */
@@ -58,12 +58,17 @@ export function ntfyBody(topic) {
   return { topic: text === "" ? null : text };
 }
 
-/** When an intent was made, in the household zone (never the device's). */
+/**
+ * When an intent was made, in the household zone (never the device's). The date
+ * must come from the same zone as the time: after local midnight in a zone ahead
+ * of UTC, the UTC date is still yesterday.
+ */
 export function intentWhenText(createdAt, timezone) {
   if (typeof createdAt !== "string") return "";
   const at = new Date(createdAt);
   if (Number.isNaN(at.getTime())) return "";
-  const date = dateText(at.toISOString().slice(0, 10));
+  const day = localDate(at, timezone) ?? at.toISOString().slice(0, 10);
+  const date = dateText(day);
   const time = localTimeText(at, timezone);
   return /^\d{2}:\d{2}$/.test(time) ? `${date} ${time}` : date;
 }
@@ -89,7 +94,3 @@ export function badgeText(unread) {
   return count > 9 ? "9+" : String(count);
 }
 
-/** The current badge number (0 when the store has not read one yet). */
-export function unreadBadge() {
-  return badgeText(getState().unreadNotifications ?? 0);
-}

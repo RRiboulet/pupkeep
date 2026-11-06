@@ -37,6 +37,10 @@ const PROFILE_KINDS = new Set([
   "app.training",
   "app.showers",
   "app.calendar",
+  // P4-06: a reminder or a mark-read changes no care document, but the centre
+  // and the nav badge must refresh without a reload. The frame is a signal; the
+  // profile it carries is unchanged and still applied (equal revisions count).
+  "app.notifications",
 ]);
 
 export interface ProfileStateOptions {
