@@ -1,7 +1,7 @@
 # Todo guide — how to work the Pupkeep plan
 
 **Status:** Phase 3 complete on `main` through P3-08, and Phase 4 through
-P4-08. Phase 1 is complete on
+P4-09. Phase 1 is complete on
 `main` through P1-14, and G1 is covered by the suite (`test/e2e.test.ts` is the
 slice end to end, `test/setup.test.ts` the first-run setup). Phase 2 is complete
 on `main` through P2-09 (`app.feeding`, the feed service, routes, tools and UI,
@@ -51,8 +51,13 @@ is complete: `app.usage` is a baseline, not a ledger (the month's spend is
 `harness.usage()` minus where the month began), a paid model's message is refused
 verbatim at the cap while a free one runs, `secrets.json` is the only credential
 source (no environment), and the provider catalog, the allowlist probe and the
-picker are served by `/api/models/*` with the Settings card. The next task is
-**P4-09** (daily access and notification runbook). P0-03/P0-08/P0-10
+picker are served by `/api/models/*` with the Settings card. **P4-09** is complete:
+`docs/access-and-notifications.md` is the caregivers' copy (daily tailnet access,
+the one-time invite, the three notification paths with ntfy onboarding, and the
+quick-tunnel HTTPS/PWA/push test), the Settings invite card makes its day-one
+step real, and the guide states what is not yet true (the approval card, P0-10's
+partner delivery, no named tunnel). The next task is **P4-10** (the Phase 4 test
+slice). P0-03/P0-08/P0-10
 remain device-gated partner checks and do not block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`

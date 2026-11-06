@@ -3,17 +3,22 @@
 A shared, agent-operated puppy care app for two caregivers, built on
 [Pi Durable](https://github.com/earendil-works/pi).
 
-> **Status: Phase 1 complete — the vertical slice is in place.** Phase 0's
-> spikes are complete and their go/no-go is recorded in
-> [`docs/PLAN.md`](docs/PLAN.md) §2.3. The launcher, auth, data files, harness,
-> storage, encrypted backup, devcontainer, shared household thread, puppy
-> profile and the first-run setup wizard (timezone, puppy, meal times) are in
-> place, and every pull request typechecks and runs the full test suite
-> (`.github/workflows/ci.yml`). Phase 2 (feeding and walks) is under way; the phone
-> runbook and its Termux scripts are in place, but stay a **draft** until
-> P5-01/P5-04 walk them on a phone. The source of truth is
-> [`docs/PLAN.md`](docs/PLAN.md);
-> [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says how to pick the next task.
+> **Status: Phase 4 in progress — P4-01 to P4-09 are done, P4-10 (the Phase 4
+> test slice) is next.** Phases 1–3 are complete: the launcher, auth, data files,
+> the durable harness, encrypted backup, the devcontainer, the shared household
+> thread, the profile and setup wizard, feeding, walks, growth, milestones,
+> showers, the calendar with its reminder tasks, the notification outbox/centre,
+> approvals with a caregiver's confirmation, and the monthly budget with the
+> model picker. Every pull request typechecks and runs the full test suite
+> (`.github/workflows/ci.yml`). The source of truth is
+> [`docs/PLAN.md`](docs/PLAN.md); [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says
+> how to pick the next task.
+>
+> Two guides, on purpose: [`docs/PHONE-RUNBOOK.md`](docs/PHONE-RUNBOOK.md) is the
+> operator's copy for the host phone, and
+> [`docs/access-and-notifications.md`](docs/access-and-notifications.md) is the
+> caregivers' copy (daily access, invites, ntfy notifications, the HTTPS test
+> path). Both stay **drafts** until P5-01/P5-04 walk them on a phone.
 >
 > Three Phase 0 checks stay open because they need the partner's iPhone: the
 > partner reach, PWA/Web Push and ntfy receipts carried by **P0-10**
