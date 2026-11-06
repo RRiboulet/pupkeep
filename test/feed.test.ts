@@ -79,6 +79,7 @@ function intent(overrides: Partial<NotificationIntent> = {}): NotificationIntent
     body: 'Alex fed "Breakfast" at 13:00',
     createdAt: NOON.toISOString(),
     readAt: null,
+    delivery: { state: "pending", attempts: 0, lastAttemptAt: null },
     ...overrides,
   };
 }
@@ -125,7 +126,7 @@ async function intents(harness: OpenedHarness["harness"]): Promise<NotificationI
 
 test("an intent is a category title, in-app copy, a dedupe key and a reader", () => {
   assert.deepEqual(parseNotificationIntent(intent()), intent());
-  assert.deepEqual(emptyNotifications(), { schemaVersion: 1, items: [], createdAt: "" });
+  assert.deepEqual(emptyNotifications(), { schemaVersion: 2, items: [], createdAt: "" });
   // `emptyNotifications()` is the in-memory initial (no `createdAt` yet); a
   // stored document always has one, which is what the parser requires.
   const stored = { ...emptyNotifications(), createdAt: NOON.toISOString() };
@@ -133,8 +134,15 @@ test("an intent is a category title, in-app copy, a dedupe key and a reader", ()
 
   const bad: Array<[string, Record<string, unknown>]> = [
     ["unknown key", { ...intent(), extra: true }],
-    ["a category this build cannot write yet", { ...intent(), category: "appointment" }],
+    ["a category only a later task writes", { ...intent(), category: "approval" }],
     ["unknown category", { ...intent(), category: "walk_reminder" }],
+    ["missing delivery", { ...intent(), delivery: undefined }],
+    ["unknown delivery state", { ...intent(), delivery: { state: "queued", attempts: 0, lastAttemptAt: null } }],
+    ["sent without a timestamp", { ...intent(), delivery: { state: "sent", attempts: 1, lastAttemptAt: null } }],
+    [
+      "a pending item with a sent timestamp",
+      { ...intent(), delivery: { state: "pending", attempts: 0, lastAttemptAt: null, sentAt: NOON.toISOString() } },
+    ],
     ["empty body", { ...intent(), body: "   " }],
     ["body with a newline", { ...intent(), body: "fed\nBreakfast" }],
     ["bad instant", { ...intent(), createdAt: "2026-02-30T00:00:00.000Z" }],
@@ -158,6 +166,32 @@ test("an intent is a category title, in-app copy, a dedupe key and a reader", ()
   );
 });
 
+test("a version-1 notification document migrates to pending intents", () => {
+  const migrate = NotificationsDoc.definition.migrate;
+  assert.ok(migrate);
+  const legacy = {
+    schemaVersion: 1,
+    createdAt: NOON.toISOString(),
+    items: [
+      {
+        id: "notice-1",
+        dedupeKey: "fed|2026-10-29|slot|slot-b|partner",
+        category: "fed",
+        userId: "partner",
+        title: NOTIFICATION_TITLES.fed,
+        body: "Alex fed Breakfast",
+        createdAt: NOON.toISOString(),
+        readAt: null,
+      },
+    ],
+  };
+  assert.throws(() => migrate(legacy as never, 0), /no migration/);
+  const migrated = migrate(legacy as never, 1);
+  assert.equal(migrated.schemaVersion, 2);
+  assert.deepEqual(migrated.items[0]?.delivery, { state: "pending", attempts: 0, lastAttemptAt: null });
+  assert.equal(migrated.items[0]?.body, "Alex fed Breakfast");
+});
+
 test("appendIntents drops a duplicate key and never prunes an unread item", () => {
   const first = intent();
   assert.deepEqual(appendIntents([], [first]), [first]);
@@ -173,7 +207,16 @@ test("appendIntents drops a duplicate key and never prunes an unread item", () =
   assert.equal(appendIntents([], unread).length, unread.length, "unread items are never dropped");
 
   // Among read items the newest NOTIFICATION_LIMIT win; unread survive regardless.
-  const read = unread.map((item) => ({ ...item, readAt: NOON.toISOString() }));
+  const read = unread.map((item) => ({
+    ...item,
+    readAt: NOON.toISOString(),
+    delivery: {
+      state: "sent" as const,
+      attempts: 1,
+      lastAttemptAt: NOON.toISOString(),
+      sentAt: NOON.toISOString(),
+    },
+  }));
   const kept = appendIntents([], [...read, first]);
   assert.equal(kept.length, NOTIFICATION_LIMIT + 1);
   assert.ok(kept.includes(first), "the unread intent survives");
@@ -187,6 +230,31 @@ test("appendIntents drops a duplicate key and never prunes an unread item", () =
     [first],
     "a zero limit still keeps the unread item",
   );
+
+  // A read item that has not been delivered is still owed; a failed one too.
+  const sent = [0, 1, 2].map((index) => ({ ...read[index]!, id: `sent-${index}` }));
+  const readPending = {
+    ...read[0]!,
+    id: "pending",
+    dedupeKey: "fed|pending-owed",
+    delivery: { state: "pending" as const, attempts: 0, lastAttemptAt: null },
+  };
+  const readFailed = {
+    ...read[1]!,
+    id: "failed",
+    dedupeKey: "fed|failed-owed",
+    delivery: {
+      state: "failed" as const,
+      attempts: 3,
+      lastAttemptAt: NOON.toISOString(),
+      lastError: "push 500",
+    },
+  };
+  assert.deepEqual(
+    appendIntents([], [...sent, readPending, readFailed], 1).map((item) => item.id),
+    ["sent-2", "pending", "failed"],
+    "owed items survive the cap, and only the newest delivered one is kept",
+  );
 });
 
 test("appendIntents never lets a limit that cannot bound the read items keep them", () => {
@@ -194,6 +262,13 @@ test("appendIntents never lets a limit that cannot bound the read items keep the
   const read = [1, 2].map((index) => ({
     ...intent({ id: `notice-r${index}`, dedupeKey: `fed|2026-10-29|slot|slot-${index}|partner` }),
     readAt: NOON.toISOString(),
+    // Delivered, so retention may drop it; a pending item would be owed.
+    delivery: {
+      state: "sent" as const,
+      attempts: 1,
+      lastAttemptAt: NOON.toISOString(),
+      sentAt: NOON.toISOString(),
+    },
   }));
   // `slice(-0)` is `slice(0)`, and a fractional or NaN limit also maps to `0`:
   // without the guard every read item would survive its retention window.

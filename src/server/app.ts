@@ -53,6 +53,8 @@ import { createTrainingTools } from "./agent/training-tools.ts";
 import { createShowerTools } from "./agent/shower-tools.ts";
 import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
+import { ensureVapid } from "./push/vapid.ts";
+import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
 import { createProfileTools } from "./agent/tools.ts";
 import { createReminders } from "./reminders/feed-reminder.ts";
 import {
@@ -405,6 +407,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
 
   let bus: ThreadBus | undefined;
   let profileState: ProfileStateWatch | undefined;
+  let outbox: NotificationOutboxWatch | undefined;
   const shutdown = (reason: "closed" | "failed"): Promise<AppEnd> => {
     if (stopping) return stopping;
     stopping = (async () => {
@@ -412,6 +415,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       // Tell the attached browsers to reattach before the sockets disappear;
       // they restart on a fresh connection instead of waiting out a dead SSE.
       profileState?.stop();
+      outbox?.stop();
       bus?.stop();
       // Stop accepting work before waiting for task code to return.
       if (listener) {
@@ -493,6 +497,17 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         count: bootstrapped.nameDrift.length,
       });
     }
+  }
+
+  // P4-05: the VAPID pair is generated once, before any subscription can ask
+  // for it. Failing to write push.json is reported; the app still serves, and a
+  // later request retries.
+  try {
+    await ensureVapid(stores.push);
+  } catch (error) {
+    logger.warn("could not prepare the Web Push key pair; push is unavailable until push.json is writable", {
+      error,
+    });
   }
 
   // P4-04: one commit that repairs the day's reminders and makes sure exactly
@@ -595,6 +610,17 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       now: options.now ? () => new Date(options.now!()) : undefined,
     });
 
+    // P4-05: drain the intents committed by care actions and reminder tasks,
+    // once at boot and on every notification commit, with a retry timer for
+    // failed sends. It never fails a care write.
+    outbox = startNotificationOutbox({
+      harness: opened.harness,
+      context,
+      push: stores.push,
+      logger,
+      now: options.now ? () => new Date(options.now!()) : undefined,
+    });
+
     try {
       const household = await readHousehold(thread.harness, thread.context);
       const model = pickInitialModel(await stores.models.read(), options.models);
@@ -629,6 +655,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
         allowedOrigins: () => bindOrigins(options.host, boundPort),
         logger,
+        push: stores.push,
         // The same clock the boot and the limiters use: a route's local date and
         // a test's fixed instant must come from one source (§8.1).
         now: options.now ?? Date.now,
@@ -640,6 +667,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     } catch (error) {
       logger.error("could not bind the HTTP listener", { error });
       profileState?.stop();
+      outbox?.stop();
       bus.stop();
       bus = undefined;
       const closeResult = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);

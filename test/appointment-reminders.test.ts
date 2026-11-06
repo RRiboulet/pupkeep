@@ -23,7 +23,7 @@ import { createRegistry, type TaskId } from "@earendil-works/pi-durable";
 import { emptyConfig, type MemberRecord } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
 import { cancelAppointment, createAppointment, readCalendar, updateAppointment } from "../src/server/domain/calendar.ts";
-import { HouseholdDoc } from "../src/server/domain/docs.ts";
+import { HouseholdDoc, NotificationsDoc } from "../src/server/domain/docs.ts";
 import { readHousehold } from "../src/server/domain/household.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import { createReminders } from "../src/server/reminders/feed-reminder.ts";
@@ -328,7 +328,7 @@ test("creating an appointment arms one background task per future offset on the 
   });
 });
 
-test("a due reminder commits its decision and writes nothing yet", async () => {
+test("a due reminder commits its decision and one intent per caregiver", async () => {
   await withAppointmentReminders(async (fixture) => {
     const created = await create(fixture);
     const reminder = created.reminders.find((ref) => ref.offsetMin === 60);
@@ -350,6 +350,20 @@ test("a due reminder commits its decision and writes nothing yet", async () => {
         dueAt: reminder.dueAt,
       },
     });
+    const intents = (await fixture.opened.harness.snapshot(NotificationsDoc, context))?.items ?? [];
+    assert.deepEqual(
+      intents.map((item) => [item.category, item.userId, item.title, item.delivery.state]),
+      [
+        ["appointment", "owner", "Appointment reminder", "pending"],
+        ["appointment", "partner", "Appointment reminder", "pending"],
+      ],
+      "both caregivers, category title only",
+    );
+    assert.deepEqual(intents.map((item) => item.dedupeKey), [
+      `appointment|appointment-1|60|${START_AT}|owner`,
+      `appointment|appointment-1|60|${START_AT}|partner`,
+    ]);
+    assert.match(intents[0]?.body ?? "", /"Vet visit" at 10:00 \(60 minutes before, Europe\/Paris\)\./);
   });
 });
 

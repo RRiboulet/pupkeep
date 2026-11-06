@@ -925,7 +925,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.training` | Milestones + status | Starter catalog (build-side, stable `catalog:` ids) + `custom:<uuid>` entries; `not_started`/`practicing`/`mastered`; `masteredAt` iff mastered; untouched milestones have no record |
 | `app.calendar` | Appointments | Household-local date + `HH:MM` time + a zone snapshot; the UTC instant is **derived on read**, never stored; reminder offsets and the armed reminder refs (task id, offset, due instant); status; revision |
 | `app.showers` | Shower history | A household-local date with the record; shampoo and notes are one line each; the next due date is **derived** from the latest shower plus `app.household.settings.showerIntervalDays`, never stored; append-only, two showers a day allowed, repeated ids refused |
-| `app.notifications` | Per-user in-app items + push outbox | Dedupe key, read state, delivery state |
+| `app.notifications` | Per-user in-app items + push outbox | Dedupe key (server-authoritative), read state, per-intent delivery state (pending/sent/failed/dropped, attempts, backoff) |
 | `app.activity` | Last N human-readable events | Built by domain functions, not the LLM |
 | `app.approvals` | Pending high-impact actions | Proposed by the agent; confirmed by a human; expiry |
 | `app.usage` | Derived monthly spend snapshot | `harness.usage()` is authoritative; this is a cache, never a second ledger |
@@ -966,7 +966,10 @@ P4-03's `app.calendar` reminder refs: schema 2 and document version 2, and
 `migrate` drops the bare `reminderTaskIds` and adds `reminders: []`, because
 P4-01 never armed a task. The seventh is P4-04's `app.household.feedPlannerTaskId`:
 schema 4 and document version 4, and `migrate` starts it null (no older build
-armed a planner; the next boot reconciliation arms one).
+armed a planner; the next boot reconciliation arms one). The eighth is P4-05's
+`app.notifications.delivery`: schema 2 and document version 2, and `migrate`
+gives every version-1 item a **pending** delivery, because P2-02 committed
+intents before anything could send them.
 
 ### 8.2 Host-side data
 
@@ -1422,8 +1425,8 @@ displayed but not pushed in v1.
 - **Appointment:** one `app.reminder` task per reminder offset. The task sleeps
   until due, checks the appointment still exists, is scheduled, and is unchanged
   (`rev`), writes notification intents, then becomes terminal. P4-03 implements
-  the task, the arming and the refs; the intent write lands with P4-05's task
-  version bump (the feed reminder's rule).
+  the task, the arming and the refs; P4-05's task version 2 writes the intents in
+  the terminal commit that re-reads the calendar.
 - **Feeding:** a daily planner task creates one reminder task per active slot for
   the day, due at slot time + delay. When it wakes, it checks whether the slot
   was fed; if yes, it exits; if not, it writes a reminder.
@@ -1461,13 +1464,18 @@ displayed but not pushed in v1.
 - The intent parser accepts only the categories the current build can deliver
   (`NOTIFICATION_INTENT_CATEGORIES` in the same module, `fed` in Phase 2);
   §12.1's vocabulary that settings may offer is wider, so a Phase 2 build
-  refuses an intent it could not deliver instead of storing it. P4-05 widens
-  the parsable set as delivery lands; the version bump covers catalog text and
-  the intent's shape, not the widening itself.
+  refuses an intent it could not deliver instead of storing it. P4-05 widened the
+  parsable set to `appointment`, `feed_overdue` and `fed`; the version bump
+  covered the catalog text and the intent's shape, not the widening itself.
 - A host delivery loop sends Web Push for pending items and publishes the same
   intent to the partner’s configured **ntfy** topic (generic text only), then
   marks sent/failed with retry/backoff. In-app items are immediately visible via
-  SSE; push/ntfy are best-effort.
+  SSE; push/ntfy are best-effort. P4-05 implements the Web Push half
+  (`src/server/notifications/outbox.ts` + `watch.ts`): a member with no device is
+  skipped (the in-app item remains), a disabled category is dropped, a 404/410
+  removes the subscription, and failures back off (1 min · 2^n, cap 30 min, five
+  attempts). Payloads carry the category title, the dedupe key as the display
+  `tag` and the app route — never the in-app body. P4-06 adds ntfy.
 - ntfy carries the **title and category text only**, from a shared constants
   module; urgency rides on the ntfy `priority` (P0-08 measured `default` 3,
   `high` 4, `max` 5) and never on extra words. `Click` points at the private
@@ -4059,13 +4067,61 @@ process kill; both clients see the same state; the partner notification
       has run it; and the planner's `plan` phase runs at most once a day plus a
       chunk, so a schedule saved after it on the same day is armed by the save
       itself, not by the planner.
-- [ ] **P4-05** `app.notifications` + outbox + Web Push + VAPID + service worker;
-      server dedupe key authoritative. Inherits P4-03's appointment task, whose
-      `due` result is decided from a snapshot read outside the terminal commit:
-      delivery must re-check the record/ref in the intent commit (a supersede can
-      land in that window), and the task's version bump adds the intent write. Inherits P2-02's version-1 document (the
-      committed intents, the category-only title catalog and the dedupe key) and
-      adds the outbox/delivery fields as version 2 with a `migrate`.
+- [x] **P4-05** `app.notifications` + outbox + Web Push + VAPID + service worker;
+      server dedupe key authoritative.
+      **Landed:** `NotificationDelivery` and `app.notifications` schema/document
+      version 2 with the migration (`pending` for every version-1 item);
+      `shared/notifications.ts` widened to the delivered categories
+      (`appointment`, `feed_overdue`, `fed`) with the frozen catalog and a
+      `notificationIntent` builder whose title can only come from that catalog;
+      `src/server/notifications/intents.ts` (the one append helper with the
+      parser backstop); `src/server/notifications/outbox.ts` (the drain and its
+      backoff/prefs/gone rules) and `watch.ts` (commit-triggered, boot and retry
+      passes); `src/server/push/vapid.ts` (key generation in `push.json`, ES256
+      JWT) and `web-push.ts` (aes128gcm encryption on `node:crypto`, the VAPID
+      header, TTL and send outcome); the routes `GET /api/push/public-key`,
+      `POST /api/push/subscriptions`, `POST /api/push/unsubscribe`; the service
+      worker's `push`/`notificationclick` handlers and `web/push.js`; the feed and
+      appointment reminder tasks bumped to version 2 with a `migrate`, writing
+      one intent per caregiver in the **terminal commit that re-reads the
+      documents** (closing the P4-03 window); the shell cache at
+      `pupkeep-shell-v9`.
+      Decisions: (1) **delivery is per intent, not per device.** The fan-out to a
+      member's devices is best-effort at send time; the intent is marked sent
+      once, so a second device does not double the item. (2) **at-least-once with
+      the dedupe key as the push `tag`.** Marking happens after the send, so a
+      crash between the two can resend; the tag collapses the duplicate. Marking
+      first could silently lose a reminder. (3) **a member with no device is
+      skipped, not failed**, and a disabled category is **dropped**, not deleted:
+      the in-app item stays in both cases (P4-06's ntfy is the partner's other
+      transport). (4) **404/410 removes the subscription**; any other failure is
+      recorded with attempts and a bounded error, retried with 1 min · 2^n backoff
+      (cap 30 min) up to five attempts. (5) **no Web Push dependency**: VAPID and
+      aes128gcm are implemented on `node:crypto`, and the tests decrypt a real
+      body with the subscription's private key. (6) **only the public VAPID key
+      is served**; the pair is generated at boot, persisted in `push.json` (the
+      deliberate backup exception) and never logged. (7) **the reminder tasks
+      write their intents in the terminal commit**, re-reading the household and
+      the schedule/calendar inside it, so a supersede in the P4-03 window is seen;
+      version-1 live tasks migrate unchanged. (8) **the dedupe key is
+      authoritative**; the push `tag` is display-only. (9) **P2-09's carried
+      decision:** `due` decisions a version-1 task committed before delivery
+      existed are **not** backfilled — they were never delivered, and the
+      pre-release build has no production household to lose.
+      **Verified:** 6 tests in `test/push.test.ts` (a real P-256 pair and one
+      persisted pair, the JWT's claims and signature, an aes128gcm round trip,
+      send headers/outcomes, and the three routes with their ownership rules),
+      9 in `test/outbox.test.ts` (fan-out, skipped/dropped, 410 removal, backoff
+      and the attempt cap, no VAPID, a concurrent append, prefs defaults, an
+      ensureVapid pair), the reminder-intent assertions in
+      `test/reminders.test.ts` and `test/appointment-reminders.test.ts`, the
+      service worker's push/click tests in `test/pwa.test.ts`, 5 client tests for
+      `web/push.js`, and the version-1 migration in `test/feed.test.ts`. The suite
+      is 677/677 and `npm run typecheck` passes.
+      **Not verified / carried out:** ntfy delivery, the notification centre and
+      prefs UI, and the test button are P4-06; the real Web Push over the
+      quick tunnel is P4-09/G4 (it is not claimed on Tailscale HTTP); and no
+      phone or browser has received a push yet.
 - [ ] **P4-06** Notification centre, prefs, test notification, badge; host
       Termux:API; ntfy recommended for the partner. The **claim** that it
       delivers to the partner is gated on P0-10 (§2.3); the code is not.

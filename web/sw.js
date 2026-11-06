@@ -27,7 +27,7 @@
 // Web Push event handlers (push, notificationclick) arrive with the push
 // phase; the worker stays quiet about notifications until then.
 
-const VERSION = "pupkeep-shell-v8";
+const VERSION = "pupkeep-shell-v9";
 const CACHE = `pupkeep-static-${VERSION}`;
 
 // Relative to the worker's scope. Only minimum shell assets: the document,
@@ -48,6 +48,7 @@ const PRECACHE = [
   "./training.js",
   "./showers.js",
   "./calendar.js",
+  "./push.js",
   "./views/today.js",
   "./views/calendar.js",
   "./views/pup.js",
@@ -205,5 +206,74 @@ self.addEventListener("fetch", (event) => {
     caches
       .open(CACHE)
       .then((cache) => (IMMUTABLE.has(url.pathname) ? cacheFirst(cache, request) : networkFirst(cache, request))),
+  );
+});
+
+// --- Web Push (P4-05) -------------------------------------------------------
+//
+// The payload is `{ title, tag, url }`: the category-only title, the server's
+// dedupe key as the display tag, and the app route to open. The in-app body is
+// never sent to the push service (§14.3). The worker validates the shape itself
+// — a push service (or a crafted payload) is not trusted to send care text.
+//
+// `tag` collapses a duplicate send with the same key (the outbox is
+// at-least-once), so a retry after a crash replaces the notification instead of
+// showing two.
+
+const PUSH_TITLE_LIMIT = 80;
+const PUSH_DEFAULT_TITLE = "Pupkeep";
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+function pushContent(data) {
+  if (data === null || typeof data !== "object") return null;
+  const candidate = typeof data.title === "string" ? data.title.trim() : "";
+  // Category text only: a control character or an overlong title is not the
+  // server's catalog, so it falls back to the generic app name.
+  const title =
+    candidate !== "" && candidate.length <= PUSH_TITLE_LIMIT && !CONTROL.test(candidate)
+      ? candidate
+      : PUSH_DEFAULT_TITLE;
+  const tag = typeof data.tag === "string" && data.tag.length <= 300 ? data.tag : undefined;
+  const url = typeof data.url === "string" && data.url.startsWith("/") ? data.url : "/";
+  return { title, tag, url };
+}
+
+self.addEventListener("push", (event) => {
+  let payload = null;
+  try {
+    payload = event.data ? event.data.json() : null;
+  } catch {
+    payload = null;
+  }
+  const content = pushContent(payload);
+  if (content === null) return;
+  event.waitUntil(
+    self.registration.showNotification(content.title, {
+      tag: content.tag,
+      data: { url: content.url },
+      icon: "./icons/icon-192.png",
+      badge: "./icons/icon-192.png",
+      // The title is the whole text a push may carry; no body, no care detail.
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = event.notification.data && typeof event.notification.data.url === "string"
+    ? event.notification.data.url
+    : "/";
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clients) => {
+        for (const client of clients) {
+          if ("focus" in client) {
+            if (typeof client.navigate === "function") return client.navigate(url).then(() => client.focus());
+            return client.focus();
+          }
+        }
+        return self.clients.openWindow(url);
+      }),
   );
 });

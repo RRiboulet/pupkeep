@@ -24,12 +24,8 @@ import type { Context } from "@earendil-works/chord";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import type { FeedEvent, Feeding, MealSlot, NotificationIntent } from "../../shared/domain.ts";
 import { MEAL_SCHEDULE_RULE, parseFeedEvent, parseFeedEvents, parseMealSlots } from "../../shared/feeding.ts";
-import {
-  NOTIFICATION_TITLES,
-  appendIntents,
-  notificationKey,
-  parseNotificationIntents,
-} from "../../shared/notifications.ts";
+import { notificationIntent, notificationKey } from "../../shared/notifications.ts";
+import { appendNotificationIntents } from "../notifications/intents.ts";
 import { armFeedReminders } from "../reminders/schedule.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
@@ -291,33 +287,21 @@ export async function logFeed(store: DocStore, context: Context, input: FeedWrit
       const intents: NotificationIntent[] = [];
       for (const member of household.members) {
         if (actor.id !== null && member.id === actor.id) continue;
-        intents.push({
-          id: randomUUID(),
-          // Encoded parts joined by `|`, so two ids cannot run together into one
-          // key and silently drop an intent (§12.3).
-          dedupeKey: notificationKey("fed", localDate, ...subject.key, member.id),
-          category: "fed",
-          userId: member.id,
-          title: NOTIFICATION_TITLES.fed,
-          body,
-          createdAt: now.toISOString(),
-          readAt: null,
-        });
+        intents.push(
+          notificationIntent({
+            // Encoded parts joined by `|`, so two ids cannot run together into
+            // one key and silently drop an intent (§12.3).
+            dedupeKey: notificationKey("fed", localDate, ...subject.key, member.id),
+            category: "fed",
+            userId: member.id,
+            body,
+            now,
+          }),
+        );
       }
-      if (intents.length > 0) {
-        const notifications = await tx.doc(NotificationsDoc);
-        // Bootstrap seeds `createdAt`; a document that reached a write without
-        // going through boot (a hand-built harness, a partial restore) still gets
-        // a real one rather than storing an unparseable value.
-        if (notifications.createdAt === "") notifications.createdAt = now.toISOString();
-        const items = appendIntents(notifications.items, intents);
-        // Same backstop as the event list: a committed document the parser
-        // refuses is a boot failure, so validate before writing.
-        if (!parseNotificationIntents(items)) {
-          throw new DomainConflictError("that meal could not be logged; the notification text is too long");
-        }
-        notifications.items = items;
-      }
+      // Same backstop as the event list: a list the parser refuses rolls the
+      // whole feed back rather than storing a document boot cannot read.
+      await appendNotificationIntents(tx, intents, now);
 
       return { event: parsed };
     },

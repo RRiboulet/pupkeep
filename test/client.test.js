@@ -1492,3 +1492,110 @@ test("the calendar card saves with one key, keeps a stale draft and adopts the r
   assert.equal(calls.length, 0);
   assert.match(card.state.error, /5 to 720 minutes/);
 });
+
+// --- Web Push client (P4-05) -------------------------------------------------
+
+const { disablePush, enablePush, pushSupported, urlBase64ToUint8Array } = await import("../web/push.js");
+
+test("the VAPID base64url key becomes the bytes pushManager wants", () => {
+  assert.deepEqual([...urlBase64ToUint8Array("AQAB")], [1, 0, 1]);
+  assert.deepEqual([...urlBase64ToUint8Array("AQ")], [1], "missing padding is added");
+  assert.deepEqual([...urlBase64ToUint8Array("-_8")], [0xfb, 0xff], "URL-safe characters are mapped");
+});
+
+test("push support needs a secure context, a service worker and PushManager", () => {
+  const window = { PushManager: function PushManager() {} };
+  const navigator = { serviceWorker: {} };
+  assert.equal(pushSupported({ window, navigator, secure: true }), true);
+  assert.equal(pushSupported({ window, navigator, secure: false }), false, "Tailscale HTTP cannot subscribe");
+  assert.equal(pushSupported({ window: {}, navigator, secure: true }), false);
+  assert.equal(pushSupported({ window, navigator: {}, secure: true }), false);
+});
+
+test("enablePush subscribes and stores the browser's own subscription", async () => {
+  const calls = [];
+  const subscription = {
+    toJSON: () => ({ endpoint: "https://push.example/x", keys: { p256dh: "p".repeat(65), auth: "a".repeat(22) } }),
+    unsubscribe: async () => true,
+  };
+  const request = async (path, options) => {
+    calls.push({ path, options });
+    if (path === "/api/push/public-key") return { status: 200, ok: true, body: { publicKey: "AQAB" } };
+    return { status: 200, ok: true, body: { id: "sub-1" } };
+  };
+  const result = await enablePush({
+    request,
+    supported: true,
+    permission: async () => "granted",
+    registration: { pushManager: { subscribe: async (options) => {
+      assert.equal(options.userVisibleOnly, true);
+      assert.deepEqual([...options.applicationServerKey], [1, 0, 1]);
+      return subscription;
+    } } },
+  });
+  assert.equal(result.subscription, subscription);
+  assert.equal(calls[1].path, "/api/push/subscriptions");
+  assert.deepEqual(calls[1].options.body, subscription.toJSON() && {
+    endpoint: "https://push.example/x",
+    keys: { p256dh: "p".repeat(65), auth: "a".repeat(22) },
+  });
+  assert.equal(typeof calls[1].options.idempotencyKey, "string");
+
+  assert.deepEqual(await enablePush({ request, supported: false }), { reason: "push_unsupported" });
+  assert.deepEqual(
+    await enablePush({ request, supported: true, permission: async () => "denied" }),
+    { reason: "permission_denied" },
+  );
+});
+
+test("a save failure drops the browser subscription so a retry starts clean", async () => {
+  let unsubscribed = 0;
+  const subscription = {
+    toJSON: () => ({ endpoint: "https://push.example/x", keys: { p256dh: "p", auth: "a" } }),
+    unsubscribe: async () => {
+      unsubscribed += 1;
+      return true;
+    },
+  };
+  const request = async (path) => {
+    if (path === "/api/push/public-key") return { status: 200, ok: true, body: { publicKey: "AQAB" } };
+    return { status: 409, ok: false, body: { error: "nope" } };
+  };
+  const result = await enablePush({
+    request,
+    supported: true,
+    permission: async () => "granted",
+    registration: { pushManager: { subscribe: async () => subscription } },
+  });
+  assert.deepEqual(result, { reason: "save_failed" });
+  assert.equal(unsubscribed, 1);
+});
+
+test("disablePush removes the server record and unsubscribes the browser", async () => {
+  const calls = [];
+  let unsubscribed = 0;
+  const subscription = {
+    toJSON: () => ({ endpoint: "https://push.example/x", keys: { p256dh: "p", auth: "a" } }),
+    unsubscribe: async () => {
+      unsubscribed += 1;
+      return true;
+    },
+  };
+  const request = async (path, options) => {
+    calls.push({ path, options });
+    return { status: 200, ok: true, body: { removed: true } };
+  };
+  const result = await disablePush({
+    request,
+    registration: { pushManager: { getSubscription: async () => subscription } },
+  });
+  assert.deepEqual(result, { removed: true });
+  assert.equal(calls[0].path, "/api/push/unsubscribe");
+  assert.deepEqual(calls[0].options.body, { endpoint: "https://push.example/x" });
+  assert.equal(unsubscribed, 1);
+
+  assert.deepEqual(
+    await disablePush({ request, registration: { pushManager: { getSubscription: async () => null } } }),
+    { removed: false },
+  );
+});

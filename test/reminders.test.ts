@@ -9,9 +9,9 @@
 //     never a tool-owned task, never a model call;
 //   * re-saving the same schedule reuses the tasks (no double reminder), while a
 //     moved slot arms a new one and the old task no-ops when it wakes;
-//   * a wake on time reports `due` and writes nothing (delivery is P4), a fed
-//     slot is skipped, and a wake past the grace window is skipped rather than
-//     fired late in a burst.
+//   * a wake on time reports `due` and writes one in-app intent per caregiver
+//     (P4-05), a fed slot is skipped, and a wake past the grace window is
+//     skipped rather than fired late in a burst.
 
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -24,6 +24,7 @@ import { createRegistry, type TaskId } from "@earendil-works/pi-durable";
 import { emptyConfig, type AppConfig, type MemberRecord } from "../src/server/config.ts";
 import { installAppExtensions } from "../src/server/app.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
+import { notificationKey } from "../src/shared/notifications.ts";
 import {
   ActivityDoc,
   FeedingDoc,
@@ -611,7 +612,7 @@ test("a long wait sleeps in six-hour chunks and re-arms, never one twelve-hour h
   }, [DINNER]);
 });
 
-test("a reminder wakes at slot time plus the delay, reports due, and writes nothing", async () => {
+test("a reminder wakes at slot time plus the delay and writes one intent per caregiver", async () => {
   await withReminders(async ({ opened, clock, refs }) => {
     const breakfast = (await refs()).find((ref) => ref.slotId === "slot-a");
     assert.ok(breakfast);
@@ -621,8 +622,8 @@ test("a reminder wakes at slot time plus the delay, reports due, and writes noth
 
     opened.harness.resume();
     clock.advanceTo(BREAKFAST_DUE);
-    // The outcome is the decision P4 turns into a notification intent; until
-    // delivery lands, nothing else may be written.
+    // The outcome is the decision; the same terminal commit writes the in-app
+    // intents, one per caregiver, and nothing else.
     assert.deepEqual(await resultOf(opened.harness, breakfast.taskId, clock), {
       kind: "due",
       slotId: "slot-a",
@@ -633,7 +634,23 @@ test("a reminder wakes at slot time plus the delay, reports due, and writes noth
     assert.deepEqual(await opened.harness.snapshot(HouseholdDoc, context), householdBefore);
     assert.deepEqual(await opened.harness.snapshot(FeedingDoc, context), feedingBefore);
     assert.deepEqual(await opened.harness.snapshot(ActivityDoc, context), activityBefore);
-    assert.deepEqual((await opened.harness.snapshot(NotificationsDoc, context))?.items, [], "delivery is P4");
+    const intents = (await opened.harness.snapshot(NotificationsDoc, context))?.items ?? [];
+    assert.deepEqual(
+      intents.map((item) => [item.category, item.userId, item.title, item.delivery.state]),
+      [
+        ["feed_overdue", "owner", "A meal is overdue", "pending"],
+        ["feed_overdue", "partner", "A meal is overdue", "pending"],
+      ],
+      "both caregivers, category text only, delivery owed",
+    );
+    assert.deepEqual(
+      intents.map((item) => item.dedupeKey),
+      [
+        notificationKey("feed_overdue", "2026-10-29", "slot", "slot-a", "owner"),
+        notificationKey("feed_overdue", "2026-10-29", "slot", "slot-a", "partner"),
+      ],
+    );
+    assert.match(intents[0]?.body ?? "", /Breakfast was not logged by 07:15\./);
 
     // Dinner's task was untouched by breakfast's wake.
     const dinner = (await refs()).find((ref) => ref.slotId === "slot-b");
@@ -664,6 +681,12 @@ test("a slot that was already fed is skipped, not reminded", async () => {
       localDate: "2026-10-29",
       byLabel: "Alex",
     });
+    const intents = (await opened.harness.snapshot(NotificationsDoc, context))?.items ?? [];
+    assert.equal(
+      intents.filter((item) => item.category === "feed_overdue").length,
+      0,
+      "a fed slot is not an overdue reminder",
+    );
   });
 });
 
