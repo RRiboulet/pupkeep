@@ -148,8 +148,10 @@ test("get_context reports the open walk and no longer lists walks as untracked",
     await start.execute({}, toolApi(fixture, conversationId, "task-start"), context);
     const after = resultText(await getContext.execute({}, toolApi(fixture, conversationId), context));
     assert.match(after, /Walk: open, started by "Household" at 08:00 \(under a minute ago\)/);
-    // Growth left that list with P3-03 and showers with P3-07; appointments stay named.
-    assert.match(after, /Not tracked by this build yet: appointments$/m);
+    // Growth left that list with P3-03, showers with P3-07 and appointments
+    // with P4-02; nothing is untracked any more, so the line is gone entirely.
+    assert.doesNotMatch(after, /Not tracked by this build yet/);
+    assert.match(after, /^Next appointment: none scheduled\.$/m);
   } finally {
     await fixture.stop();
   }

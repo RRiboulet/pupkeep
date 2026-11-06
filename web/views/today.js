@@ -28,6 +28,7 @@ import { pendingSave } from "../profile-form.js";
 import { getState, subscribe } from "../store.js";
 import { feedTimeText, localDate, mealClock, mealRows } from "../meals.js";
 import { correctedNow, timerText, walkMinutes, walkSeconds, walkStale, walkTimeText } from "../walks.js";
+import { nextAppointmentText } from "../calendar.js";
 import { Setup } from "./setup.js";
 
 const html = htm.bind(h);
@@ -70,6 +71,10 @@ export class Today extends Component {
     walkDiscardOpen: false,
     walkDraft: { pee: "", poop: "", dogsMet: "", mood: "", notes: "" },
     walkPending: null,
+    /** `GET /api/appointments/next`'s view, or null before the first read. */
+    nextAppointment: null,
+    nextLoading: true,
+    nextError: null,
   };
 
   componentDidMount() {
@@ -101,6 +106,7 @@ export class Today extends Component {
     if (!this.gated()) {
       void this.load();
       void this.loadWalks();
+      void this.loadNextAppointment();
     }
   }
 
@@ -167,6 +173,30 @@ export class Today extends Component {
       this.setState({
         walkLoading: false,
         walkError: error instanceof NetworkError ? error.message : "Could not load the walk.",
+      });
+    }
+  }
+
+  /** The next scheduled appointment, for the countdown line (§13.1, P4-02). */
+  async loadNextAppointment() {
+    const seq = (this.nextSeq = (this.nextSeq ?? 0) + 1);
+    try {
+      const result = await this.request("/api/appointments/next");
+      if (seq !== this.nextSeq) return;
+      if (result.status === 401) {
+        this.setState({ nextLoading: false, nextError: SIGNED_OUT });
+        return;
+      }
+      if (!result.ok || !result.body) {
+        this.setState({ nextLoading: false, nextError: "Could not load the next appointment." });
+        return;
+      }
+      this.setState({ nextAppointment: result.body, nextLoading: false, nextError: null });
+    } catch (error) {
+      if (seq !== this.nextSeq) return;
+      this.setState({
+        nextLoading: false,
+        nextError: error instanceof NetworkError ? error.message : "Could not load the next appointment.",
       });
     }
   }
@@ -721,6 +751,33 @@ export class Today extends Component {
     `;
   }
 
+  /**
+   * The next appointment and its household-local countdown. It is loaded from
+   * its own small route rather than the calendar's range, so Today never carries
+   * a month of records; the countdown is a date question on the server's today,
+   * never the device clock.
+   */
+  renderNextAppointment() {
+    const view = this.state.nextAppointment;
+    const copy = view ? nextAppointmentText(view) : null;
+    return html`
+      <section class="card next-appointment" aria-labelledby="next-appointment-title">
+        <h2 id="next-appointment-title" class="card__title">Next appointment</h2>
+        ${
+          this.state.nextError
+            ? html`<p class="placeholder">${this.state.nextError}</p>`
+            : copy === null
+              ? html`<p class="placeholder">${this.state.nextLoading ? "Loading…" : "No appointment scheduled."}</p>`
+              : html`
+                  <p class="next-appointment__headline">${copy.headline}</p>
+                  ${copy.detail ? html`<p class="field__hint">${copy.detail}</p>` : null}
+                `
+        }
+        <p class="field__hint"><a href="#/calendar">Open the calendar</a></p>
+      </section>
+    `;
+  }
+
   render() {
     const profile = getState().profile;
     // No profile is "not read yet": show Today rather than flashing the wizard
@@ -760,6 +817,7 @@ export class Today extends Component {
               : null
           }
         </div>
+        ${this.renderNextAppointment()}
         ${this.renderWalk()}
         ${this.renderMeals()}
         <p class="placeholder">

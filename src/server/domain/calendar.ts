@@ -34,14 +34,17 @@ import {
   parseAppointment,
   parseAppointmentFields,
   parseAppointmentList,
+  parseCalendarWindow,
   type AppointmentFields,
+  type CalendarWindow,
 } from "../../shared/calendar.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
 import { requestHashOf, runIdempotent, type CommandOutcome } from "./commands.ts";
 import { ActivityDoc, CalendarDoc, HouseholdDoc, parseCalendar, type DocStore } from "./docs.ts";
 import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
-import { instantAtLocalWallClock } from "./time.ts";
+import { readHousehold } from "./household.ts";
+import { instantAtLocalWallClock, localDateAt } from "./time.ts";
 
 /** `app.calendar` is missing or unreadable; retry once the server has booted. */
 export class CalendarUnavailableError extends UnavailableError {
@@ -147,6 +150,93 @@ function appointmentFrom(
   if (fields.vetName !== undefined) appointment.vetName = fields.vetName;
   if (fields.notes !== undefined) appointment.notes = fields.notes;
   return appointment;
+}
+
+// --- the calendar surface ---------------------------------------------------
+
+/**
+ * One appointment as every surface renders it (P4-02): the stored wall clock
+ * plus the **derived** UTC instants. An instant is never stored, so this is the
+ * one place a record becomes a timeline entry. `endsAt` is `startsAt` plus the
+ * stored duration; the end time is not a second source of truth.
+ */
+export type AppointmentView = Appointment & { startsAt: string; endsAt: string };
+
+/**
+ * What `GET /api/appointments` and `list_appointments` answer (P4-02): the
+ * household's clock and zone, the range the caller got, the appointments in it
+ * (cancelled history included, sorted by the derived instant), the next
+ * scheduled appointment regardless of range, and the household's default
+ * reminder offsets so a create form starts from the setting rather than a
+ * hard-coded guess.
+ */
+export type CalendarView = {
+  timezone: string;
+  today: string;
+  from: string;
+  to: string;
+  appointments: AppointmentView[];
+  next: AppointmentView | null;
+  defaultReminderOffsetsMin: number[];
+};
+
+/** The stored record plus its derived instants; the timeline's one builder. */
+export function appointmentView(appointment: Appointment): AppointmentView {
+  const starts = appointmentInstant(appointment);
+  return {
+    ...appointment,
+    startsAt: starts.toISOString(),
+    endsAt: new Date(starts.getTime() + appointment.durationMin * 60_000).toISOString(),
+  };
+}
+
+/**
+ * The view for one range. Filtering is by the stored **local date**, not by the
+ * derived instant: a month grid asks for calendar days, and a cancelled
+ * appointment inside the month is history the grid shows. Sorting is by the
+ * derived instant (ties by id, so two reads agree), which is the only order a
+ * timeline can mean across zone snapshots.
+ */
+export function calendarView(
+  household: Household,
+  calendar: Calendar,
+  now: Date,
+  window?: CalendarWindow,
+): CalendarView {
+  const today = localDateAt(now, household.timezone);
+  const range = window ?? parseCalendarWindow(undefined, undefined, today);
+  if (!range) throw new Error("the default appointment range is not a valid calendar window");
+  const appointments = calendar.appointments
+    .filter((appointment) => appointment.localDate >= range.from && appointment.localDate <= range.to)
+    .map(appointmentView)
+    .sort((a, b) => {
+      const byInstant = Date.parse(a.startsAt) - Date.parse(b.startsAt);
+      return byInstant !== 0 ? byInstant : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+  const next = upcomingAppointments(calendar, now, 1)[0];
+  return {
+    timezone: household.timezone,
+    today,
+    from: range.from,
+    to: range.to,
+    appointments,
+    next: next === undefined ? null : appointmentView(next),
+    defaultReminderOffsetsMin: [...household.settings.appointmentReminderOffsetsMin],
+  };
+}
+
+/** The view from committed documents: one reader behind every surface. */
+export async function readCalendarView(
+  store: DocStore,
+  context: Context,
+  now: Date,
+  window?: CalendarWindow,
+): Promise<CalendarView> {
+  const [household, calendar] = await Promise.all([
+    readHousehold(store, context),
+    readCalendar(store, context),
+  ]);
+  return calendarView(household, calendar, now, window);
 }
 
 // --- creating ---------------------------------------------------------------

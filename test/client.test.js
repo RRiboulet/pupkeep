@@ -1268,3 +1268,179 @@ test("the card shows a stale-history warning, and still offers the log form", ()
   withoutView.setState = (patch) => Object.assign(withoutView.state, patch);
   assert.ok(vnodeText(withoutView.render(), "Log shower"), "the form is shown while the read is unavailable");
 });
+
+// --- calendar (P4-02) -------------------------------------------------------
+
+const { Calendar } = await import("../web/views/calendar.js");
+const {
+  appointmentBody,
+  appointmentsByDate,
+  blankDraft,
+  draftFrom,
+  durationText,
+  monthGrid,
+  monthWindow,
+  nextAppointmentText,
+  offsetOptions,
+  shiftMonth,
+  timeRangeText,
+} = await import("../web/calendar.js");
+
+test("the month grid starts on Monday, marks today and always shows six weeks", () => {
+  const grid = monthGrid("2026-02-15", { year: 2026, month: 2 });
+  assert.equal(grid.weeks.length, 6);
+  assert.equal(grid.weeks.flat().length, 42);
+  assert.equal(grid.weeks[0][0].date, "2026-01-26", "1 February 2026 is a Sunday: the row starts on 26 January");
+  assert.equal(grid.weeks[0][0].inMonth, false);
+  assert.equal(grid.weeks[0][6].date, "2026-02-01");
+  assert.equal(grid.weeks[0][6].inMonth, true);
+  assert.equal(grid.weeks.flat().filter((day) => day.isToday).map((day) => day.date).join(), "2026-02-15");
+  assert.equal(grid.label, "February 2026");
+  assert.deepEqual(monthWindow({ year: 2026, month: 2 }), { from: "2026-01-26", to: "2026-03-08" });
+  assert.deepEqual(shiftMonth({ year: 2026, month: 12 }, 1), { year: 2027, month: 1 });
+  assert.deepEqual(shiftMonth({ year: 2027, month: 1 }, -1), { year: 2026, month: 12 });
+});
+
+test("the appointment body trims text, omits empty fields and keeps an explicit offset list", () => {
+  assert.deepEqual(
+    appointmentBody({
+      title: "  Vet visit ",
+      localDate: "2026-12-20",
+      timeLocal: "09:00",
+      durationMin: "30",
+      location: "  ",
+      vetName: "Dr Moreau",
+      notes: "",
+      offsets: [60, 1440],
+    }),
+    {
+      title: "Vet visit",
+      localDate: "2026-12-20",
+      timeLocal: "09:00",
+      durationMin: 30,
+      reminderOffsetsMin: [1440, 60],
+      vetName: "Dr Moreau",
+    },
+  );
+  assert.deepEqual(appointmentBody({ ...blankDraft("2026-11-20", []) }), {
+    title: "",
+    localDate: "2026-11-20",
+    timeLocal: "09:00",
+    durationMin: 30,
+    reminderOffsetsMin: [],
+  });
+  assert.deepEqual(blankDraft("2026-11-20", [1440, 60]).offsets, [1440, 60], "a create starts from the household default");
+  const stored = {
+    id: "a-1",
+    rev: 2,
+    title: "Vet",
+    localDate: "2026-12-20",
+    timeLocal: "09:00",
+    durationMin: 30,
+    reminderOffsetsMin: [0],
+    location: "Rue",
+  };
+  assert.deepEqual(draftFrom(stored), {
+    mode: "edit",
+    id: "a-1",
+    rev: 2,
+    title: "Vet",
+    localDate: "2026-12-20",
+    timeLocal: "09:00",
+    durationMin: 30,
+    location: "Rue",
+    vetName: "",
+    notes: "",
+    offsets: [0],
+  });
+});
+
+test("a chip, a duration and the reminder labels are derived, never stored", () => {
+  assert.equal(timeRangeText({ timeLocal: "09:00", durationMin: 90 }), "09:00–10:30");
+  assert.equal(durationText(30), "30 min");
+  assert.equal(durationText(90), "1 h 30 min");
+  assert.equal(durationText(120), "2 h");
+  assert.deepEqual(
+    offsetOptions([120], [1440, 60]).map((option) => [option.minutes, option.checked]),
+    [
+      [1440, false],
+      [120, true],
+      [60, false],
+      [0, false],
+    ],
+    "the presets, the household defaults and an unknown stored value all stay selectable",
+  );
+  const grouped = appointmentsByDate([
+    { id: "a", localDate: "2026-11-20" },
+    { id: "b", localDate: "2026-11-20" },
+    { id: "c", localDate: "2026-11-21" },
+  ]);
+  assert.equal(grouped.get("2026-11-20").length, 2);
+  assert.equal(grouped.get("2026-11-21").length, 1);
+});
+
+test("the next-appointment copy counts household dates, not the device clock", () => {
+  const view = {
+    today: "2026-10-30",
+    timezone: "Europe/Paris",
+    next: { localDate: "2026-11-20", timeLocal: "09:00", title: "Vet visit", location: "Rue de Lyon" },
+  };
+  assert.deepEqual(nextAppointmentText(view), { headline: "In 21 days · Vet visit", detail: "09:00 · Rue de Lyon" });
+  assert.equal(nextAppointmentText({ ...view, next: { ...view.next, localDate: "2026-10-30" } }).headline, "Today · Vet visit");
+  assert.equal(nextAppointmentText({ ...view, next: { ...view.next, localDate: "2026-10-31" } }).headline, "Tomorrow · Vet visit");
+  assert.deepEqual(nextAppointmentText({ today: "2026-10-30", next: null }), {
+    headline: "No appointment scheduled.",
+    detail: "",
+  });
+});
+
+test("the calendar card saves with one key, keeps a stale draft and adopts the revision", async () => {
+  const calls = [];
+  let answer = { status: 200, ok: true, body: { appointment: { id: "a-1", rev: 0 } } };
+  const card = new Calendar({});
+  card.request = async (path, options) => {
+    calls.push({ path, options });
+    return answer;
+  };
+  card.setState = (patch, callback) => {
+    Object.assign(card.state, patch);
+    if (typeof callback === "function") callback();
+  };
+  card.load = async () => {};
+
+  card.setState({ form: { ...blankDraft("2026-12-20", [1440, 60]), title: " Vet visit " } });
+  const event = { preventDefault() {} };
+  await card.save(event);
+  assert.equal(calls[0].path, "/api/appointments");
+  assert.deepEqual(calls[0].options.body, {
+    title: "Vet visit",
+    localDate: "2026-12-20",
+    timeLocal: "09:00",
+    durationMin: 30,
+    reminderOffsetsMin: [1440, 60],
+  });
+  assert.equal(typeof calls[0].options.idempotencyKey, "string");
+  assert.equal(card.state.form, null, "a saved form closes");
+  assert.match(card.state.message, /saved/i);
+
+  // A stale answer keeps the draft, shows the other caregiver's revision and
+  // does not pretend the save worked.
+  answer = {
+    status: 409,
+    ok: false,
+    body: { error: "stale", appointment: { id: "a-1", rev: 4 } },
+  };
+  card.setState({ form: { ...blankDraft("2026-12-20", [1440]), title: "Mine" } });
+  await card.save(event);
+  assert.equal(card.state.form.title, "Mine", "the draft is kept");
+  assert.equal(card.state.form.rev, 4, "the next save is a deliberate override");
+  assert.match(card.state.message, /Someone else changed/);
+  assert.equal(card.state.form.mode, "create", "a stale create stays a create");
+
+  // A refused duration never reaches the wire.
+  calls.length = 0;
+  card.setState({ form: { ...blankDraft("2026-12-20", []), title: "Vet", durationMin: 2 } });
+  await card.save(event);
+  assert.equal(calls.length, 0);
+  assert.match(card.state.error, /5 to 720 minutes/);
+});

@@ -1251,8 +1251,9 @@ changes rarely.
 | `log_shower` | low | Shampoo/notes text; the household-local date, who and when come from the server (§8.4), never an argument; actionId dedupe |
 | `update_milestone` | low | Status/note; records who/when; actionId dedupe |
 | `add_milestone` | low | A milestone of the household's own; unique title; actionId dedupe (P3-05) |
-| `create_appointment` | low | Creates appointment + **system-conversation-owned** reminder tasks in one commit |
-| `update_appointment` | low/medium | Revision check; creates new reminder tasks, old tasks no-op |
+| `create_appointment` | approval (P4-07) | A **schedule change**: proposes an appointment + system-conversation reminder tasks; P4-02 ships the read tool only |
+| `update_appointment` | approval (P4-07) | A schedule change like the above, with the revision check |
+| `list_appointments` | read | A household-local date range; cancelled history included |
 | `update_puppy_profile` | low/medium | Name/breed/birthday/target weight |
 | `request_cancel_appointment` | high | Creates an approval; no cancellation |
 | `request_feeding_schedule_change` | high | Creates an approval |
@@ -1260,6 +1261,13 @@ changes rarely.
 
 No `shell`, `bash`, `read`, `write`, `edit`, web fetch, SQL, or arbitrary HTTP
 tools are registered.
+
+P4-02 amends the two appointment write rows: §9.3 already makes a schedule
+change an approval, and AGENTS.md repeats it, so the plan's earlier "low" marks
+for `create_appointment`/`update_appointment` were wrong. The agent's calendar
+extension therefore ships **reads only** (`list_appointments`); the write tools
+land with P4-07's `app.approvals`, and the human HTTP/UI path is the
+confirmation.
 
 ### 10.3 Tool implementation rules
 
@@ -3844,7 +3852,61 @@ process kill; both clients see the same state; the partner notification
       reminder task is armed and `reminderTaskIds` is always empty (P4-03); the
       cancellation approval is P4-07; no writer produces `completed`; nothing
       prunes a cancelled history (P5-07); and no phone has run it.
-- [ ] **P4-02** Appointment HTTP + agent tools + Calendar UI.
+- [x] **P4-02** Appointment HTTP + agent tools + Calendar UI.
+      **Landed:** `parseCalendarWindow`/`CALENDAR_WINDOW_RULE`/`APPOINTMENT_FIELD_KEYS`
+      in `src/shared/calendar.ts`; `appointmentView`/`calendarView`/
+      `readCalendarView` in `src/server/domain/calendar.ts`; the routes
+      (`GET /api/appointments?from=&to=`, `GET /api/appointments/next`,
+      `POST /api/appointments`, `POST /api/appointments/update`,
+      `POST /api/appointments/cancel`) with the mutation guards, the stale 409
+      carrying the current appointment and the 404 unknown-id mapping;
+      `src/server/agent/calendar-tools.ts` + `calendar-text.ts` with
+      `list_appointments`; `get_context`'s next-appointment line (and the
+      `Not tracked` line removed, since nothing is untracked now);
+      `web/calendar.js` (month-grid geometry, month window, drafts/body, chip and
+      countdown copy, offset labels) and `web/views/calendar.js` (month grid +
+      agenda, detail, create/edit form, cancel confirm, live re-read on the care
+      frame); Today's next-appointment card; calendar CSS; the shell cache at
+      `pupkeep-shell-v8` with `calendar.js` precached.
+      Decisions: (1) **the agent's appointment writes are carried to P4-07.**
+      The task's guardrail says a tool that creates or cancels an appointment must
+      use the approval path, and §10.2's "low" marks predate the approval model;
+      the plan's table is amended in this change, and the extension ships reads
+      only (pinned by a test), with the human HTTP/UI path as the confirmation.
+      (2) **Flat routes with the id in the body**, as `/api/training/milestone`
+      does: create takes only the fields (the zone and default offsets come from
+      the household inside the commit), update takes `id` + `rev` + fields, cancel
+      `id` + `rev`. A stale revision answers the current record; a missing one is
+      a 404 through the one mapper. (3) **the read filters by stored local date,
+      sorts by derived instant**: a month grid asks a calendar question, a
+      timeline asks an instant question. Cancelled history stays in the range
+      (struck through in the agenda), the default range is today and the next 90
+      days, and a range is capped at 372 days so a read cannot scan an unbounded
+      document. (4) **the form is the confirmation**: it shows the household zone,
+      offers the household defaults on create and each record's own offsets on
+      edit (plus presets, so an unknown stored offset is never silently dropped),
+      and a stale save adopts the committed `rev` while keeping the draft — the
+      profile form's rule. (5) **`GET /api/appointments/next` is its own small
+      route**, so Today never carries a month of records; its countdown is a
+      household-date question on the server's `today`, not the device clock.
+      (6) A differing zone snapshot is named in the detail, never converted; the
+      form writes the household wall clock and the server derives the instant.
+      **Verified:** 9 route tests in `test/calendar-routes.test.ts` (empty read,
+      defaults, create, DST-correct instant, replay/key conflict/refusal, range
+      filtering with cancelled history, next, update/stale/404, cancel/replay,
+      the mutation guards and a partner), 5 tool tests in
+      `test/calendar-tools.test.ts` (the ranged answer, quoted text and reminder
+      copy, a refused window, the `get_context` line and the reads-only security
+      assertion) and 5 client tests (`test/client.test.js`: the Monday-first grid,
+      the window, the body/draft rules, the countdown copy and the save/stale
+      path). The suite is 634/634 and `npm run typecheck` passes; the existing
+      `get_context` assertions in four suites were updated to the new line.
+      **Carried out / not verified:** the agent write tools and the approval that
+      backs them are P4-07; no reminder task is armed or delivered (P4-03/P4-05);
+      no browser or phone has rendered the grid; the grid relies on tab order
+      rather than arrow-key navigation between days; and the "add appointment"
+      quick action on Today is a link to the Calendar rather than a prefilled
+      form.
 - [ ] **P4-03** Appointment reminder tasks owned by the **system conversation**
       (`tx.createTask`, background, no model); task IDs persisted; reschedule/
       cancel; no tool-owned tasks.

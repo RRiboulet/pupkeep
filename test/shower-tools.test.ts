@@ -207,7 +207,7 @@ test("get_context carries the shower summary and no longer lists showers as untr
     const empty = resultText(await getContext.execute({}, toolApi(fixture, conversationId), context));
     assert.match(empty, /Showers: none logged yet \(every 21 days\)/);
     assert.doesNotMatch(empty, /Not tracked by this build yet: [^\n]*showers/);
-    assert.match(empty, /Not tracked by this build yet: appointments$/m);
+    assert.match(empty, /^Next appointment: none scheduled\.$/m);
 
     await log.execute({ notes: "After the park" }, toolApi(fixture, conversationId, "task-ctx"), context);
     const reported = resultText(await getContext.execute({}, toolApi(fixture, conversationId), context));
