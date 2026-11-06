@@ -11,6 +11,7 @@
 // take the page down.
 
 import { requestJson } from "./client.js";
+import { refreshUnread as readUnread } from "./notifications.js";
 import { isNewer } from "./profile-form.js";
 import { getState, setState } from "./store.js";
 
@@ -56,6 +57,7 @@ export async function refreshProfile() {
  */
 export function startLive(deps = {}) {
   const refresh = deps.refresh ?? refreshProfile;
+  const refreshBadge = deps.refreshUnread ?? readUnread;
   // A browser without EventSource keeps working: the views fetch on mount.
   const makeSource =
     deps.createSource ?? (typeof EventSource === "function" ? (url) => new EventSource(url) : undefined);
@@ -64,6 +66,7 @@ export function startLive(deps = {}) {
     // checklist (P1-14) are decided from this view, and without it they would
     // stay on "not read yet" forever.
     void refresh();
+    void refreshBadge();
     return { close() {} };
   }
   let source = null;
@@ -77,6 +80,7 @@ export function startLive(deps = {}) {
     // Fires on the first connection and on every automatic reconnect.
     source.addEventListener("open", () => {
       void refresh();
+      void refreshBadge();
     });
 
     // A full view, not a delta: applying it is a replacement, so a missed frame
@@ -87,6 +91,9 @@ export function startLive(deps = {}) {
       } catch {
         // Ignore one bad frame; the next commit or a reload re-syncs.
       }
+      // The badge is a second, cheap read: the frame carries no notification
+      // data, and a care action may have added one.
+      void refreshBadge();
     });
 
     // The server is restarting or shutting down: it asked us to reattach. The

@@ -887,3 +887,81 @@ a.button {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* --- notifications (P4-06) ----------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  min-width: 1.2rem;
+  margin-left: 0.3rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.7rem;
+  line-height: 1.2rem;
+  text-align: center;
+}
+
+.badge--nav {
+  margin-left: 0.15rem;
+  vertical-align: super;
+}
+
+.notification-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+
+.notification {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid #e4e0ec;
+  background: var(--surface);
+}
+
+.notification--unread {
+  border-left: 3px solid var(--accent);
+}
+
+.notification__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.notification__title {
+  font-weight: 600;
+}
+
+.notification__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.notification__body {
+  margin: 0.25rem 0;
+  font-size: 0.92rem;
+}
+
+.notification-subhead {
+  margin: 1rem 0 0.25rem;
+  font-size: 1rem;
+}
+
+.notification-prefs {
+  margin-top: 0.75rem;
+}
+
+.link-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

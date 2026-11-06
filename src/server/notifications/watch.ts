@@ -16,6 +16,8 @@ import type { JsonFileStore } from "../json-file.ts";
 import type { Logger } from "../log.ts";
 import { drainNotificationOutbox, type DrainOptions } from "./outbox.ts";
 import type { PushTransport } from "../push/web-push.ts";
+import type { NtfyTransport } from "./ntfy.ts";
+import type { ExecFile } from "./termux.ts";
 
 /** Retry cadence for failed items; the backoff itself lives in the outbox. */
 export const OUTBOX_RETRY_MS = 5 * 60 * 1000;
@@ -34,6 +36,9 @@ export interface OutboxWatchOptions {
   /** Test seams. */
   readonly now?: () => Date;
   readonly transport?: PushTransport;
+  /** ntfy (the partner's daily path) and the host's Termux:API, when available. */
+  readonly ntfy?: { baseUrl?: string; transport?: NtfyTransport };
+  readonly termux?: { memberId: string; exec: ExecFile; channelReady: boolean };
   readonly retryMs?: number;
 }
 
@@ -51,6 +56,8 @@ export function startNotificationOutbox(options: OutboxWatchOptions): Notificati
     now: now(),
     logger: options.logger,
     ...(options.transport !== undefined ? { transport: options.transport } : {}),
+    ...(options.ntfy !== undefined ? { ntfy: options.ntfy } : {}),
+    ...(options.termux !== undefined ? { termux: options.termux } : {}),
   });
 
   const run = async (): Promise<void> => {

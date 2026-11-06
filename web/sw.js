@@ -24,10 +24,10 @@
 // The shell still works offline: network-first falls back to the precache
 // when the network rejects.
 //
-// Web Push event handlers (push, notificationclick) arrive with the push
-// phase; the worker stays quiet about notifications until then.
+// Web Push event handlers (push, notificationclick) are P4-05's; the payload is
+// validated and carries the category title only.
 
-const VERSION = "pupkeep-shell-v9";
+const VERSION = "pupkeep-shell-v10";
 const CACHE = `pupkeep-static-${VERSION}`;
 
 // Relative to the worker's scope. Only minimum shell assets: the document,
@@ -49,8 +49,10 @@ const PRECACHE = [
   "./showers.js",
   "./calendar.js",
   "./push.js",
+  "./notifications.js",
   "./views/today.js",
   "./views/calendar.js",
+  "./views/notifications.js",
   "./views/pup.js",
   "./views/milestones.js",
   "./views/showers.js",

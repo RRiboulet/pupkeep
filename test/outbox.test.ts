@@ -28,6 +28,7 @@ import { dataStores } from "../src/server/config.ts";
 import { NotificationsDoc } from "../src/server/domain/docs.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import { notificationIntent } from "../src/shared/notifications.ts";
+import type { ExecFile } from "../src/server/notifications/termux.ts";
 import { ensureVapid, generateVapidKeys } from "../src/server/push/vapid.ts";
 import type { PushTransport } from "../src/server/push/web-push.ts";
 import {
@@ -323,6 +324,133 @@ test("a subscription with an unusable key is removed instead of retried forever"
     assert.equal(result.removedSubscriptions, 1);
     assert.equal(calls.calls.length, 0, "the send never leaves the process");
     assert.deepEqual((await fixture.push.read()).subscriptions, []);
+  });
+});
+
+test("a member with only an ntfy topic is delivered through ntfy, category text only", async () => {
+  await withOutbox(async (fixture) => {
+    await configure(fixture, []);
+    const topic = "pupkeep-partner-0123456789abcdef";
+    await fixture.push.update((current) => ({ ...current, ntfy: { partner: { topic } } }));
+    await fixture.seed([intent({ id: "ntfy", userId: "partner", dedupeKey: "feed_overdue|ntfy|partner" })]);
+    const calls: { url: string; init: RequestInit }[] = [];
+    const transport = async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return new Response(null, { status: 200 });
+    };
+    const result = await drainNotificationOutbox({
+      store: fixture.opened.harness,
+      context,
+      push: fixture.push,
+      now: NOW,
+      ntfy: { transport },
+    });
+    assert.equal(result.sent, 1);
+    assert.equal(result.skipped, 0);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, `https://ntfy.sh/${topic}`);
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    assert.equal(headers.Title, "A meal is overdue");
+    assert.equal(headers.Priority, "high");
+    assert.equal(calls[0]!.init.body, "A meal is overdue");
+  });
+});
+
+test("a failed push falls back to ntfy, and a failed ntfy is recorded for retry", async () => {
+  await withOutbox(async (fixture) => {
+    const owner = makeSubscription("owner");
+    await configure(fixture, [owner.record]);
+    const topic = "pupkeep-owner-0123456789abcdef";
+    await fixture.push.update((current) => ({ ...current, ntfy: { owner: { topic } } }));
+    await fixture.seed([intent()]);
+    const pushCalls: string[] = [];
+    const pushTransport: PushTransport = async (url) => {
+      pushCalls.push(url);
+      return new Response(null, { status: 500 });
+    };
+    let ntfyCalls = 0;
+    const ntfy = {
+      transport: async () => {
+        ntfyCalls += 1;
+        return new Response(null, { status: 200 });
+      },
+    };
+    const sent = await drainNotificationOutbox({
+      store: fixture.opened.harness,
+      context,
+      push: fixture.push,
+      now: NOW,
+      transport: pushTransport,
+      ntfy,
+    });
+    assert.equal(sent.sent, 1, "ntfy delivered after the push failed");
+    assert.equal(pushCalls.length, 1, "push was attempted first");
+    assert.equal(ntfyCalls, 1);
+
+    // A fresh intent with both failing records the failure for the backoff.
+    await fixture.seed([intent({ id: "notice-2", dedupeKey: "feed_overdue|two" })]);
+    const failed = await drainNotificationOutbox({
+      store: fixture.opened.harness,
+      context,
+      push: fixture.push,
+      now: NOW,
+      transport: async () => new Response(null, { status: 500 }),
+      ntfy: { transport: async () => new Response(null, { status: 500 }) },
+    });
+    assert.equal(failed.failed, 1);
+    const items = (await fixture.opened.harness.snapshot(NotificationsDoc, context))?.items as NotificationIntent[];
+    const stored = items.find((item) => item.id === "notice-2")!;
+    assert.equal(stored.delivery.state, "failed");
+    assert.match(String(stored.delivery.lastError), /500/);
+  });
+});
+
+test("the host member is notified through Termux:API when no phone path is configured", async () => {
+  await withOutbox(async (fixture) => {
+    await configure(fixture, []);
+    await fixture.seed([intent()]);
+    const calls: { file: string; args: readonly string[] }[] = [];
+    const exec: ExecFile = async (file, args) => {
+      calls.push({ file, args });
+    };
+    const result = await drainNotificationOutbox({
+      store: fixture.opened.harness,
+      context,
+      push: fixture.push,
+      now: NOW,
+      termux: { memberId: "owner", exec, channelReady: true },
+    });
+    assert.equal(result.sent, 1);
+    const command = calls.find((call) => call.file === "termux-notification");
+    assert.ok(command);
+    assert.ok(command.args.includes("--title"));
+    assert.ok(command.args.includes("A meal is overdue"));
+    assert.ok(command.args.includes("--priority"));
+    assert.ok(command.args.includes("high"));
+    assert.ok(command.args.includes("--channel"));
+    const id = command.args[command.args.indexOf("--id") + 1]!;
+    assert.match(id, /^[0-9a-f]{16}$/, "a stable Android id from the dedupe key");
+    assert.ok(!command.args.includes("Breakfast"), "no care text reaches a system notification");
+  });
+});
+
+test("a Termux notification omits the channel when it was not created", async () => {
+  await withOutbox(async (fixture) => {
+    await configure(fixture, []);
+    await fixture.seed([intent()]);
+    const calls: { file: string; args: readonly string[] }[] = [];
+    const exec: ExecFile = async (file, args) => {
+      calls.push({ file, args });
+    };
+    const result = await drainNotificationOutbox({
+      store: fixture.opened.harness,
+      context,
+      push: fixture.push,
+      now: NOW,
+      termux: { memberId: "owner", exec, channelReady: false },
+    });
+    assert.equal(result.sent, 1, "the default channel still delivers");
+    assert.ok(!calls.find((call) => call.file === "termux-notification")!.args.includes("--channel"));
   });
 });
 

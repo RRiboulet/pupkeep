@@ -1572,7 +1572,14 @@ displayed but not pushed in v1.
    - Busy notice with the draft kept; retry when free; retry-with-fallback on
      model error.
 
-5. **Settings**
+5. **Notifications** (P4-06)
+   - The in-app centre: the member's items newest first, read/unread, whether
+     or not a phone showed them. “Mark all read”; the nav badge is the unread
+     count.
+   - The source of truth for a notification; push, ntfy and the host's local
+     notification are delivery, not record.
+
+6. **Settings**
    - Household, timezone, members, invite.
    - Notification permissions, test notification (Web Push/ntfy), preferences;
      host Termux:API; partner ntfy onboarding.
@@ -4128,9 +4135,53 @@ process kill; both clients see the same state; the partner notification
       prefs UI, and the test button are P4-06; the real Web Push over the
       quick tunnel is P4-09/G4 (it is not claimed on Tailscale HTTP); and no
       phone or browser has received a push yet.
-- [ ] **P4-06** Notification centre, prefs, test notification, badge; host
+- [x] **P4-06** Notification centre, prefs, test notification, badge; host
       Termux:API; ntfy recommended for the partner. The **claim** that it
       delivers to the partner is gated on P0-10 (§2.3); the code is not.
+      **Landed:** the notification routes (`GET /api/notifications`,
+      `GET /api/notifications/unread`, `POST /api/notifications/read`,
+      `POST /api/notifications/test`, `PATCH /api/notifications/prefs`,
+      `PUT /api/notifications/ntfy`) with per-member items, an idempotent read
+      mark and `push.json`-stored prefs/topic; `web/views/notifications.js` (the
+      centre) and `web/notifications.js` (helpers + the count-only badge read),
+      the shell route/nav badge and the Settings notification card (push
+      enable/disable through `web/push.js`, category prefs, ntfy topic, test
+      button); `src/server/notifications/ntfy.ts` (category title as body,
+      priority high for appointments/overdue feeds, no click URL) and
+      `termux.ts` (channel once, stable Android id, generic content, host owner
+      only); the outbox's transport chain (Web Push → ntfy → Termux, first
+      success wins); `isNtfyTopic` in `config.ts`; shell cache v10.
+      Decisions: (1) **a top-level Notifications screen**, not a modal: the
+      centre is the source of truth and needs a stable URL and the nav badge.
+      (2) **the centre is per member**: only the caller's intents are listed and
+      marked; the unread count has its own cheap route so the badge costs one
+      small read. (3) **one transport chain per intent** (push, then ntfy, then
+      the host command), stopped at the first success, so a member with two paths
+      is not notified twice; no path leaves the item pending. (4) **prefs default
+      to enabled for every §12.1 category**; `approval` is offered but P4-07 is
+      the first producer. (5) **ntfy carries the title as its body** with the
+      priority header, and no `Click` URL: there is no public origin to point at
+      (P4-09's runbook owns that), and the topic is a bearer secret that is
+      never logged. (6) **Termux:API is the host owner's path**: the channel is
+      created once and `--channel` is only passed after that (an invalid channel
+      is dropped while the command still exits 0), the Android id is the dedupe
+      key's hash so a repeat replaces rather than stacks, and the content is
+      generic. (7) **the test button commits a normal `test` intent** with a
+      unique key, so it exercises the same outbox the real reminders use. (8)
+      **the partner-delivery claim stays unproven**: the Settings copy says the
+      device check is separate (P0-10), and this task shipped no partner-device
+      test by instruction.
+      **Verified:** 4 route tests in `test/push.test.ts` (the per-member centre,
+      idempotent read/all, the test intent, prefs/ntfy storage and clearing), 5
+      outbox tests (ntfy-only delivery, push→ntfy fallback + failure recording,
+      Termux delivery with its generic content and stable id, the channel
+      fallback) and 5 client tests (badge/count/prefs bodies, the household-zone
+      time, the centre render, mark-read, the Settings card). The suite is
+      691/691 and `npm run typecheck` passes.
+      **Not verified / carried out:** real ntfy delivery to the partner's iPhone
+      and the host's real `termux-notification` are device checks (P0-10 and the
+      phone runbook, P4-09) and were **not** run here; Web Push over the quick
+      tunnel is G4; P4-07 adds the approval notifications.
 - [ ] **P4-07** Approvals: `app.approvals`, propose tools, confirm/cancel routes,
       **one-commit** confirm with `rev`/idempotency/expiry, deterministic
       execution, activity/thread entry.

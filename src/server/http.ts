@@ -95,9 +95,13 @@ import {
 import type { ActorResolver } from "./domain/actor.ts";
 import type { Logger } from "./log.ts";
 import type { JsonFileStore } from "./json-file.ts";
-import type { PushConfig } from "./config.ts";
+import { isNtfyTopic, type PushConfig } from "./config.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { isPushEndpoint } from "./push/web-push.ts";
+import type { NotificationIntent } from "../shared/domain.ts";
+import { NOTIFICATION_CATEGORIES, notificationIntent, notificationKey } from "../shared/notifications.ts";
+import { appendNotificationIntents } from "./notifications/intents.ts";
+import { NotificationsDoc, parseNotifications } from "./domain/docs.ts";
 import { CLIENT_KEY_LIMIT, isCommandKey, type WriteOutcome } from "./domain/commands.ts";
 import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
 import {
@@ -620,6 +624,37 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/notifications" && req.method === "GET") {
+      requireCare(session);
+      await handleNotificationsRead(deps, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/unread" && req.method === "GET") {
+      await handleNotificationsUnread(deps, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/read" && req.method === "POST") {
+      await handleNotificationsReadMark(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/test" && req.method === "POST") {
+      await handleNotificationsTest(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/prefs" && req.method === "PATCH") {
+      await handleNotificationsPrefs(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/notifications/ntfy" && req.method === "PUT") {
+      await handleNotificationsNtfy(deps, req, res, requireCare(session));
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
@@ -633,7 +668,10 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
         "showers GET /api/showers, POST /api/showers, " +
         "appointments GET /api/appointments, GET /api/appointments/next, " +
         "POST /api/appointments, POST /api/appointments/update, POST /api/appointments/cancel, " +
-        "and push GET /api/push/public-key, POST /api/push/subscriptions, POST /api/push/unsubscribe",
+        "push GET /api/push/public-key, POST /api/push/subscriptions, POST /api/push/unsubscribe, " +
+        "and notifications GET /api/notifications, GET /api/notifications/unread, " +
+        "POST /api/notifications/read, POST /api/notifications/test, " +
+        "PATCH /api/notifications/prefs, PUT /api/notifications/ntfy",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -1579,6 +1617,177 @@ async function handleShowerWrite(
     return;
   }
   sendJson(res, 200, { shower: outcome.shower, replayed: outcome.kind === "replayed" });
+}
+
+// --- notifications (P4-06) ---------------------------------------------------
+
+/** The member's default prefs: everything §12.1 offers, enabled. */
+function defaultPrefs(): { enabled: boolean; categories: string[] } {
+  return { enabled: true, categories: [...NOTIFICATION_CATEGORIES] };
+}
+
+/** The intents for this member, newest first. The document is append order. */
+function memberItems(items: readonly NotificationIntent[], memberId: string): NotificationIntent[] {
+  return items.filter((item) => item.userId === memberId).reverse();
+}
+
+function unreadCount(items: readonly NotificationIntent[], memberId: string): number {
+  return items.filter((item) => item.userId === memberId && item.readAt === null).length;
+}
+
+/**
+ * The centre's one read: the member's items (newest first), the unread count,
+ * their prefs and their ntfy topic. Only their own items leave the server —
+ * another caregiver's in-app copy is not this member's to read.
+ */
+async function handleNotificationsRead(
+  deps: HttpDeps,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const snapshot = await deps.thread.harness.snapshot(NotificationsDoc, deps.thread.context);
+  const parsed = snapshot === undefined ? undefined : parseNotifications(snapshot);
+  if (!parsed) throw new UnavailableError("the notification centre is not available; retry after boot");
+  const config = await deps.push.read();
+  const items = memberItems(parsed.items, session.memberId);
+  sendJson(res, 200, {
+    items,
+    unread: unreadCount(parsed.items, session.memberId),
+    prefs: config.prefs[session.memberId] ?? defaultPrefs(),
+    ntfy: config.ntfy[session.memberId]?.topic ?? null,
+  });
+}
+
+/** The nav badge's cheap read: the count only. */
+async function handleNotificationsUnread(
+  deps: HttpDeps,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const snapshot = await deps.thread.harness.snapshot(NotificationsDoc, deps.thread.context);
+  const parsed = snapshot === undefined ? undefined : parseNotifications(snapshot);
+  sendJson(res, 200, { unread: parsed ? unreadCount(parsed.items, session.memberId) : 0 });
+}
+
+/**
+ * Mark one item (by id) or every item read. Idempotent: an already-read item is
+ * left alone, so a double tap is a no-op rather than a second write.
+ */
+async function handleNotificationsReadMark(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a read change is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["id", "all"]);
+  const all = record.all === true;
+  const id = record.id;
+  if (!all && (typeof id !== "string" || id === "")) {
+    throw new ConflictError("a read change needs an item id or all: true");
+  }
+  const now = new Date(deps.now?.() ?? Date.now());
+  const unread = await deps.thread.harness.commit(async (tx) => {
+    const draft = await tx.doc(NotificationsDoc);
+    for (const item of draft.items) {
+      if (item.userId !== session.memberId || item.readAt !== null) continue;
+      if (!all && item.id !== id) continue;
+      item.readAt = now.toISOString();
+    }
+    return unreadCount(draft.items, session.memberId);
+  }, deps.thread.context);
+  sendJson(res, 200, { unread });
+}
+
+/**
+ * The Settings test button: commit a `test` intent for the caller and let the
+ * outbox deliver it to whatever transport that member has. The body carries no
+ * care content (§14.3), and the dedupe key is unique per press so a second test
+ * is a second notification rather than a silent drop.
+ */
+async function handleNotificationsTest(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  const now = new Date(deps.now?.() ?? Date.now());
+  const item = notificationIntent({
+    dedupeKey: notificationKey("test", randomUUID()),
+    category: "test",
+    userId: session.memberId,
+    body: "This is a test notification.",
+    now,
+  });
+  await deps.thread.harness.commit(async (tx) => {
+    await appendNotificationIntents(tx, [item], now);
+  }, deps.thread.context);
+  sendJson(res, 200, { item });
+}
+
+/** Replace this member's preferences; the outbox reads them on every pass. */
+async function handleNotificationsPrefs(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a preferences change is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["enabled", "categories"]);
+  if (typeof record.enabled !== "boolean" || !Array.isArray(record.categories)) {
+    throw new ConflictError("preferences need enabled and a category list");
+  }
+  const categories: string[] = [];
+  for (const category of record.categories) {
+    if (typeof category !== "string" || !(NOTIFICATION_CATEGORIES as readonly string[]).includes(category)) {
+      throw new ConflictError("an unknown notification category");
+    }
+    if (!categories.includes(category)) categories.push(category);
+  }
+  const prefs = { enabled: record.enabled, categories };
+  const config = await deps.push.update((current) => ({
+    ...current,
+    prefs: { ...current.prefs, [session.memberId]: { enabled: prefs.enabled, categories: categories as never } },
+  }));
+  sendJson(res, 200, { prefs: config.prefs[session.memberId] });
+}
+
+/** Set or clear this member's ntfy topic (a bearer secret; never logged). */
+async function handleNotificationsNtfy(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("an ntfy change is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["topic"]);
+  const topic = record.topic;
+  if (topic !== null && !isNtfyTopic(topic)) {
+    throw new ConflictError("an ntfy topic is 22 or more letters, digits, dashes or underscores");
+  }
+  const config = await deps.push.update((current) => {
+    const ntfy = { ...current.ntfy };
+    if (topic === null) delete ntfy[session.memberId];
+    else ntfy[session.memberId] = { topic: topic as string };
+    return { ...current, ntfy };
+  });
+  sendJson(res, 200, { topic: config.ntfy[session.memberId]?.topic ?? null });
 }
 
 // --- push subscriptions (P4-05) ---------------------------------------------

@@ -38,6 +38,11 @@ const state = {
    * happened, re-read if you depend on one the frame does not carry".
    */
   careSeq: 0,
+  /**
+   * The unread notification count for the nav badge (P4-06). Read from the
+   * count-only route; 0 until the first read.
+   */
+  unreadNotifications: 0,
 };
 
 const listeners = new Set();

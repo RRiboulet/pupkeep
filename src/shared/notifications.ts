@@ -52,6 +52,7 @@ export const NOTIFICATION_INTENT_CATEGORIES = [
   "appointment",
   "feed_overdue",
   "fed",
+  "test",
 ] as const satisfies readonly NotificationCategory[];
 export type NotificationIntentCategory = (typeof NOTIFICATION_INTENT_CATEGORIES)[number];
 
@@ -65,6 +66,7 @@ export const NOTIFICATION_TITLES: Readonly<Record<NotificationIntentCategory, st
   appointment: "Appointment reminder",
   feed_overdue: "A meal is overdue",
   fed: "A meal was logged",
+  test: "Test notification",
 });
 
 /** §8.5: the household keeps its newest 500 read items; unread are never dropped. */

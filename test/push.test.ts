@@ -343,3 +343,200 @@ test("a subscription is stored per endpoint and member, and only its owner can r
     await fixture.stop();
   }
 });
+
+// --- the notification centre (P4-06) ---------------------------------------
+
+import { NotificationsDoc } from "../src/server/domain/docs.ts";
+import { notificationIntent } from "../src/shared/notifications.ts";
+import type { NotificationIntent } from "../src/shared/domain.ts";
+
+async function seedIntents(
+  fixture: RouteFixture,
+  items: readonly NotificationIntent[],
+): Promise<void> {
+  await fixture.app.app.commit(async (tx) => {
+    const draft = await tx.doc(NotificationsDoc);
+    draft.createdAt = "2026-10-29T10:00:00.000Z";
+    draft.items = [...items];
+  }, BACKGROUND_CONTEXT);
+}
+
+function notice(overrides: Partial<NotificationIntent> = {}): NotificationIntent {
+  return notificationIntent({
+    dedupeKey: "fed|2026-10-29|slot|slot-a|owner",
+    category: "fed",
+    userId: "owner",
+    body: 'Alex fed "Breakfast" at 07:00.',
+    now: new Date("2026-10-29T10:00:00.000Z"),
+    id: "notice-1",
+    ...overrides,
+  });
+}
+
+async function getNotifications(fixture: RouteFixture, token: string) {
+  const response = await fetch(`${fixture.url}/api/notifications`, {
+    headers: { Cookie: `${SESSION_COOKIE}=${token}` },
+  });
+  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+}
+
+test("the centre lists only the caller's intents, newest first, with prefs and topic", async () => {
+  const fixture = await startPushApp();
+  try {
+    await seedIntents(fixture, [
+      notice({ id: "old", dedupeKey: "fed|old" }),
+      notice({
+        id: "new",
+        dedupeKey: "feed_overdue|new",
+        category: "feed_overdue",
+        title: "A meal is overdue",
+      }),
+      notice({ id: "theirs", dedupeKey: "fed|theirs", userId: "partner" }),
+    ]);
+    const { status, body } = await getNotifications(fixture, fixture.owner);
+    assert.equal(status, 200);
+    assert.deepEqual(
+      (body.items as { id: string }[]).map((item) => item.id),
+      ["new", "old"],
+      "the caller's items, newest first, and never another member's",
+    );
+    assert.equal(body.unread, 2);
+    assert.deepEqual(body.prefs, {
+      enabled: true,
+      categories: ["appointment", "feed_overdue", "fed", "approval", "test"],
+    });
+    assert.equal(body.ntfy, null);
+
+    const partner = await getNotifications(fixture, fixture.partner);
+    assert.deepEqual((partner.body.items as { id: string }[]).map((item) => item.id), ["theirs"]);
+    assert.equal(partner.body.unread, 1);
+
+    assert.equal((await fetch(`${fixture.url}/api/notifications`)).status, 401);
+    const unread = await fetch(`${fixture.url}/api/notifications/unread`, {
+      headers: { Cookie: `${SESSION_COOKIE}=${fixture.owner}` },
+    });
+    assert.deepEqual(await unread.json(), { unread: 2 });
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("marking one item read is idempotent and never touches another member's item", async () => {
+  const fixture = await startPushApp();
+  try {
+    await seedIntents(fixture, [
+      notice({ id: "mine", dedupeKey: "fed|mine" }),
+      notice({ id: "theirs", dedupeKey: "fed|theirs", userId: "partner" }),
+    ]);
+    const first = await post(fixture, "/api/notifications/read", fixture.owner, { id: "mine" });
+    assert.equal(first.status, 200);
+    assert.deepEqual(await first.json(), { unread: 0 });
+    const again = await post(fixture, "/api/notifications/read", fixture.owner, { id: "mine" });
+    assert.deepEqual(await again.json(), { unread: 0 }, "a double tap is a no-op");
+
+    // The partner's item is untouched by the owner's "all".
+    await post(fixture, "/api/notifications/read", fixture.owner, { all: true });
+    const partner = await getNotifications(fixture, fixture.partner);
+    assert.equal(partner.body.unread, 1, "another member's unread item is not this member's to read");
+
+    const all = await post(fixture, "/api/notifications/read", fixture.partner, { all: true });
+    assert.deepEqual(await all.json(), { unread: 0 });
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("the test button commits a category-only intent for the caller", async () => {
+  const fixture = await startPushApp();
+  try {
+    const response = await post(fixture, "/api/notifications/test", fixture.partner, {});
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { item: NotificationIntent };
+    assert.equal(body.item.category, "test");
+    assert.equal(body.item.userId, "partner");
+    assert.equal(body.item.title, "Test notification");
+    assert.equal(body.item.body, "This is a test notification.");
+    assert.equal(body.item.delivery.state, "pending");
+
+    const stored = await fixture.app.app.snapshot(NotificationsDoc, BACKGROUND_CONTEXT);
+    assert.equal((stored?.items as NotificationIntent[]).length, 1);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("preferences and the ntfy topic are stored per member through push.json", async () => {
+  const fixture = await startPushApp();
+  try {
+    const prefs = await fetch(`${fixture.url}/api/notifications/prefs`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+        "Idempotency-Key": "prefs-1",
+        Cookie: `${SESSION_COOKIE}=${fixture.owner}`,
+        Origin: fixture.url,
+      },
+      body: JSON.stringify({ enabled: true, categories: ["fed", "feed_overdue"] }),
+    });
+    assert.equal(prefs.status, 200);
+    assert.deepEqual(((await prefs.json()) as { prefs: unknown }).prefs, {
+      enabled: true,
+      categories: ["fed", "feed_overdue"],
+    });
+    const stored = await dataStores(fixture.dir).push.read();
+    assert.deepEqual(stored.prefs.owner, { enabled: true, categories: ["fed", "feed_overdue"] });
+
+    assert.equal(
+      (
+        await fetch(`${fixture.url}/api/notifications/prefs`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+            "Idempotency-Key": "prefs-2",
+            Cookie: `${SESSION_COOKIE}=${fixture.owner}`,
+            Origin: fixture.url,
+          },
+          body: JSON.stringify({ enabled: true, categories: ["walk_reminder"] }),
+        })
+      ).status,
+      409,
+      "an unknown category is refused",
+    );
+
+    const topic = "pupkeep-owner-0123456789abcdef";
+    const saved = await fetch(`${fixture.url}/api/notifications/ntfy`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+        "Idempotency-Key": "ntfy-1",
+        Cookie: `${SESSION_COOKIE}=${fixture.owner}`,
+        Origin: fixture.url,
+      },
+      body: JSON.stringify({ topic }),
+    });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(await saved.json(), { topic });
+    const centre = await getNotifications(fixture, fixture.owner);
+    assert.equal(centre.body.ntfy, topic, "the member sees their own topic");
+
+    const cleared = await fetch(`${fixture.url}/api/notifications/ntfy`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+        "Idempotency-Key": "ntfy-2",
+        Cookie: `${SESSION_COOKIE}=${fixture.owner}`,
+        Origin: fixture.url,
+      },
+      body: JSON.stringify({ topic: null }),
+    });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(await cleared.json(), { topic: null });
+    assert.equal((await dataStores(fixture.dir).push.read()).ntfy.owner, undefined, "the topic is removed");
+  } finally {
+    await fixture.stop();
+  }
+});
