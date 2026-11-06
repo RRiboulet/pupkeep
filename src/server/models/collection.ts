@@ -35,6 +35,16 @@ export function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && (PROVIDERS as readonly string[]).includes(value);
 }
 
+/** The providers `secrets.json` currently holds a key for. Read live, not cached. */
+export async function providersWithKeys(secrets: JsonFileStore<SecretsConfig>): Promise<ReadonlySet<string>> {
+  const config = await secrets.read();
+  return new Set(
+    Object.entries(config.providerKeys)
+      .filter(([, key]) => key.trim() !== "")
+      .map(([provider]) => provider),
+  );
+}
+
 export interface AppModels {
   /** The catalog: model ids, prices, api shapes. */
   readonly models: Models;
@@ -115,10 +125,5 @@ export async function createAppModels(secrets: JsonFileStore<SecretsConfig>): Pr
   });
   models.setProvider(opencodeGoProvider());
   models.setProvider(openrouterProvider());
-  const configured = new Set(
-    Object.entries(config.providerKeys)
-      .filter(([, key]) => key.trim() !== "")
-      .map(([provider]) => provider),
-  );
-  return { models, configured };
+  return { models, configured: await providersWithKeys(secrets) };
 }

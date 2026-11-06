@@ -76,7 +76,7 @@ import {
   parseUsage,
   parseWalks,
 } from "./docs.ts";
-import { localMonthAt } from "./usage.ts";
+import { harnessSpendUsd, localMonthAt } from "./usage.ts";
 
 export class BootstrapError extends Error {
   constructor(message: string) {
@@ -199,8 +199,8 @@ function initialApprovals(createdAt: string): Approvals {
  * predates the document) is repaired by `reconcileUsageMonth` at the first
  * read/boot check rather than here: boot has no harness usage read.
  */
-function initialUsage(createdAt: string, month: string): UsageSnapshot {
-  return { ...emptyUsage(), month, observedAt: createdAt };
+function initialUsage(createdAt: string, month: string, baselineCostUsd = 0): UsageSnapshot {
+  return { ...emptyUsage(), month, baselineCostUsd, observedAt: createdAt };
 }
 
 function initialWalks(createdAt: string): Walks {
@@ -423,6 +423,10 @@ export async function bootstrapSession(
   if (usageSnapshot !== undefined && !usage) {
     throw new BootstrapError("app.usage is not a shape this build understands; refusing to reset it");
   }
+  // A database from before P4-08 has spend the harness remembers and no baseline.
+  // Start the baseline at that total, so an upgrade does not count all-time spend
+  // against the current month; a fresh install has nothing to carry.
+  const upgradeBaseline = usage === undefined && usageSnapshot === undefined ? harnessSpendUsd(await harness.usage(context)) : 0;
   const approvalsSnapshot = await harness.snapshot(ApprovalsDoc, context);
   const approvals = approvalsSnapshot === undefined ? undefined : parseApprovals(approvalsSnapshot);
   if (approvalsSnapshot !== undefined && !approvals) {
@@ -462,7 +466,12 @@ export async function bootstrapSession(
       if (!showers) Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
       if (!calendar) Object.assign(await tx.doc(CalendarDoc), initialCalendar(createdAt));
       if (!approvals) Object.assign(await tx.doc(ApprovalsDoc), initialApprovals(createdAt));
-      if (!usage) Object.assign(await tx.doc(UsageDoc), initialUsage(createdAt, localMonthAt(createdAtDate, household.timezone)));
+      if (!usage) {
+        Object.assign(
+          await tx.doc(UsageDoc),
+          initialUsage(createdAt, localMonthAt(createdAtDate, household.timezone), upgradeBaseline),
+        );
+      }
     }, context);
   }
 

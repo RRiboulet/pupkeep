@@ -1756,6 +1756,7 @@ test("the notifications route is a real hash route, not a fallback to Today", as
 function modelsView(overrides = {}) {
   return {
     householdRev: 4,
+    role: "owner",
     current: { id: "opencode-go/mimo-v2.6-flash", paid: true, price: { input: 0.14, output: 0.28 } },
     providers: { "opencode-go": true, openrouter: false },
     allowlist: {
@@ -1846,7 +1847,6 @@ test("the settings card renders the model section, hides owner controls from a p
   settings.request = async (path, options) => {
     calls.push({ path, options });
     if (path === "/api/models") return { status: 200, ok: true, body: view };
-    if (path === "/api/session") return { status: 200, ok: true, body: { role: "owner", label: "Alex" } };
     if (path === "/api/budget") return { status: 200, ok: true, body: { budget: { ...view.budget, capUsd: 7.5 } } };
     return { status: 200, ok: true, body: {} };
   };
@@ -1870,7 +1870,8 @@ test("the settings card renders the model section, hides owner controls from a p
   const budgetCall = calls.find((call) => call.path === "/api/budget");
   assert.deepEqual(budgetCall.options.body, { rev: 4, capUsd: 7.5 });
 
-  // A partner sees the state and no owner buttons.
+  // A partner sees the state and no owner buttons (the route's own `role`).
+  assert.ok(!calls.some((call) => call.path === "/api/session"), "the card needs no second request for the role");
   settings.setState({ role: "member" });
   const partnerView = settings.render();
   assert.ok(vnodeText(partnerView, "Model and budget"), "the partner sees the card");

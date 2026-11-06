@@ -257,8 +257,11 @@ export interface HttpDeps {
    * every model look paid, which is the fail-closed direction.
    */
   readonly models?: Models;
-  /** Providers with a stored key; absent means "unknown", which is read as none. */
-  readonly modelProviders?: ReadonlySet<string>;
+  /**
+   * Providers with a stored key, read **live** (a key saved from Settings must
+   * count for the next probe). Absent means "none configured".
+   */
+  readonly modelProviders?: () => Promise<ReadonlySet<string>>;
   /** `secrets.json`: provider keys are written here and never echoed. */
   readonly secrets?: JsonFileStore<SecretsConfig>;
   /** `models.json`: the probe cache the picker reads and a probe rewrites. */
@@ -671,8 +674,7 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
     if (pathname === "/api/models" && req.method === "GET") {
       // The partner may see the model and the spend (§11.3); the writes below
       // are owner-only by the §14.1 matrix.
-      requireCare(session);
-      await handleModelsRead(deps, res);
+      await handleModelsRead(deps, res, requireCare(session));
       return;
     }
 
@@ -815,11 +817,15 @@ async function handleMessage(
   // §11.3: the budget is enforced server-side, before the turn is placed. A
   // running turn can cross the cap, so this is the next submission's check; a
   // free (\$0) model stays usable at the cap, and its own turn is not blocked.
-  const now = new Date(deps.now?.() ?? Date.now());
-  const budget = await readBudget(deps.thread.harness, deps.thread.context, now);
-  if (!budget.paidAllowed) {
-    const model = await readThreadModel(deps.thread);
-    if (model !== undefined && modelIsPaid(deps.models, model)) {
+  //
+  // The model is read first and the budget only for a paid one: reading the
+  // budget costs a harness usage read (and, on a month rollover, a repair
+  // commit), and a free model must not pay that on every message.
+  const model = await readThreadModel(deps.thread);
+  if (model !== undefined && modelIsPaid(deps.models, model)) {
+    const now = new Date(deps.now?.() ?? Date.now());
+    const budget = await readBudget(deps.thread.harness, deps.thread.context, now);
+    if (!budget.paidAllowed) {
       sendJson(res, 409, {
         error: "budget_exhausted",
         message:
@@ -1170,6 +1176,11 @@ async function handleHouseholdUpdate(
  * This month's spend against the cap. Every caregiver sees it (§11.3: "show the
  * current model and spend in Settings; the partner can see them"); the read is
  * cheap and is what the Settings card and the agent header render.
+ *
+ * This is a read that can **commit**: a household month that rolled over (or a
+ * total that went backwards after a restore) re-baselines `app.usage` first.
+ * That is deliberate — a swap-and-repair would under-count the new month until
+ * someone wrote — so do not "fix" it into a write-free read.
  */
 async function handleBudgetRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
   const now = new Date(deps.now?.() ?? Date.now());
@@ -2353,16 +2364,14 @@ function priceOf(models: Models | undefined, provider: string, modelId: string):
 
 /** The §11.2 candidates with their prices, for the picker's copy. */
 function candidateViews(models: Models | undefined): Array<Record<string, unknown>> {
-  return PROBE_CANDIDATES.map((target) => {
-    const price = priceOf(models, target.provider, target.model);
-    return {
-      id: `${target.provider}/${target.model}`,
-      provider: target.provider,
-      model: target.model,
-      price,
-      paid: !(price !== null && price.input === 0 && price.output === 0),
-    };
-  });
+  return PROBE_CANDIDATES.map((target) => ({
+    id: `${target.provider}/${target.model}`,
+    provider: target.provider,
+    model: target.model,
+    price: priceOf(models, target.provider, target.model),
+    // The one money rule (`shared/usage.ts`), never a fourth copy of it.
+    paid: modelIsPaid(models, { provider: target.provider, modelId: target.model }),
+  }));
 }
 
 /** The allowlist as the Settings sheet reads it: ids and reasons, no secrets. */
@@ -2386,7 +2395,7 @@ async function providerView(secrets: JsonFileStore<SecretsConfig> | undefined): 
  * this month's budget (§11.3: both caregivers may see the current model and the
  * spend; only the owner may change them).
  */
-async function handleModelsRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+async function handleModelsRead(deps: HttpDeps, res: ServerResponse, session: Session): Promise<void> {
   const now = new Date(deps.now?.() ?? Date.now());
   const cache = deps.modelCache === undefined ? undefined : await deps.modelCache.read();
   const current = await readThreadModel(deps.thread);
@@ -2396,6 +2405,9 @@ async function handleModelsRead(deps: HttpDeps, res: ServerResponse): Promise<vo
     // The household revision the cap write echoes (§7.4); one read, so a stale
     // draft is refused rather than silently applied.
     householdRev: household.rev,
+    // The card hides an owner-only control with this; the server still refuses
+    // the write for a member, so this is a courtesy, not the fence.
+    role: session.role,
     current:
       current === undefined
         ? null
@@ -2473,7 +2485,7 @@ async function handleModelProbe(
   if (deps.probeLimiter !== undefined && !deps.probeLimiter.hit(`model-probe:${session.memberId}`)) {
     throw new RateLimitError("too many probes; wait a minute");
   }
-  const configured = deps.modelProviders ?? new Set<string>();
+  const configured = deps.modelProviders === undefined ? new Set<string>() : await deps.modelProviders();
   const run = await probeAndCache(deps.modelCache, {
     models: deps.models,
     configured,

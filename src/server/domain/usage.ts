@@ -88,14 +88,16 @@ export async function reconcileUsageMonth(
   const written = await store.commit(async (tx) => {
     const draft = await tx.doc(UsageDoc);
     // Re-check inside the commit: two concurrent reads may both decide to
-    // repair, and the second must not move the baseline a second time.
-    if (draft.month === month && totalUsd + 1e-9 >= draft.baselineCostUsd) return null;
+    // repair, and the second must not move the baseline a second time — but it
+    // must answer with the *current* values, not the ones it read before the
+    // other commit landed (a stale month would misreport the rollover once).
+    if (draft.month === month && totalUsd + 1e-9 >= draft.baselineCostUsd) return { ...draft };
     draft.month = month;
     draft.baselineCostUsd = totalUsd;
     draft.observedAt = now.toISOString();
     return { ...draft };
   }, context);
-  const next = written === null ? snapshot : parseUsage(written);
+  const next = parseUsage(written);
   if (!next) throw new UsageUnavailableError("the usage baseline is not a shape this build understands");
   return { snapshot: next, totalUsd, household };
 }
