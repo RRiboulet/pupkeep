@@ -15,12 +15,16 @@ the calendar read tool and the Calendar UI), **P4-03** (appointment reminder
 tasks on the hidden system conversation), **P4-04** (the daily feed planner and
 boot reconciliation), **P4-05** (the notification outbox, Web Push and VAPID),
 **P4-06** (the notification centre, prefs, the badge, ntfy and the host's
-Termux:API) and **P4-07** (`app.approvals`, the propose-only tools, the confirm
-and cancel routes) are complete; the next task is **P4-08** (budget, model picker
-and provider keys). The agent can only *propose* an appointment or meal-schedule
-change; a caregiver's confirmation route executes the stored action in one
-commit. The approval centre has no browser UI yet (the Agent screen is still a
-placeholder), so a confirmation is an HTTP call until the thread's cards land.
+Termux:API), **P4-07** (`app.approvals`, the propose-only tools, the confirm and
+cancel routes) and **P4-08** (`app.usage`, the monthly cap, the provider catalog
+from `secrets.json`, the allowlist probe, the picker and the Settings card) are
+complete; the next task is **P4-09** (the daily access and notification
+runbook). The agent can only *propose* an appointment or meal-schedule change; a
+caregiver's confirmation route executes the stored action in one commit. The
+approval centre has no browser UI yet (the Agent screen is still a placeholder),
+so a confirmation is an HTTP call until the thread's cards land. `harness.usage()`
+is the spend ledger: a paid model's message is refused at the monthly cap while a
+free one still runs.
 The partner-delivery claim is gated on P0-10 and is unproven. G1's host-side criteria are covered by
 `test/e2e.test.ts` and `test/setup.test.ts`.
 The devcontainer is `.devcontainer/` (Node 24, pi `1.5.0`,
