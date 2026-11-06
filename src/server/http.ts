@@ -39,6 +39,9 @@
 //   POST /api/appointments       create an appointment (Idempotency-Key)
 //   POST /api/appointments/update  replace an appointment's fields (rev + Idempotency-Key)
 //   POST /api/appointments/cancel  cancel an appointment (rev + Idempotency-Key)
+//   GET  /api/push/public-key     the VAPID application server key
+//   POST /api/push/subscriptions  store this device's push subscription
+//   POST /api/push/unsubscribe    remove this device's push subscription
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
@@ -54,6 +57,7 @@
 //     GETs without an Origin; tokens and codes are single-use credentials,
 //     and guessing them is met by an IP rate limit (§14.2).
 
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { isMilestoneStatus } from "../shared/training.ts";
 import {
@@ -90,6 +94,10 @@ import {
 } from "./auth.ts";
 import type { ActorResolver } from "./domain/actor.ts";
 import type { Logger } from "./log.ts";
+import type { JsonFileStore } from "./json-file.ts";
+import type { PushConfig } from "./config.ts";
+import { ensureVapid } from "./push/vapid.ts";
+import { isPushEndpoint } from "./push/web-push.ts";
 import { CLIENT_KEY_LIMIT, isCommandKey, type WriteOutcome } from "./domain/commands.ts";
 import { UnavailableError, DomainConflictError } from "./domain/errors.ts";
 import {
@@ -201,6 +209,8 @@ export interface HttpDeps {
   /** Origins mutations may come from; a function because the tunnel origin moves. */
   readonly allowedOrigins: () => readonly string[];
   readonly logger: Logger;
+  /** VAPID keys and per-device subscriptions, read/written through one queue. */
+  readonly push: JsonFileStore<PushConfig>;
   /** Long-poll wait; capped to THREAD_POLL_MAX_MS. */
   readonly pollTimeoutMs?: number;
   /** The server clock, injected in tests; the wall clock otherwise (P2-03's day view). */
@@ -594,6 +604,22 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/push/public-key" && req.method === "GET") {
+      requireAgent(session);
+      await handlePushPublicKey(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/push/subscriptions" && req.method === "POST") {
+      await handlePushSubscribe(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/push/unsubscribe" && req.method === "POST") {
+      await handlePushUnsubscribe(deps, req, res, requireCare(session));
+      return;
+    }
+
     // Not a route this build serves; the care routes arrive with their phases.
     sendJson(res, 503, {
       error:
@@ -605,8 +631,9 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
         "growth GET /api/growth, POST /api/growth, " +
         "milestones GET /api/training, POST /api/training/milestone, POST /api/training/custom, " +
         "showers GET /api/showers, POST /api/showers, " +
-        "and appointments GET /api/appointments, GET /api/appointments/next, " +
-        "POST /api/appointments, POST /api/appointments/update, POST /api/appointments/cancel",
+        "appointments GET /api/appointments, GET /api/appointments/next, " +
+        "POST /api/appointments, POST /api/appointments/update, POST /api/appointments/cancel, " +
+        "and push GET /api/push/public-key, POST /api/push/subscriptions, POST /api/push/unsubscribe",
     });
   } catch (error) {
     const mapped = failure(error);
@@ -1552,6 +1579,124 @@ async function handleShowerWrite(
     return;
   }
   sendJson(res, 200, { shower: outcome.shower, replayed: outcome.kind === "replayed" });
+}
+
+// --- push subscriptions (P4-05) ---------------------------------------------
+
+/** Enough for every device a two-caregiver household re-installs; oldest go. */
+export const PUSH_SUBSCRIPTIONS_MAX = 20;
+const PUSH_ENDPOINT_MAX = 2048;
+
+/**
+ * This server's VAPID application server key. Only the public half is served;
+ * the private key never leaves `push.json`. It is generated on first use, so the
+ * route and boot agree on one pair.
+ */
+async function handlePushPublicKey(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const keys = await ensureVapid(deps.push);
+  sendJson(res, 200, { publicKey: keys.publicKey });
+}
+
+interface PushSubscriptionBody {
+  readonly endpoint: string;
+  readonly p256dh: string;
+  readonly auth: string;
+}
+
+/**
+ * The browser's `PushSubscription.toJSON()` shape. The lengths mirror the
+ * `push.json` parser so a subscription is refused here rather than stored and
+ * failing at send time; the endpoint must be HTTPS (the push service origin).
+ */
+function parsePushSubscriptionBody(raw: unknown): PushSubscriptionBody {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a push subscription is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["endpoint", "keys"]);
+  const keys = record.keys;
+  if (typeof keys !== "object" || keys === null || Array.isArray(keys)) {
+    throw new ConflictError("a push subscription needs its keys");
+  }
+  const keyRecord = keys as Record<string, unknown>;
+  requireOnlyKeys(keyRecord, ["p256dh", "auth"]);
+  const { endpoint } = record;
+  const { p256dh, auth } = keyRecord;
+  if (typeof endpoint !== "string" || endpoint.length > PUSH_ENDPOINT_MAX || !isPushEndpoint(endpoint)) {
+    throw new ConflictError("a push subscription needs a supported push service endpoint (FCM, Mozilla, Apple or Windows)");
+  }
+  // Node's base64url decoder drops invalid characters, so length alone is not
+  // enough: decode and check the exact key sizes the encryption requires.
+  if (typeof p256dh !== "string" || Buffer.from(p256dh, "base64url").length !== 65) {
+    throw new ConflictError("a push subscription needs its 65-byte p256dh key");
+  }
+  if (typeof auth !== "string" || Buffer.from(auth, "base64url").length !== 16) {
+    throw new ConflictError("a push subscription needs its 16-byte auth secret");
+  }
+  return { endpoint, p256dh, auth };
+}
+
+/**
+ * Store this device's subscription for the signed-in member. One subscription
+ * per endpoint: re-subscribing keeps its id and creation instant, so a repeated
+ * call is a no-op rather than a duplicate push per send.
+ */
+async function handlePushSubscribe(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  // The shared guard also requires an Idempotency-Key; the endpoint is the real
+  // identity, so the key is only the mutation-header contract here.
+  requireCareMutation(deps, req, session);
+  const body = parsePushSubscriptionBody(await readJsonBody(req));
+  const now = new Date(deps.now?.() ?? Date.now());
+
+  const config = await deps.push.update((current) => {
+    const previous = current.subscriptions.find((subscription) => subscription.endpoint === body.endpoint);
+    const kept = current.subscriptions.filter((subscription) => subscription.endpoint !== body.endpoint);
+    const record = {
+      id: previous?.id ?? randomUUID(),
+      memberId: session.memberId,
+      endpoint: body.endpoint,
+      p256dh: body.p256dh,
+      auth: body.auth,
+      createdAt: previous?.createdAt ?? now.toISOString(),
+    };
+    return { ...current, subscriptions: [...kept, record].slice(-PUSH_SUBSCRIPTIONS_MAX) };
+  });
+  const record = config.subscriptions.find((subscription) => subscription.endpoint === body.endpoint);
+  sendJson(res, 200, { id: record?.id ?? "" });
+}
+
+/** Remove this member's subscription for the endpoint the browser is dropping. */
+async function handlePushUnsubscribe(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  requireCareMutation(deps, req, session);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a push unsubscribe is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  requireOnlyKeys(record, ["endpoint"]);
+  const endpoint = record.endpoint;
+  if (typeof endpoint !== "string" || endpoint === "" || endpoint.length > PUSH_ENDPOINT_MAX) {
+    throw new ConflictError("a push unsubscribe needs the subscription endpoint");
+  }
+  let removed = false;
+  await deps.push.update((current) => {
+    const kept = current.subscriptions.filter(
+      (subscription) => !(subscription.endpoint === endpoint && subscription.memberId === session.memberId),
+    );
+    removed = kept.length !== current.subscriptions.length;
+    return { ...current, subscriptions: kept };
+  });
+  sendJson(res, 200, { removed });
 }
 
 // --- appointments (P4-02) ----------------------------------------------------

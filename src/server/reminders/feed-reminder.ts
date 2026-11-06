@@ -23,15 +23,22 @@
 
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTask } from "@earendil-works/pi-durable";
+import { notificationIntent, notificationKey } from "../../shared/notifications.ts";
+import { appendNotificationIntents } from "../notifications/intents.ts";
 import { AppointmentReminder } from "./appointment-reminder.ts";
 import { FeedPlanner } from "./feed-planner.ts";
 import type { Feeding, Household } from "../../shared/domain.ts";
 import { FeedingDoc, HouseholdDoc } from "../domain/docs.ts";
-import { instantAtLocalWallClock } from "../domain/time.ts";
+import { instantAtLocalWallClock, localTimeAt } from "../domain/time.ts";
 
 /** The registered task kind; P4-04's planner will be `app.feed.planner`. */
 export const FEED_REMINDER_TASK = "app.feed.reminder";
-export const FEED_REMINDER_VERSION = 1;
+/**
+ * Version 2 (P4-05) writes the overdue intent in the same terminal commit that
+ * decides `due`. A live version-1 task migrates unchanged (its input and
+ * checkpoint are the same shape) and simply runs the new check.
+ */
+export const FEED_REMINDER_VERSION = 2;
 
 /**
  * How late a reminder may still be useful (§12.2's "feeds within a few
@@ -161,20 +168,57 @@ export const FeedReminder = defineTask<FeedReminderInput, FeedReminderCheckpoint
       );
     },
     check: async (task, runtime, context) => {
-      const household = await runtime.snapshot(HouseholdDoc, context);
+      // The snapshot only decides whether the documents exist; the terminal
+      // commit re-reads them so the decision and the intents it writes are one
+      // committed fact (a schedule save that lands in between is seen).
+      const existing = await runtime.snapshot(HouseholdDoc, context);
       const feeding = await runtime.snapshot(FeedingDoc, context);
-      const result: FeedReminderResult =
-        household === undefined || feeding === undefined
-          ? { kind: "rescheduled", slotId: task.input.slotId, localDate: task.input.localDate }
-          : feedReminderDecision(household, feeding, task.input, runtime.now());
-      await runtime.commit(
-        () => ({ status: "terminal", outcome: { status: "completed", result } }),
-        context,
-      );
+      if (existing === undefined || feeding === undefined) {
+        await runtime.commit(
+          () => ({
+            status: "terminal",
+            outcome: {
+              status: "completed",
+              result: { kind: "rescheduled", slotId: task.input.slotId, localDate: task.input.localDate },
+            },
+          }),
+          context,
+        );
+        return;
+      }
+
+      const now = new Date(runtime.now());
+      await runtime.commit(async (tx) => {
+        const household = await tx.doc(HouseholdDoc);
+        const current = await tx.doc(FeedingDoc);
+        const result = feedReminderDecision(household, current, task.input, now.getTime());
+        if (result.kind === "due") {
+          // Both caregivers are reminded; the in-app body names the slot, the
+          // push may only carry the category title (§14.3).
+          const time = localTimeAt(new Date(result.dueAt), household.timezone);
+          const intents = household.members.map((member) =>
+            notificationIntent({
+              dedupeKey: notificationKey("feed_overdue", result.localDate, "slot", result.slotId, member.id),
+              category: "feed_overdue",
+              userId: member.id,
+              body: `${result.label} was not logged by ${time}.`,
+              now,
+            }),
+          );
+          await appendNotificationIntents(tx, intents, now);
+        }
+        return { status: "terminal", outcome: { status: "completed", result } };
+      }, context);
     },
   },
   abort: (_task, runtime, context) =>
     runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+  // Version 2 only widened the check; the stored input and checkpoint are the
+  // same shape, so a live version-1 task is taken over as-is.
+  migrate: (input, checkpoint) => ({
+    input: input as FeedReminderInput,
+    checkpoint: checkpoint as FeedReminderCheckpoint,
+  }),
 });
 
 /**

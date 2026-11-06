@@ -24,6 +24,8 @@
 //     never armed a task.
 //   * `app.household` moved to version 4 when P4-04 added `feedPlannerTaskId`;
 //     `migrate` starts it null and the next boot reconciliation arms the planner.
+//   * `app.notifications` moved to version 2 when P4-05 added the outbox
+//     delivery state; a version-1 item migrates as pending.
 // A phone that ran an older build therefore keeps its household and profile
 // instead of failing boot.
 //
@@ -78,7 +80,7 @@ import { SLOT_ID_LIMIT, parseFeedEvents, parseStoredMealSlots } from "../../shar
 import { parseGrowthMeasurements } from "../../shared/growth.ts";
 import { parseTrainingList } from "../../shared/training.ts";
 import { parseShowerList } from "../../shared/showers.ts";
-import { parseNotificationIntents } from "../../shared/notifications.ts";
+import { parseNotificationIntents, pendingDelivery } from "../../shared/notifications.ts";
 import { parseWalkList } from "../../shared/walks.ts";
 import { hasControlCharacter, isIanaZone, isLocalDate } from "../../shared/profile.ts";
 
@@ -327,12 +329,34 @@ export const CalendarDoc = defineDoc<Calendar>({
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
-/** Committed notification intents (P2-02 writes them; P4-05 adds delivery). */
+/**
+ * Committed notification intents (P2-02 writes them). Version 2 (P4-05) adds the
+ * per-intent outbox state; a version-1 item migrates as **pending**, because it
+ * was written before anything could send it.
+ */
 export const NotificationsDoc = defineDoc<Notifications>({
   kind: "app.notifications",
-  version: 1,
+  version: 2,
   scope: "session",
   initial: emptyNotifications,
+  migrate(value, fromVersion) {
+    if (fromVersion !== 1) {
+      throw new Error(`app.notifications has no migration from version ${fromVersion}`);
+    }
+    const record = value as unknown as Record<string, unknown>;
+    const items = Array.isArray(record.items) ? record.items : [];
+    const migrated = {
+      ...record,
+      schemaVersion: NOTIFICATIONS_SCHEMA_VERSION,
+      items: items.map((item) => {
+        const { delivery: _delivery, ...rest } = (item ?? {}) as Record<string, unknown>;
+        return { ...rest, delivery: pendingDelivery() };
+      }),
+    };
+    const parsed = parseNotifications(migrated);
+    if (!parsed) throw new Error("app.notifications version 1 does not migrate to a valid version 2");
+    return parsed;
+  },
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 

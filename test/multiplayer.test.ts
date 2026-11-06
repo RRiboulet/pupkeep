@@ -242,12 +242,14 @@ test("two caregivers feeding one slot in flight commit exactly one meal", async 
     assert.equal(feeding?.events.length, 1, "the document holds one event, never two");
     assert.equal(feeding?.events[0]?.source, "ui");
 
-    // §12.3: exactly one intent, for the caregiver who did not feed.
+    // §12.3: exactly one `fed` intent, for the caregiver who did not feed. (A
+    // reminder may have fired in this fixture, so filter by category.)
     const notifications = await fixture.app.app.snapshot(NotificationsDoc, context);
-    assert.equal(notifications?.items.length, 1, "one meal, one partner intent");
+    const fed = (notifications?.items ?? []).filter((item) => item.category === "fed");
+    assert.equal(fed.length, 1, "one meal, one partner intent");
     const feeder = won.feed.byUserId;
-    assert.notEqual(notifications?.items[0]?.userId, feeder, "the actor is not notified");
-    const intent = notifications?.items[0];
+    assert.notEqual(fed[0]?.userId, feeder, "the actor is not notified");
+    const intent = fed[0];
     const other = won.feed.byUserId === "owner" ? "partner" : "owner";
     assert.equal(intent?.userId, other, "the intent targets the other caregiver exactly");
     assert.equal(intent?.category, "fed");

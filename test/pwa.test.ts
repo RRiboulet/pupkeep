@@ -592,8 +592,15 @@ interface SwProbe {
 
 interface SwEvent {
   request?: WorkerRequest;
+  data?: { json(): unknown };
+  notification?: { close(): void; data?: unknown };
   waitUntil(promise: Promise<unknown>): void;
   respondWith(promise: Promise<WorkerResponse>): void;
+}
+
+interface ShownNotification {
+  title: string;
+  options: Record<string, unknown>;
 }
 
 type SwListener = (event: SwEvent) => void;
@@ -610,6 +617,11 @@ interface WorkerHarness {
   install(): Promise<void>;
   activate(): Promise<void>;
   dispatch(request: WorkerRequest): Promise<WorkerResponse | undefined>;
+  push(payload: unknown): Promise<void>;
+  click(data?: unknown): Promise<void>;
+  notifications: ShownNotification[];
+  openedWindows: string[];
+  windowClients: { focus(): Promise<void>; navigate(url: string): Promise<void>; navigated: string | null }[];
   skipWaitingCalls(): number;
   claimCalls(): number;
 }
@@ -617,6 +629,13 @@ interface WorkerHarness {
 async function loadWorker(route: NetworkRoute = () => shellResponse()): Promise<WorkerHarness> {
   const network: FetchCall[] = [];
   const listeners = new Map<string, SwListener[]>();
+  const notifications: ShownNotification[] = [];
+  const openedWindows: string[] = [];
+  const windowClients: {
+    focus(): Promise<void>;
+    navigate(url: string): Promise<void>;
+    navigated: string | null;
+  }[] = [];
   let skipWaiting = 0;
   let claimed = 0;
 
@@ -630,9 +649,19 @@ async function loadWorker(route: NetworkRoute = () => shellResponse()): Promise<
     skipWaiting: async () => {
       skipWaiting += 1;
     },
+    registration: {
+      showNotification: async (title: string, options: Record<string, unknown>) => {
+        notifications.push({ title, options });
+      },
+    },
     clients: {
       claim: async () => {
         claimed += 1;
+      },
+      matchAll: async () => windowClients,
+      openWindow: async (url: string) => {
+        openedWindows.push(url);
+        return undefined;
       },
     },
   };
@@ -665,6 +694,36 @@ async function loadWorker(route: NetworkRoute = () => shellResponse()): Promise<
     return Promise.resolve(waited).then(() => undefined);
   };
 
+  const dispatchPush = async (payload: unknown): Promise<void> => {
+    let waited: Promise<unknown> | undefined;
+    const event: SwEvent = {
+      data: { json: () => payload },
+      waitUntil(promise) {
+        waited = promise;
+      },
+      respondWith() {
+        throw new Error("push must not call respondWith");
+      },
+    };
+    for (const listener of listeners.get("push") ?? []) listener(event);
+    await Promise.resolve(waited);
+  };
+
+  const dispatchClick = async (data?: unknown): Promise<void> => {
+    let waited: Promise<unknown> | undefined;
+    const event: SwEvent = {
+      notification: { close() {}, ...(data === undefined ? {} : { data }) },
+      waitUntil(promise) {
+        waited = promise;
+      },
+      respondWith() {
+        throw new Error("notificationclick must not call respondWith");
+      },
+    };
+    for (const listener of listeners.get("notificationclick") ?? []) listener(event);
+    await Promise.resolve(waited);
+  };
+
   const dispatch = async (request: WorkerRequest): Promise<WorkerResponse | undefined> => {
     let responded: Promise<WorkerResponse> | undefined;
     const event: SwEvent = {
@@ -692,6 +751,11 @@ async function loadWorker(route: NetworkRoute = () => shellResponse()): Promise<
     install: () => dispatchWait("install"),
     activate: () => dispatchWait("activate"),
     dispatch,
+    push: dispatchPush,
+    click: dispatchClick,
+    notifications,
+    openedWindows,
+    windowClients,
     skipWaitingCalls: () => skipWaiting,
     claimCalls: () => claimed,
   };
@@ -704,7 +768,7 @@ test("install fills exactly PRECACHE, from pristine same-origin 200s", async () 
   const expected = [...worker.precache]
     .map((entry) => new URL(entry, `${ORIGIN}/sw.js`).pathname)
     .sort();
-  assert.equal(expected.length, 28, "the shell is the document, styles, modules, manifest and icons");
+  assert.equal(expected.length, 29, "the shell is the document, styles, modules, manifest and icons");
   assert.deepEqual(worker.cache.paths(), expected, "the cache holds exactly the precache list");
   assert.equal(worker.network.length, worker.precache.length, "one network fetch per entry");
   for (const call of worker.network) {
@@ -1040,4 +1104,48 @@ test("app.js applies every state change in a frame and the last one wins", async
   assert.deepEqual(renders[2], { route: "agent", online: true });
 
   assert.equal(renders.length, 3, "one render per frame, no dropped or duplicated paint");
+});
+
+// --- Web Push handlers (P4-05) ---------------------------------------------
+
+test("a push shows the category title with the dedupe tag and no care text", async () => {
+  const worker = await loadWorker();
+  await worker.push({
+    title: "A meal is overdue",
+    tag: "feed_overdue|2026-10-29|slot|slot-a|partner",
+    url: "/",
+  });
+  assert.equal(worker.notifications.length, 1);
+  const shown = worker.notifications[0]!;
+  assert.equal(shown.title, "A meal is overdue");
+  assert.equal(shown.options.tag, "feed_overdue|2026-10-29|slot|slot-a|partner");
+  assert.equal("body" in shown.options, false, "the push carries no body: category text only");
+  assert.equal((shown.options.data as { url?: string } | undefined)?.url, "/");
+});
+
+test("a malformed push title falls back to the app name, and a click focuses or opens the app", async () => {
+  const worker = await loadWorker();
+  await worker.push({ title: "Breakfast was not logged\nby 07:15", tag: "x", url: "//elsewhere.example/x" });
+  assert.equal(worker.notifications[0]?.title, "Pupkeep", "a control character is not category text");
+  assert.equal(
+    (worker.notifications[0]?.options.data as { url?: string } | undefined)?.url,
+    "/",
+    "a non-app url is replaced by the app root",
+  );
+
+  const client = {
+    navigated: null as string | null,
+    focus: async () => undefined,
+    navigate: async (url: string) => {
+      client.navigated = url;
+    },
+  };
+  worker.windowClients.push(client);
+  await worker.click({ url: "/" });
+  assert.equal(client.navigated, "/", "an open window is navigated, then focused");
+  assert.deepEqual(worker.openedWindows, []);
+
+  const empty = await loadWorker();
+  await empty.click({ url: "/calendar" });
+  assert.deepEqual(empty.openedWindows, ["/calendar"], "with no window, a new one opens at the route");
 });

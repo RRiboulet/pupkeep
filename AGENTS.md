@@ -12,9 +12,10 @@ complete on `main` through P3-08; Gate G3 is covered by
 `test/dual-path.test.ts`. Phase 1 is complete through P1-14 and Phase 2 through
 P2-09. **P4-01** (`app.calendar` and its service), **P4-02** (appointment HTTP,
 the calendar read tool and the Calendar UI), **P4-03** (appointment reminder
-tasks on the hidden system conversation) and **P4-04** (the daily feed planner
-and boot reconciliation) are complete; the next task is **P4-05**
-(`app.notifications`, the outbox, Web Push and VAPID). The agent's appointment
+tasks on the hidden system conversation), **P4-04** (the daily feed planner and
+boot reconciliation) and **P4-05** (the notification outbox, Web Push and
+VAPID) are complete; the next task is **P4-06** (the notification centre, prefs,
+the test button, the badge, host Termux:API and ntfy). The agent's appointment
 *write* tools wait for P4-07's approval path, so the calendar extension ships
 reads only. G1's host-side criteria are covered by
 `test/e2e.test.ts` and `test/setup.test.ts`.

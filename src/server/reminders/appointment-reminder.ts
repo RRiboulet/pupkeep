@@ -22,12 +22,18 @@
 
 import { defineTask } from "@earendil-works/pi-durable";
 import type { Appointment, Calendar } from "../../shared/domain.ts";
-import { CalendarDoc } from "../domain/docs.ts";
+import { notificationIntent, notificationKey } from "../../shared/notifications.ts";
+import { CalendarDoc, HouseholdDoc } from "../domain/docs.ts";
 import { instantAtLocalWallClock } from "../domain/time.ts";
+import { appendNotificationIntents } from "../notifications/intents.ts";
 
 /** The registered task kind; P4-04's planner is `app.feed.planner`. */
 export const APPOINTMENT_REMINDER_TASK = "app.reminder";
-export const APPOINTMENT_REMINDER_VERSION = 1;
+/**
+ * Version 2 (P4-05) writes the reminder intent in the same terminal commit that
+ * decides `due`. A live version-1 task migrates unchanged and runs the new check.
+ */
+export const APPOINTMENT_REMINDER_VERSION = 2;
 
 /**
  * Longest single sleep (§8.5: reminder sleeps are capped in chunks and re-armed
@@ -179,17 +185,63 @@ export const AppointmentReminder = defineTask<
       );
     },
     check: async (task, runtime, context) => {
-      const calendar = await runtime.snapshot(CalendarDoc, context);
-      const result: AppointmentReminderResult =
-        calendar === undefined
-          ? { kind: "missing", appointmentId: task.input.appointmentId }
-          : appointmentReminderDecision(calendar, task.input, runtime.now());
-      await runtime.commit(
-        () => ({ status: "terminal", outcome: { status: "completed", result } }),
-        context,
-      );
+      // The snapshot only decides whether the documents exist; the terminal
+      // commit re-reads the calendar so a reschedule or cancel that landed in
+      // between is seen before the intent is written (the P4-03 note).
+      const existing = await runtime.snapshot(CalendarDoc, context);
+      if (existing === undefined) {
+        await runtime.commit(
+          () => ({
+            status: "terminal",
+            outcome: {
+              status: "completed",
+              result: { kind: "missing", appointmentId: task.input.appointmentId },
+            },
+          }),
+          context,
+        );
+        return;
+      }
+
+      const now = new Date(runtime.now());
+      await runtime.commit(async (tx) => {
+        const household = await tx.doc(HouseholdDoc);
+        const calendar = await tx.doc(CalendarDoc);
+        const result = appointmentReminderDecision(calendar, task.input, now.getTime());
+        if (result.kind === "due") {
+          // Both caregivers are reminded; the push body is the category title,
+          // the in-app body names the visit and its offset.
+          const relative =
+            result.offsetMin === 0
+              ? "starting now"
+              : `${result.offsetMin} minute${result.offsetMin === 1 ? "" : "s"} before`;
+          const intents = household.members.map((member) =>
+            notificationIntent({
+              dedupeKey: notificationKey(
+                "appointment",
+                result.appointmentId,
+                String(result.offsetMin),
+                String(result.startsAt),
+                member.id,
+              ),
+              category: "appointment",
+              userId: member.id,
+              body: `"${result.title}" at ${result.timeLocal} (${relative}, ${household.timezone}).`,
+              now,
+            }),
+          );
+          await appendNotificationIntents(tx, intents, now);
+        }
+        return { status: "terminal", outcome: { status: "completed", result } };
+      }, context);
     },
   },
   abort: (_task, runtime, context) =>
     runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+  // Version 2 only widened the check; the stored input and checkpoint are the
+  // same shape, so a live version-1 task is taken over as-is.
+  migrate: (input, checkpoint) => ({
+    input: input as AppointmentReminderInput,
+    checkpoint: checkpoint as AppointmentReminderCheckpoint,
+  }),
 });

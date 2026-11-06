@@ -53,6 +53,8 @@ import { createTrainingTools } from "./agent/training-tools.ts";
 import { createShowerTools } from "./agent/shower-tools.ts";
 import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
+import { ensureVapid } from "./push/vapid.ts";
+import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
 import { createProfileTools } from "./agent/tools.ts";
 import { createReminders } from "./reminders/feed-reminder.ts";
 import {
@@ -405,6 +407,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
 
   let bus: ThreadBus | undefined;
   let profileState: ProfileStateWatch | undefined;
+  let outbox: NotificationOutboxWatch | undefined;
   const shutdown = (reason: "closed" | "failed"): Promise<AppEnd> => {
     if (stopping) return stopping;
     stopping = (async () => {
@@ -412,6 +415,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       // Tell the attached browsers to reattach before the sockets disappear;
       // they restart on a fresh connection instead of waiting out a dead SSE.
       profileState?.stop();
+      outbox?.stop();
       bus?.stop();
       // Stop accepting work before waiting for task code to return.
       if (listener) {
@@ -495,6 +499,17 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     }
   }
 
+  // P4-05: the VAPID pair is generated once, before any subscription can ask
+  // for it. Failing to write push.json is reported; the app still serves, and a
+  // later request retries.
+  try {
+    await ensureVapid(stores.push);
+  } catch (error) {
+    logger.warn("could not prepare the Web Push key pair; push is unavailable until push.json is writable", {
+      error,
+    });
+  }
+
   // P4-04: one commit that repairs the day's reminders and makes sure exactly
   // one planner exists. After bootstrap (the household is there) and before
   // scheduling starts. A failure is not fatal — the next boot and the next
@@ -568,7 +583,10 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
   // a process that is already leaving. `deps.thread === "scaffold"` keeps the
   // P1-07 scaffold listener for the harness-level contract tests.
   if (!stopping && deps.thread !== "scaffold") {
-    const auth = new Auth({ config: stores.config });
+    // The auth authority owns session removal; giving it the push store means a
+    // removed caregiver's subscriptions, prefs and ntfy topic go with them
+    // (P4-05). The launcher already wires the same pair for owner reissue.
+    const auth = new Auth({ config: stores.config, push: stores.push });
     const thread: ThreadRef = { harness: opened.harness, context };
 
     try {
@@ -592,6 +610,17 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       // The care view's `today` and the growth staleness derive from this
       // clock; a frame built on the wall clock would disagree with every read
       // on a process with an injected clock (P3-03).
+      now: options.now ? () => new Date(options.now!()) : undefined,
+    });
+
+    // P4-05: drain the intents committed by care actions and reminder tasks,
+    // once at boot and on every notification commit, with a retry timer for
+    // failed sends. It never fails a care write.
+    outbox = startNotificationOutbox({
+      harness: opened.harness,
+      context,
+      push: stores.push,
+      logger,
       now: options.now ? () => new Date(options.now!()) : undefined,
     });
 
@@ -629,6 +658,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
         allowedOrigins: () => bindOrigins(options.host, boundPort),
         logger,
+        push: stores.push,
         // The same clock the boot and the limiters use: a route's local date and
         // a test's fixed instant must come from one source (§8.1).
         now: options.now ?? Date.now,
@@ -640,6 +670,7 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     } catch (error) {
       logger.error("could not bind the HTTP listener", { error });
       profileState?.stop();
+      outbox?.stop();
       bus.stop();
       bus = undefined;
       const closeResult = await closeHarness(opened, closeTimeoutMs).catch(() => "timeout" as const);

@@ -28,10 +28,14 @@ skipped. **P4-04** is complete: one looping `app.feed.planner` task, persisted i
 the household, plans each household-local day (midnight + 1 minute, six-hour
 chunks), boot reconciliation repairs a missing or terminal planner and the day's
 refs (reading task state outside the commit), past offsets are skipped, and a
-timezone change re-arms today in the same commit. The next task is **P4-05**
-(`app.notifications`, outbox, Web Push, VAPID and the service worker). P0-03/
-P0-08/P0-10 remain device-gated partner checks and do not block the host-side
-work.
+timezone change re-arms today in the same commit. **P4-05** is complete:
+`app.notifications` has a per-intent delivery state (schema 2), the outbox
+drains pending intents to Web Push with VAPID (generated once into push.json)
+and aes128gcm on `node:crypto`, the reminder tasks write one intent per
+caregiver in their terminal commit, and the service worker shows the
+category-only title. The next task is **P4-06** (the notification centre, prefs,
+test button, badge, host Termux:API and the partner's ntfy topic). P0-03/P0-08/
+P0-10 remain device-gated partner checks and do not block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The

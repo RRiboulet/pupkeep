@@ -30,7 +30,12 @@ export const COMMANDS_SCHEMA_VERSION = 1 as const;
  * only) migrates on read, so a phone that set up its meal times keeps them.
  */
 export const FEEDING_SCHEMA_VERSION = 2 as const;
-export const NOTIFICATIONS_SCHEMA_VERSION = 1 as const;
+/**
+ * Version 2 adds the outbox's per-intent delivery state (P4-05); a version-1
+ * item migrates with a pending delivery, because P2-02 committed intents before
+ * anything could send them.
+ */
+export const NOTIFICATIONS_SCHEMA_VERSION = 2 as const;
 /** Growth measurements (P3-01): one append-only list, no revision. */
 export const GROWTH_SCHEMA_VERSION = 1 as const;
 /** Milestones (P3-04): the build's catalog plus the household's own. */
@@ -507,10 +512,30 @@ export type Calendar = {
 };
 
 /**
+ * The outbox state of one committed intent (P4-05, PLAN §12.3). Delivery is
+ * at-least-once and best-effort: the intent is written once (server dedupe key),
+ * then the drain marks it `sent` or `failed` with an attempt count and a bounded
+ * error. `dropped` is a deliberate non-delivery (the member disabled the
+ * category); the in-app item stays. A missing transport (no VAPID pair, no
+ * subscription) leaves the intent pending instead, because a later
+ * subscription can still deliver it.
+ *
+ * `lastError` is a short, app-built sentence, never a provider payload; the log
+ * scrubber and the parser both keep control characters out.
+ */
+export type NotificationDelivery = {
+  state: "pending" | "sent" | "failed" | "dropped";
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastError?: string;
+  sentAt?: string;
+};
+
+/**
  * One committed notification **intent** (PLAN §12.3). P2-02 writes these in the
- * same commit as the care action; P4-05 adds the outbox/delivery fields, so this
- * is deliberately the smallest shape an in-app centre needs: who it is for, why,
- * what to show, and when it was made.
+ * same commit as the care action; P4-05 adds `delivery`, the outbox's per-intent
+ * state. The shape an in-app centre needs: who it is for, why, what to show,
+ * when it was made, and whether it has been sent.
  *
  * `title` is category text from `shared/notifications.ts` and is the only text a
  * push or ntfy body may carry (§14.3). `body` is in-app copy built by app code —
@@ -533,6 +558,8 @@ export type NotificationIntent = {
   createdAt: string;
   /** null until a caregiver reads it (P4-06's centre). */
   readAt: string | null;
+  /** The outbox's state for this intent; every new intent starts pending. */
+  delivery: NotificationDelivery;
 };
 
 /** `app.notifications`: committed intents, append-mostly (P2-02; P4-05 extends). */

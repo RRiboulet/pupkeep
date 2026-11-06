@@ -21,7 +21,8 @@
 //     so a cap here would turn a long name into a document the parser refuses —
 //     a boot failure caused by a profile. `title` is code-owned and stays bounded.
 
-import type { NotificationIntent } from "./domain.ts";
+import { randomUUID } from "node:crypto";
+import type { NotificationDelivery, NotificationIntent } from "./domain.ts";
 import { OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
 import { hasControlCharacter } from "./profile.ts";
 
@@ -47,11 +48,22 @@ export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
  * also needs a `NOTIFICATION_TITLES` entry; the document version bump is for
  * changing that catalog's text or the intent's shape, not for the widening.
  */
-export const NOTIFICATION_INTENT_CATEGORIES = ["fed"] as const satisfies readonly NotificationCategory[];
+export const NOTIFICATION_INTENT_CATEGORIES = [
+  "appointment",
+  "feed_overdue",
+  "fed",
+] as const satisfies readonly NotificationCategory[];
 export type NotificationIntentCategory = (typeof NOTIFICATION_INTENT_CATEGORIES)[number];
 
-/** Category-only titles: the only text allowed in a push or ntfy body. */
+/**
+ * Category-only titles: the only text allowed in a push or ntfy body. The
+ * strings are **document-frozen** (§12.3): rewording one needs a document
+ * version bump and a `migrate`, because every stored item's title must equal its
+ * category's entry.
+ */
 export const NOTIFICATION_TITLES: Readonly<Record<NotificationIntentCategory, string>> = Object.freeze({
+  appointment: "Appointment reminder",
+  feed_overdue: "A meal is overdue",
   fed: "A meal was logged",
 });
 
@@ -85,11 +97,69 @@ export function notificationKey(...parts: readonly string[]): string {
   return parts.map((part) => encodeURIComponent(part)).join("|");
 }
 
+/** A fresh intent starts pending: nothing has been sent yet. */
+export function pendingDelivery(): NotificationDelivery {
+  return { state: "pending", attempts: 0, lastAttemptAt: null };
+}
+
+/** A stored outbox state, or `undefined` for a shape this build does not accept. */
+export function parseNotificationDelivery(raw: unknown): NotificationDelivery | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const keys = ["state", "attempts", "lastAttemptAt", "lastError", "sentAt"];
+  if (Object.keys(record).some((key) => !keys.includes(key))) return undefined;
+  const { state, attempts, lastAttemptAt, lastError, sentAt } = record;
+  if (state !== "pending" && state !== "sent" && state !== "failed" && state !== "dropped") return undefined;
+  if (typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < 0) return undefined;
+  if (lastAttemptAt !== null && !isIsoInstant(lastAttemptAt)) return undefined;
+  if (sentAt !== undefined && !isIsoInstant(sentAt)) return undefined;
+  // The sent timestamp travels with the sent state and only with it.
+  if ((state === "sent") !== (sentAt !== undefined)) return undefined;
+  let error: string | undefined;
+  if (lastError !== undefined) {
+    error = text(lastError, 200);
+    if (error === undefined) return undefined;
+  }
+  const delivery: NotificationDelivery = { state, attempts, lastAttemptAt };
+  if (error !== undefined) delivery.lastError = error;
+  if (sentAt !== undefined) delivery.sentAt = sentAt as string;
+  return delivery;
+}
+
+/**
+ * The one intent builder (P4-05). The title is taken from the frozen catalog
+ * rather than the caller, so no code path can put care text in a push body by
+ * passing a title; the body is in-app copy and never leaves the device.
+ */
+export type NotificationIntentInput = {
+  readonly dedupeKey: string;
+  readonly category: NotificationIntentCategory;
+  readonly userId: string;
+  readonly body: string;
+  readonly now: Date;
+  /** Test seam; a fresh uuid otherwise. */
+  readonly id?: string;
+};
+
+export function notificationIntent(input: NotificationIntentInput): NotificationIntent {
+  return {
+    id: input.id ?? randomUUID(),
+    dedupeKey: input.dedupeKey,
+    category: input.category,
+    userId: input.userId,
+    title: NOTIFICATION_TITLES[input.category],
+    body: input.body,
+    createdAt: input.now.toISOString(),
+    readAt: null,
+    delivery: pendingDelivery(),
+  };
+}
+
 /** One intent as stored, or `undefined` for a shape this build does not accept. */
 export function parseNotificationIntent(raw: unknown): NotificationIntent | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const record = raw as Record<string, unknown>;
-  const keys = ["id", "dedupeKey", "category", "userId", "title", "body", "createdAt", "readAt"];
+  const keys = ["id", "dedupeKey", "category", "userId", "title", "body", "createdAt", "readAt", "delivery"];
   if (Object.keys(record).some((key) => !keys.includes(key))) return undefined;
 
   const { id, dedupeKey, category, userId, readAt } = record;
@@ -107,6 +177,8 @@ export function parseNotificationIntent(raw: unknown): NotificationIntent | unde
   if (body === undefined) return undefined;
   if (!isIsoInstant(record.createdAt)) return undefined;
   if (readAt !== null && !isIsoInstant(readAt)) return undefined;
+  const delivery = parseNotificationDelivery(record.delivery);
+  if (!delivery) return undefined;
 
   return {
     id,
@@ -117,6 +189,7 @@ export function parseNotificationIntent(raw: unknown): NotificationIntent | unde
     body,
     createdAt: record.createdAt,
     readAt,
+    delivery,
   };
 }
 
@@ -145,10 +218,10 @@ export function parseNotificationIntents(raw: unknown): NotificationIntent[] | u
 
 /**
  * Append intents, dropping ones whose dedupe key is already present and then
- * enforcing §8.5's retention: an unread item is never pruned; among read items
- * the newest `NOTIFICATION_LIMIT` are kept. In Phase 2 nothing is read yet, so
- * this keeps everything — the delivery state that makes pruning meaningful is
- * P4-05's.
+ * enforcing §8.5's retention: an unread item and an undelivered one (pending or
+ * failed) are never pruned, because a notification the caregiver has not seen or
+ * the outbox has not sent is still owed. Among the rest the newest
+ * `NOTIFICATION_LIMIT` are kept.
  */
 export function appendIntents(
   existing: readonly NotificationIntent[],
@@ -165,12 +238,16 @@ export function appendIntents(
   const all = [...existing, ...added];
   if (all.length <= limit) return all;
 
-  const unread = all.filter((intent) => intent.readAt === null);
-  // `slice(-0)` is `slice(0)`, which keeps every read item; so does a
-  // fractional or NaN limit, which `slice` also maps to `0`.
-  if (!Number.isInteger(limit) || limit <= 0) return unread;
-  const read = all.filter((intent) => intent.readAt !== null).slice(-limit);
-  // Keep document order: unread items are the ones a caregiver still has to see.
-  const keep = new Set<NotificationIntent>([...unread, ...read]);
+  const protectedItems = all.filter(
+    (intent) =>
+      intent.readAt === null || intent.delivery.state === "pending" || intent.delivery.state === "failed",
+  );
+  // `slice(-0)` is `slice(0)`, which keeps every item; so does a fractional or
+  // NaN limit, which `slice` also maps to `0`.
+  if (!Number.isInteger(limit) || limit <= 0) return protectedItems;
+  const protectedSet = new Set(protectedItems);
+  const rest = all.filter((intent) => !protectedSet.has(intent)).slice(-limit);
+  // Keep document order: owed items are the ones a caregiver or the outbox owes.
+  const keep = new Set<NotificationIntent>([...protectedItems, ...rest]);
   return all.filter((intent) => keep.has(intent));
 }
