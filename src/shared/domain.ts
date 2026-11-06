@@ -42,8 +42,12 @@ export const SHOWERS_SCHEMA_VERSION = 1 as const;
  * document is valid as version 2, so `migrate` only restamps it.
  */
 export const WALKS_SCHEMA_VERSION = 2 as const;
-/** Appointments (P4-01): a wall-clock promise anchored in a zone snapshot. */
-export const CALENDAR_SCHEMA_VERSION = 1 as const;
+/**
+ * Appointments (P4-01); version 2 (P4-03) replaces the bare `reminderTaskIds`
+ * with the armed reminder refs (task id, offset and due instant), so a later
+ * cancel/update can target exactly the tasks it must retire.
+ */
+export const CALENDAR_SCHEMA_VERSION = 2 as const;
 
 export type MemberProfile = { id: string; name: string };
 
@@ -448,11 +452,13 @@ export type Appointment = {
    */
   reminderOffsetsMin: number[];
   /**
-   * Pi Durable task ids of the reminders armed for this record, owned by the
-   * hidden system conversation (§12.2). Empty until P4-03; persisted here so a
-   * reschedule or a cancel can target (and no-op) the old tasks.
+   * The reminders armed for this record (P4-03), each one a durable task owned
+   * by the hidden system conversation (§12.2): the task id, the offset it is
+   * for and the instant it is due. Persisted here so a reschedule or a cancel
+   * can target — and retire — the old tasks; the tasks themselves also no-op if
+   * they wake after their record changed.
    */
-  reminderTaskIds: number[];
+  reminders: AppointmentReminderRef[];
   /** Config member id, or `null` for the household fallback (§9.2). */
   createdBy: string | null;
   createdByLabel: string;
@@ -462,6 +468,22 @@ export type Appointment = {
   rev: number;
   /** HTTP idempotency key or the agent tool's task id of the last write (§7.3). */
   actionId: string;
+};
+
+/**
+ * One armed appointment reminder (P4-03). The pair `(taskId)` and the offset
+ * are unique: two tasks for one offset would double the reminder, and the same
+ * task twice could not be retired once. `dueAt` is epoch milliseconds: the
+ * appointment's derived instant minus the offset — the one value a task may
+ * sleep on (§8.4).
+ */
+export type AppointmentReminderRef = {
+  /** Pi Durable task id; the task is owned by the system conversation. */
+  taskId: number;
+  /** Minutes before the appointment this task reminds at. */
+  offsetMin: number;
+  /** Derived start instant minus `offsetMin`, epoch milliseconds. */
+  dueAt: number;
 };
 
 /**

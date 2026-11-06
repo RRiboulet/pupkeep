@@ -21,7 +21,7 @@
 // even though its own commit bumped the revision.
 //
 // Carried out of P4-01: the HTTP surface, the agent tools and the Calendar UI
-// (P4-02); arming the reminder tasks and writing `reminderTaskIds` (P4-03); the
+// (P4-02); the reminder tasks and their refs (P4-03); the
 // approval around a cancellation (P4-07). Cancellation here is already a state
 // change, never a delete: history stays readable.
 
@@ -43,6 +43,7 @@ import type { ActorResolver } from "./actor.ts";
 import { requestHashOf, runIdempotent, type CommandOutcome } from "./commands.ts";
 import { ActivityDoc, CalendarDoc, HouseholdDoc, parseCalendar, type DocStore } from "./docs.ts";
 import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
+import { armAppointmentReminders } from "../reminders/appointment-schedule.ts";
 import { instantAtLocalWallClock, localDateAt } from "./time.ts";
 
 /** `app.calendar` is missing or unreadable; retry once the server has booted. */
@@ -138,7 +139,7 @@ function appointmentFrom(
     durationMin: fields.durationMin,
     status: "scheduled",
     reminderOffsetsMin,
-    reminderTaskIds: [],
+    reminders: [],
     createdBy: base.createdBy,
     createdByLabel: base.createdByLabel,
     updatedAt: now.toISOString(),
@@ -280,6 +281,10 @@ export async function createAppointment(
       );
       // Backstop, as `logFeed` does: a record the parser refuses would fail the
       // next boot, so the completed list is validated before it is stored.
+      // P4-03: the same commit arms the reminders on the hidden system
+      // conversation. The refs are stored on the record before the backstop
+      // parse, so a task whose id could not be stored rolls the create back.
+      appointment.reminders = await armAppointmentReminders(tx, household, appointment, now);
       const parsed = parseAppointment(appointment);
       if (!parsed) throw new DomainConflictError(APPOINTMENT_RULE);
 
@@ -334,7 +339,15 @@ export type AppointmentCancel = {
 };
 
 export type AppointmentChangeOutcome =
-  | { kind: "changed" | "replayed"; appointment: Appointment }
+  | {
+      kind: "changed" | "replayed";
+      appointment: Appointment;
+      /**
+       * Reminder tasks the write replaced or cancelled; the caller retires them
+       * after the commit (best-effort — the task's revision check also no-ops).
+       */
+      retiredTaskIds: number[];
+    }
   /**
    * A newer revision exists: the committed record travels with the answer, so
    * the caller can show the other caregiver's values without a second read and
@@ -354,7 +367,7 @@ type AppointmentChangeRun = {
   /** Hashed into the idempotency record: identical bodies replay, others conflict. */
   readonly request: JsonObject;
   /** Build the next record from the committed one; the runner parses it. */
-  readonly next: (current: Appointment, household: Household) => Appointment;
+  readonly next: (current: Appointment, household: Household, tx: Tx) => Appointment | Promise<Appointment>;
   readonly activityKind: string;
   readonly activitySummary: (actorLabel: string, title: string) => string;
 };
@@ -397,7 +410,10 @@ async function runAppointmentChange(run: AppointmentChangeRun): Promise<Appointm
           );
         }
 
-        const parsed = parseAppointment(run.next(found, household));
+        // Every edit or cancellation replaces the armed tasks; their ids travel
+        // back so the caller can abort them once this commit lands.
+        const retiredTaskIds = found.reminders.map((ref) => ref.taskId);
+        const parsed = parseAppointment(await run.next(found, household, tx));
         if (!parsed) throw new DomainConflictError(APPOINTMENT_RULE);
         const appointments = draft.appointments.map((entry, position) => (position === index ? parsed : entry));
         if (!parseAppointmentList(appointments)) throw new DomainConflictError(APPOINTMENT_RULE);
@@ -413,7 +429,7 @@ async function runAppointmentChange(run: AppointmentChangeRun): Promise<Appointm
             now: run.now,
           }),
         );
-        return { appointment: parsed };
+        return { appointment: parsed, retiredTaskIds };
       },
     );
   } catch (error) {
@@ -426,8 +442,17 @@ async function runAppointmentChange(run: AppointmentChangeRun): Promise<Appointm
   }
 
   if (outcome.kind === "conflict") return { kind: "key-conflict" };
-  const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as { appointment: Appointment };
-  return { kind: outcome.kind === "replayed" ? "replayed" : "changed", appointment: recorded.appointment };
+  const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as {
+    appointment: Appointment;
+    retiredTaskIds?: number[];
+  };
+  return {
+    kind: outcome.kind === "replayed" ? "replayed" : "changed",
+    appointment: recorded.appointment,
+    // A replay's task ids were retired by the original commit; aborting a
+    // terminal task again is a no-op, so carrying them is harmless.
+    retiredTaskIds: recorded.retiredTaskIds ?? [],
+  };
 }
 
 /**
@@ -454,7 +479,7 @@ export async function updateAppointment(
     rev: input.rev,
     now,
     request: { id: input.id, rev: input.rev, ...requestFields(fields) } as JsonObject,
-    next: (current, household) => {
+    next: async (current, household, tx) => {
       const updated = appointmentFrom(
         fields,
         {
@@ -469,9 +494,10 @@ export async function updateAppointment(
         fields.reminderOffsetsMin ?? current.reminderOffsetsMin,
         now,
       );
-      // P4-03 owns the armed tasks; until then, and after a reschedule, the
-      // recorded ids are carried through so a later cancel can target them.
-      updated.reminderTaskIds = [...current.reminderTaskIds];
+      // A new revision is a new arm: the old tasks carry the previous revision
+      // and no-op, and the caller aborts them after this commit. Offsets already
+      // past are skipped by the plan.
+      updated.reminders = await armAppointmentReminders(tx, household, updated, now);
       return updated;
     },
     activityKind: "appointment.updated",
@@ -510,6 +536,9 @@ export async function cancelAppointment(
       updatedAt: now.toISOString(),
       rev: current.rev + 1,
       actionId: input.actionId,
+      // A cancelled visit has no pending reminders; the runner returns the old
+      // ids so the caller retires the tasks.
+      reminders: [],
     }),
     activityKind: "appointment.cancelled",
     activitySummary: (label, title) => `${label} cancelled the appointment ${JSON.stringify(title)}`,

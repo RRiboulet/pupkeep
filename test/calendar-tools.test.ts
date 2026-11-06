@@ -181,7 +181,7 @@ test("the next line names the appointment's zone and never counts negative days"
       durationMin: 30,
       status: "scheduled",
       reminderOffsetsMin: [],
-      reminderTaskIds: [],
+      reminders: [],
       createdBy: null,
       createdByLabel: "Household",
       updatedAt: "2026-12-01T00:00:00.000Z",

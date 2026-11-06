@@ -111,6 +111,7 @@ import {
   type MilestoneUpdateOutcome,
 } from "./domain/training.ts";
 import { logShower, readShowerView, type ShowerOutcome } from "./domain/showers.ts";
+import { retireAppointmentReminders } from "./reminders/appointment-schedule.ts";
 import {
   appointmentView,
   calendarView,
@@ -1653,6 +1654,7 @@ async function handleAppointmentCreate(
  * the mapper as a 404; it is neither stale nor a key conflict.
  */
 async function respondToAppointmentWrite(
+  deps: HttpDeps,
   res: ServerResponse,
   outcome: AppointmentChangeOutcome,
 ): Promise<void> {
@@ -1669,6 +1671,19 @@ async function respondToAppointmentWrite(
       appointment: appointmentView(outcome.appointment),
     });
     return;
+  }
+  // The care write already committed; retiring its replaced reminders is
+  // best-effort and must not turn a successful save into an error. A failed
+  // abort is logged — the old task still no-ops on its revision check.
+  if (outcome.retiredTaskIds.length > 0) {
+    const failed = await retireAppointmentReminders(
+      deps.thread.harness,
+      outcome.retiredTaskIds,
+      deps.thread.context,
+    );
+    if (failed.length > 0) {
+      deps.logger.warn("could not abort replaced appointment reminders", { taskIds: failed });
+    }
   }
   sendJson(res, 200, {
     appointment: appointmentView(outcome.appointment),
@@ -1700,7 +1715,7 @@ async function handleAppointmentUpdate(
     fields,
     now: new Date(deps.now?.() ?? Date.now()),
   });
-  await respondToAppointmentWrite(res, outcome);
+  await respondToAppointmentWrite(deps, res, outcome);
 }
 
 /** Cancel an appointment: a state change, so the record stays readable. */
@@ -1721,7 +1736,7 @@ async function handleAppointmentCancel(
     rev,
     now: new Date(deps.now?.() ?? Date.now()),
   });
-  await respondToAppointmentWrite(res, outcome);
+  await respondToAppointmentWrite(deps, res, outcome);
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

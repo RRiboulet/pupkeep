@@ -14,7 +14,9 @@
 //   * durations are whole minutes in a plausible range, and reminder offsets are
 //     distinct non-negative whole minutes up to 30 days (the plan's default is
 //     `[1440, 60]`, so the order is the caller's, not ascending);
-//   * `reminderTaskIds` is the persisted list P4-03 fills; P4-01 only carries it;
+//   * `reminders` is the persisted list of armed tasks (P4-03): each one a task
+//     id, its offset and the derived instant it sleeps on, so an update or a
+//     cancel can retire exactly the tasks it replaces;
 //   * the §9.2 pairing holds: no member id always travels with the household
 //     label;
 //   * ids are unique in the document — a repeated id would make "which
@@ -25,7 +27,7 @@
 // The lifecycle is a state change, not a delete: a cancelled appointment stays
 // in the list. A stale `rev` is answered by the service, not here.
 
-import type { Appointment, AppointmentStatus, Calendar } from "./domain.ts";
+import type { Appointment, AppointmentReminderRef, AppointmentStatus, Calendar } from "./domain.ts";
 import { OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
 import { HOUSEHOLD_FALLBACK_LABEL } from "./chat.ts";
 import { hasControlCharacter, isIanaZone, isLocalDate } from "./profile.ts";
@@ -218,7 +220,7 @@ const APPOINTMENT_KEYS = [
   "notes",
   "status",
   "reminderOffsetsMin",
-  "reminderTaskIds",
+  "reminders",
   "createdBy",
   "createdByLabel",
   "updatedAt",
@@ -230,18 +232,38 @@ function isStatus(value: unknown): value is AppointmentStatus {
   return (APPOINTMENT_STATUSES as readonly unknown[]).includes(value);
 }
 
-/** The armed task ids P4-03 writes; unique and positive, like the feed refs. */
-function parseReminderTaskIds(value: unknown): number[] | undefined {
+/**
+ * The armed reminders P4-03 writes. A repeated task id could not be retired
+ * twice, and a repeated offset would mean two reminders for one instant; both
+ * are refused. `dueAt` is an epoch millisecond reading, so it must be a safe
+ * non-negative integer — the same shape the task's input carries.
+ */
+function parseAppointmentReminderRefs(value: unknown): AppointmentReminderRef[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const ids: number[] = [];
-  const seen = new Set<number>();
-  for (const id of value) {
-    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) return undefined;
-    if (seen.has(id)) return undefined;
-    seen.add(id);
-    ids.push(id);
+  const refs: AppointmentReminderRef[] = [];
+  const taskIds = new Set<number>();
+  const offsets = new Set<number>();
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
+    const record = item as Record<string, unknown>;
+    if (Object.keys(record).some((key) => !["taskId", "offsetMin", "dueAt"].includes(key))) return undefined;
+    const { taskId, offsetMin, dueAt } = record;
+    if (typeof taskId !== "number" || !Number.isSafeInteger(taskId) || taskId <= 0) return undefined;
+    if (
+      typeof offsetMin !== "number" ||
+      !Number.isSafeInteger(offsetMin) ||
+      offsetMin < 0 ||
+      offsetMin > REMINDER_OFFSET_MAX_MIN
+    ) {
+      return undefined;
+    }
+    if (typeof dueAt !== "number" || !Number.isSafeInteger(dueAt) || dueAt < 0) return undefined;
+    if (taskIds.has(taskId) || offsets.has(offsetMin)) return undefined;
+    taskIds.add(taskId);
+    offsets.add(offsetMin);
+    refs.push({ taskId, offsetMin, dueAt });
   }
-  return ids;
+  return refs;
 }
 
 /**
@@ -277,8 +299,13 @@ export function parseAppointment(raw: unknown): Appointment | undefined {
 
   if (!isIanaZone(timezone)) return undefined;
   if (!isStatus(status)) return undefined;
-  const reminderTaskIds = parseReminderTaskIds(record.reminderTaskIds);
-  if (!reminderTaskIds) return undefined;
+  const reminders = parseAppointmentReminderRefs(record.reminders);
+  if (!reminders) return undefined;
+  // A ref names a reminder **for one of this record's offsets**: a ref for an
+  // offset the record no longer configures is a task the household cannot
+  // explain, and the two lists must not be able to disagree in a stored record.
+  const offsets = new Set(fields.reminderOffsetsMin);
+  if (reminders.some((ref) => !offsets.has(ref.offsetMin))) return undefined;
 
   const createdByLabel = displayText(record.createdByLabel);
   if (createdByLabel === undefined) return undefined;
@@ -315,7 +342,7 @@ export function parseAppointment(raw: unknown): Appointment | undefined {
     ...(fields.notes !== undefined ? { notes: fields.notes } : {}),
     status,
     reminderOffsetsMin: fields.reminderOffsetsMin,
-    reminderTaskIds,
+    reminders,
     createdBy: creatorId,
     createdByLabel,
     updatedAt,

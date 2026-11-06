@@ -923,7 +923,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 | `app.walks` | One open walk + history | One open walk at a time; duration from server timestamps |
 | `app.growth` | Measurements (weight, height, note, who, when) | Several per day, the day's latest is its reading; kg to the gram, cm to a tenth; the chart series is derived in local-date order, never stored; the target weight is `app.puppy`'s field (P1-11), never copied |
 | `app.training` | Milestones + status | Starter catalog (build-side, stable `catalog:` ids) + `custom:<uuid>` entries; `not_started`/`practicing`/`mastered`; `masteredAt` iff mastered; untouched milestones have no record |
-| `app.calendar` | Appointments | Household-local date + `HH:MM` time + a zone snapshot; the UTC instant is **derived on read**, never stored; reminder offsets; status; revision |
+| `app.calendar` | Appointments | Household-local date + `HH:MM` time + a zone snapshot; the UTC instant is **derived on read**, never stored; reminder offsets and the armed reminder refs (task id, offset, due instant); status; revision |
 | `app.showers` | Shower history | A household-local date with the record; shampoo and notes are one line each; the next due date is **derived** from the latest shower plus `app.household.settings.showerIntervalDays`, never stored; append-only, two showers a day allowed, repeated ids refused |
 | `app.notifications` | Per-user in-app items + push outbox | Dedupe key, read state, delivery state |
 | `app.activity` | Last N human-readable events | Built by domain functions, not the LLM |
@@ -961,7 +961,10 @@ a version-1 document, because the new `discarded` marker is optional and every
 stored walk is still valid. The fifth is P2-09's `app.household.feedReminders`:
 schema 3 and document version 3, and `migrate` adds the empty list — on top of
 `rev`/`timezoneConfirmedAt` for a version-1 document — so a phone that ran
-P1-08 or P1-14 keeps its members, settings and confirmed zone.
+P1-08 or P1-14 keeps its members, settings and confirmed zone. The sixth is
+P4-03's `app.calendar` reminder refs: schema 2 and document version 2, and
+`migrate` drops the bare `reminderTaskIds` and adds `reminders: []`, because
+P4-01 never armed a task.
 
 ### 8.2 Host-side data
 
@@ -1037,6 +1040,12 @@ type Walk = {
   discarded?: true;                  // stale walk thrown away; duration not trusted
 };
 
+type AppointmentReminderRef = {
+  taskId: number;                    // Pi Durable task in the system conversation
+  offsetMin: number;                 // the reminder offset this task is for
+  dueAt: number;                     // derived start minus offset, epoch ms
+};
+
 type Appointment = {
   id: string;
   title: string;
@@ -1049,7 +1058,7 @@ type Appointment = {
   notes?: string;
   status: "scheduled" | "cancelled" | "completed";
   reminderOffsetsMin: number[];      // [] = off; default from household settings
-  reminderTaskIds: number[];         // armed by P4-03 (system conversation)
+  reminders: AppointmentReminderRef[]; // { taskId, offsetMin, dueAt } (P4-03)
   createdBy: string | null;          // null = household attribution
   createdByLabel: string;
   updatedAt: string;                 // last write, not creation
@@ -1410,7 +1419,9 @@ displayed but not pushed in v1.
   the appointment/household doc so cancel/update can target them.
 - **Appointment:** one `app.reminder` task per reminder offset. The task sleeps
   until due, checks the appointment still exists, is scheduled, and is unchanged
-  (`rev`), writes notification intents, then becomes terminal.
+  (`rev`), writes notification intents, then becomes terminal. P4-03 implements
+  the task, the arming and the refs; the intent write lands with P4-05's task
+  version bump (the feed reminder's rule).
 - **Feeding:** a daily planner task creates one reminder task per active slot for
   the day, due at slot time + delay. When it wakes, it checks whether the slot
   was fed; if yes, it exits; if not, it writes a reminder.
@@ -3818,7 +3829,8 @@ process kill; both clients see the same state; the partner notification
       *unchanged* on update (a title fix must not silently switch reminders
       off); `[]` is an explicit "off". (6) **`reminderTaskIds` ships now, empty**:
       P4-03 fills it, and adding the field later would force a schema bump for a
-      list the document already has a place for. (7) **the record's `actionId` is
+      list the document already has a place for. (P4-03 later replaced it with
+      `reminders`, which needed exactly that bump; see its entry.) (7) **the record's `actionId` is
       the last write's key**; creation provenance lives in the activity entry,
       and a replay never re-derives an actor label or a zone from a later clock.
       (8) One commit per change: the record, one activity line and the
@@ -3926,9 +3938,71 @@ process kill; both clients see the same state; the partner notification
       rather than arrow-key navigation between days; and the "add appointment"
       quick action on Today is a link to the Calendar rather than a prefilled
       form.
-- [ ] **P4-03** Appointment reminder tasks owned by the **system conversation**
+- [x] **P4-03** Appointment reminder tasks owned by the **system conversation**
       (`tx.createTask`, background, no model); task IDs persisted; reschedule/
       cancel; no tool-owned tasks.
+      **Landed:** `src/server/reminders/appointment-reminder.ts` (the
+      `app.reminder` task: six-hour sleep chunks, `appointmentReminderDecision`
+      and the terminal outcome; registered beside the feed task in
+      `createReminders`), `src/server/reminders/appointment-schedule.ts`
+      (`planAppointmentReminders`, `armAppointmentReminders`,
+      `retireAppointmentReminders`), `AppointmentReminderRef`/`Appointment.reminders`
+      with `CALENDAR_SCHEMA_VERSION` 2 and the version-1 migration, the calendar
+      service arming in create/update and clearing on cancel, and the HTTP routes
+      retiring the replaced ids after the commit (a failure is logged, never a
+      failed save).
+      Decisions: (1) **the ref is `{taskId, offsetMin, dueAt}`, not a bare id.**
+      The task id alone cannot say which offset it belongs to or whether it is the
+      same arm, and a later cancel needs all of it; the field replaces P4-01's
+      `reminderTaskIds`, so the document moves to version 2 and `migrate` adds an
+      empty list (P4-01 never armed a task). The parser refuses a ref whose
+      offset the record does not configure, so the two lists cannot disagree in
+      a stored document. (2) **the due instant is derived**:
+      the record's start in its own zone minus the offset, so a DST change cannot
+      move a reminder; an offset already past, or a visit already started, arms
+      nothing rather than firing late. (3) **the task's input carries the
+      record's `rev`.** At wake it recomputes the due instant and checks the
+      record is still scheduled at that revision: a replaced, cancelled,
+      completed or moved record makes the old task a no-op
+      (`rescheduled`/`cancelled`/`completed`/`passed`/`missing`), which is what
+      makes a crash between the commit and the abort harmless. (4) **the write
+      returns the replaced task ids and the HTTP layer aborts them** with
+      `harness.abortTask`, best-effort and logged; the task is then terminal
+      rather than sleeping to a stale instant. (5) **no task is ever created by a
+      tool**: the only creator is `armAppointmentReminders` inside the domain
+      commit, owned by the system conversation with `background: true`, and the
+      test asserts `owner === undefined` and no model on that conversation.
+      (6) **nothing writes a notification yet** — like the feed task, a due wake
+      commits its decision and P4-05 bumps the task version to write the intents
+      before the terminal commit. (7) appointments need no boot planner: their
+      tasks persist in SQLite and the refs live on the record, so P4-04's planner
+      story is the feeding schedule's.
+      **Verified:** 9 new tests in `test/appointment-reminders.test.ts` — the
+      arming plan (skip past, DST-side due instant, stop at the start), the wake
+      decisions (due/passed/rescheduled by revision and by moved instant/
+      cancelled/completed/missing), one background task per future offset owned
+      by the system conversation with no model and no owner edge, a due wake
+      committing its decision and writing nothing, a replay arming nothing new, a
+      reschedule arming new tasks and retiring the old ids to `aborted`, a task
+      that survives the abort no-opping as `cancelled`, and a cancel returning
+      the ids and retiring them, a replayed edit carrying the recorded ids and
+      re-aborting them harmlessly, an updated task that survives its abort
+      no-opping as `rescheduled`, the route retiring the replaced tasks to
+      `aborted` (in `test/calendar-routes.test.ts`), and the parser refusing a
+      ref for an offset the record does not configure; plus the version-1 →
+      version-2 document migration in `test/calendar.test.ts`. The suite is
+      647/647 and `npm run typecheck` passes.
+      **Not verified / carried out:** delivery (P4-05); the agent's appointment
+      writes and their approval (P4-07); a task whose definition is missing is
+      blocked by the scheduler rather than recreated (no reconciliation pass
+      exists for appointments, and none is needed while the refs and tasks
+      persist); `abortTask` requires scheduling to be enabled, which the server
+      does on start; and no phone has run it. **For P4-05:** the task reads the
+      calendar outside its terminal commit, so a supersede that lands between
+      that read and the commit can leave a `due` outcome for a moved or
+      cancelled visit. Nothing delivers today; when delivery lands, re-check the
+      record (or the ref/rev) in the commit that writes the intent, or accept the
+      window explicitly.
 - [ ] **P4-04** Daily feed planner + feed reminder tasks; stale windows; no
       duplicate planner; boot reconciliation; skip past offsets. Builds on
       P2-09's task, `planFeedReminders`/`armFeedReminders` and
@@ -3941,7 +4015,10 @@ process kill; both clients see the same state; the partner notification
       task committed before delivery existed (deliver them, or state that they
       were never delivered).
 - [ ] **P4-05** `app.notifications` + outbox + Web Push + VAPID + service worker;
-      server dedupe key authoritative. Inherits P2-02's version-1 document (the
+      server dedupe key authoritative. Inherits P4-03's appointment task, whose
+      `due` result is decided from a snapshot read outside the terminal commit:
+      delivery must re-check the record/ref in the intent commit (a supersede can
+      land in that window), and the task's version bump adds the intent write. Inherits P2-02's version-1 document (the
       committed intents, the category-only title catalog and the dedupe key) and
       adds the outbox/delivery fields as version 2 with a `migrate`.
 - [ ] **P4-06** Notification centre, prefs, test notification, badge; host

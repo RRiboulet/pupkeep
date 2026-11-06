@@ -92,7 +92,7 @@ function appointment(overrides: Partial<Appointment> = {}): Appointment {
     durationMin: 30,
     status: "scheduled",
     reminderOffsetsMin: [1440, 60],
-    reminderTaskIds: [],
+    reminders: [],
     createdBy: "owner",
     createdByLabel: "Alex",
     updatedAt: LATE.toISOString(),
@@ -174,9 +174,29 @@ test("a stored record always carries its offsets, and an empty list means off", 
   // A stored record must be explicit: absence would be ambiguous with "off".
   assert.equal(parseAppointment({ ...appointment(), reminderOffsetsMin: undefined }), undefined);
   assert.deepEqual(parseAppointment(appointment({ reminderOffsetsMin: [] }))?.reminderOffsetsMin, []);
-  assert.deepEqual(parseAppointment(appointment({ reminderTaskIds: [3, 7] }))?.reminderTaskIds, [3, 7]);
-  assert.equal(parseAppointment({ ...appointment(), reminderTaskIds: [3, 3] }), undefined);
-  assert.equal(parseAppointment({ ...appointment(), reminderTaskIds: [0] }), undefined);
+  const refs = [
+    { taskId: 3, offsetMin: 1440, dueAt: 1_900_000_000_000 },
+    { taskId: 7, offsetMin: 60, dueAt: 1_900_100_000_000 },
+  ];
+  assert.deepEqual(parseAppointment(appointment({ reminders: refs }))?.reminders, refs);
+  assert.equal(
+    parseAppointment({ ...appointment(), reminders: [refs[0], { ...refs[1], taskId: 3 }] }),
+    undefined,
+    "a repeated task id could not be retired twice",
+  );
+  assert.equal(
+    parseAppointment({ ...appointment(), reminders: [refs[0], { ...refs[1], offsetMin: 1440 }] }),
+    undefined,
+    "two tasks for one offset would double the reminder",
+  );
+  assert.equal(parseAppointment({ ...appointment(), reminders: [{ ...refs[0], taskId: 0 }] }), undefined);
+  assert.equal(parseAppointment({ ...appointment(), reminders: [{ ...refs[0], offsetMin: -1 }] }), undefined);
+  assert.equal(parseAppointment({ ...appointment(), reminders: [{ ...refs[0], dueAt: 1.5 }] }), undefined);
+  assert.equal(
+    parseAppointment({ ...appointment(), reminders: [{ ...refs[0], offsetMin: 120 }] }),
+    undefined,
+    "a ref for an offset the record does not configure is refused",
+  );
 });
 
 test("reminder offsets are distinct whole minutes within 30 days, in the caller's order", () => {
@@ -201,7 +221,7 @@ test("the calendar refuses a repeated id and an unparseable record", () => {
   );
   assert.equal(parseCalendar({ ...emptyCalendar(), appointments: [{ id: "x" }] }), undefined);
   assert.deepEqual(parseCalendar({ ...emptyCalendar(), createdAt: LATE.toISOString() }), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     appointments: [],
     createdAt: LATE.toISOString(),
   });
@@ -277,24 +297,36 @@ test("creating an appointment is one commit: the record, one activity line and t
       id: "appointment-1",
     });
     assert.equal(outcome.kind, "created");
-    assert.deepEqual(outcome.appointment, {
-      id: "appointment-1",
-      title: "Vet visit",
-      localDate: TODAY,
-      timeLocal: "09:00",
-      timezone: "Europe/Paris",
-      durationMin: 30,
-      location: "Rue de Lyon",
-      status: "scheduled",
-      // The household's default offsets (PLAN §8.3: [1440, 60]).
-      reminderOffsetsMin: [1440, 60],
-      reminderTaskIds: [],
-      createdBy: "owner",
-      createdByLabel: "Alex",
-      updatedAt: LATE.toISOString(),
-      rev: 0,
-      actionId: "http:a-1",
-    });
+    // One task per offset still ahead of the clock: the 60-minute one is; the
+    // one-day one already passed at this clock (LATE is 23:30Z on the 29th and
+    // the visit starts 08:00Z on the 30th), so it is skipped, not fired late.
+    assert.deepEqual(
+      outcome.appointment.reminders.map((ref) => ref.offsetMin),
+      [60],
+      "a past offset is not armed",
+    );
+    assert.ok((outcome.appointment.reminders[0]?.taskId ?? 0) > 0);
+    assert.deepEqual(
+      { ...outcome.appointment, reminders: [] },
+      {
+        id: "appointment-1",
+        title: "Vet visit",
+        localDate: TODAY,
+        timeLocal: "09:00",
+        timezone: "Europe/Paris",
+        durationMin: 30,
+        location: "Rue de Lyon",
+        status: "scheduled",
+        // The household's default offsets (PLAN §8.3: [1440, 60]).
+        reminderOffsetsMin: [1440, 60],
+        reminders: [],
+        createdBy: "owner",
+        createdByLabel: "Alex",
+        updatedAt: LATE.toISOString(),
+        rev: 0,
+        actionId: "http:a-1",
+      },
+    );
     assert.deepEqual((await readCalendar(opened.harness, context)).appointments, [outcome.appointment]);
     const activity = await opened.harness.snapshot(ActivityDoc, context);
     assert.deepEqual(
@@ -495,7 +527,7 @@ test("a stale revision is refused with no write, and a cancelled appointment is 
     const calendar = await readCalendar(opened.harness, context);
     assert.equal(calendar.appointments.length, 1);
     assert.equal(calendar.appointments[0]?.status, "cancelled");
-    assert.deepEqual(calendar.appointments[0]?.reminderTaskIds, [], "P4-03 will cancel the armed tasks");
+    assert.deepEqual(calendar.appointments[0]?.reminders, [], "a cancellation clears the armed refs");
   });
 });
 
@@ -678,6 +710,28 @@ test("a household-less database that already has appointments is refused, not re
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("the calendar document migrates version 1 to version 2 without an armed task", () => {
+  const migrate = CalendarDoc.definition.migrate;
+  assert.ok(migrate, "the document declares its migration");
+  const legacy = {
+    schemaVersion: 1,
+    createdAt: LATE.toISOString(),
+    appointments: [
+      {
+        ...appointment(),
+        reminderTaskIds: [],
+      },
+    ],
+  };
+  assert.throws(() => migrate(legacy as never, 0), /no migration/);
+  const migrated = migrate(legacy as never, 1);
+  assert.equal(migrated.schemaVersion, 2);
+  assert.equal(migrated.appointments[0]?.id, "appointment-1", "the appointment survives the upgrade");
+  assert.deepEqual(migrated.appointments[0]?.reminders, [], "P4-01 never armed a task");
+  assert.equal((migrated.appointments[0] as unknown as Record<string, unknown>).reminderTaskIds, undefined);
+  assert.deepEqual(emptyCalendar().schemaVersion, 2, "a fresh document starts at the current version");
 });
 
 test("the calendar survives a reopen of the database", async () => {
