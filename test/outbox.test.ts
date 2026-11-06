@@ -208,6 +208,43 @@ test("a pending intent is pushed to each member's device with the category title
   });
 });
 
+test("one action is one item and one push: the dedupe key collapses a repeat and is the tag", async () => {
+  await withOutbox(async (fixture) => {
+    const owner = makeSubscription("owner");
+    await configure(fixture, [owner.record]);
+    // The same reminder appended twice (a re-fired task, a retried commit): the
+    // server-side dedupe key is authoritative, so the second is dropped.
+    const { appendNotificationIntents } = await import("../src/server/notifications/intents.ts");
+    // Distinct ids, the same action: the parser refuses a duplicate id, and it is
+    // the dedupe key (not the id) that has to collapse these into one item.
+    const append = async (id: string): Promise<void> => {
+      await fixture.opened.harness.commit(async (tx) => {
+        await appendNotificationIntents(tx, [intent({ id })], NOW);
+      }, context);
+    };
+    await append("notice-first");
+    await append("notice-second");
+    const stored = await fixture.opened.harness.snapshot(NotificationsDoc, context);
+    const items = (stored?.items as NotificationIntent[]) ?? [];
+    assert.equal(items.length, 1, "one item for one action");
+    assert.equal(items[0]!.dedupeKey, "feed_overdue|2026-10-29|slot|slot-a|owner");
+
+    const calls = capture();
+    const result = await drainNotificationOutbox({
+      store: fixture.opened.harness,
+      context,
+      push: fixture.push,
+      now: NOW,
+      transport: calls.transport,
+    });
+    assert.equal(result.sent, 1);
+    assert.equal(calls.calls.length, 1, "one push, not one per append");
+    const payload = JSON.parse(decrypt(calls.calls[0]!.body, owner)) as { tag: string; title: string };
+    assert.equal(payload.tag, items[0]!.dedupeKey, "the display tag is the server's dedupe key");
+    assert.equal(payload.title, "A meal is overdue", "the payload carries the category title only");
+  });
+});
+
 test("a member with no device is skipped, and a disabled category is dropped", async () => {
   await withOutbox(async (fixture) => {
     const owner = makeSubscription("owner");

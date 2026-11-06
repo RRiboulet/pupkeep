@@ -1,7 +1,7 @@
 # Todo guide — how to work the Pupkeep plan
 
-**Status:** Phase 3 complete on `main` through P3-08, and Phase 4 through
-P4-09. Phase 1 is complete on
+**Status:** Phase 3 complete on `main` through P3-08, and **Phase 4 complete
+through P4-10**. Phase 1 is complete on
 `main` through P1-14, and G1 is covered by the suite (`test/e2e.test.ts` is the
 slice end to end, `test/setup.test.ts` the first-run setup). Phase 2 is complete
 on `main` through P2-09 (`app.feeding`, the feed service, routes, tools and UI,
@@ -56,8 +56,13 @@ picker are served by `/api/models/*` with the Settings card. **P4-09** is comple
 the one-time invite, the three notification paths with ntfy onboarding, and the
 quick-tunnel HTTPS/PWA/push test), the Settings invite card makes its day-one
 step real, and the guide states what is not yet true (the approval card, P0-10's
-partner delivery, no named tunnel). The next task is **P4-10** (the Phase 4 test
-slice). P0-03/P0-08/P0-10
+partner delivery, no named tunnel). **P4-10** is complete: `test/phase4.test.ts` closes
+Gate G4's automated half (an armed reminder fires after a real close/reopen, a
+cancelled one never fires, the dedupe key is authoritative and is the push tag),
+and it found a real bug — the "At the start" reminder offset could never fire,
+which is now fixed with a five-minute grace. The device legs of G4 (Termux:API,
+Web Push over the tunnel, the partner's iPhone) stay P0-10/P4-09 checks. The next
+task is **P5-01** (the kill/restart matrix on the phone). P0-03/P0-08/P0-10
 remain device-gated partner checks and do not block the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`

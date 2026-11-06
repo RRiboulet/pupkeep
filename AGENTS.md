@@ -19,8 +19,10 @@ Termux:API), **P4-07** (`app.approvals`, the propose-only tools, the confirm and
 cancel routes), **P4-08** (`app.usage`, the monthly cap, the provider catalog
 from `secrets.json`, the allowlist probe, the picker and the Settings card) and
 **P4-09** (the caregivers' access and notification guide, plus the Settings
-invite card) are complete; the next task is **P4-10** (the Phase 4 test
-slice). The agent can only *propose* an appointment or meal-schedule change; a
+invite card) and **P4-10** (the Gate G4 test slice: a reminder across a real
+close/reopen, a cancelled one never firing, the dedupe key as the push tag) are
+complete, so **Phase 4 is done and Gate G4's automated half is covered**; the
+next task is **P5-01** (the kill/restart matrix on the phone). The agent can only *propose* an appointment or meal-schedule change; a
 caregiver's confirmation route executes the stored action in one commit. The
 approval centre has no browser UI yet (the Agent screen is still a placeholder),
 so a confirmation is an HTTP call until the thread's cards land. `harness.usage()`

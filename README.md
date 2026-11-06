@@ -3,8 +3,8 @@
 A shared, agent-operated puppy care app for two caregivers, built on
 [Pi Durable](https://github.com/earendil-works/pi).
 
-> **Status: Phase 4 in progress — P4-01 to P4-09 are done, P4-10 (the Phase 4
-> test slice) is next.** Phases 1–3 are complete: the launcher, auth, data files,
+> **Status: Phase 4 complete — P4-01 to P4-10 are done, and Gate G4's automated
+> half is covered. Phases 1–3 are complete: the launcher, auth, data files,
 > the durable harness, encrypted backup, the devcontainer, the shared household
 > thread, the profile and setup wizard, feeding, walks, growth, milestones,
 > showers, the calendar with its reminder tasks, the notification outbox/centre,
