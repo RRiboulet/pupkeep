@@ -2,7 +2,10 @@
 //
 // One writer, one document: create, update and cancel an appointment, each in
 // one commit that also writes one activity line and the `app.commands`
-// idempotency record. The decisions live in `shared/calendar.ts` (the shape,
+// idempotency record. P4-07 split each writer into a transaction-level core
+// (`createAppointmentIn`, `changeAppointmentIn`) and an idempotent wrapper, so a
+// caregiver's confirmation executes the *same* code the button does inside its
+// own commit (§9.3) instead of a second write path. The decisions live in `shared/calendar.ts` (the shape,
 // the text bounds, the offset list); this module adds what needs the server:
 // the household zone snapshot, the derived instant, the revision check and the
 // actor resolved inside the commit.
@@ -20,10 +23,11 @@
 // idempotency lookup, so a retried save with the same key replays as success
 // even though its own commit bumped the revision.
 //
-// Carried out of P4-01: the HTTP surface, the agent tools and the Calendar UI
-// (P4-02); the reminder tasks and their refs (P4-03); the
-// approval around a cancellation (P4-07). Cancellation here is already a state
-// change, never a delete: history stays readable.
+// P4-02 added the HTTP surface, the agent reads and the Calendar UI; P4-03 the
+// reminder tasks and their refs; P4-07 the approval path (the agent proposes,
+// and `confirmApproval` runs `createAppointmentIn`/`changeAppointmentIn` in the
+// deciding commit). Cancellation here is already a state change, never a delete:
+// history stays readable.
 
 import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
@@ -39,10 +43,10 @@ import {
   type CalendarWindow,
 } from "../../shared/calendar.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
-import type { ActorResolver } from "./actor.ts";
+import type { ActorRef, ActorResolver } from "./actor.ts";
 import { requestHashOf, runIdempotent, type CommandOutcome } from "./commands.ts";
 import { ActivityDoc, CalendarDoc, HouseholdDoc, parseCalendar, type DocStore } from "./docs.ts";
-import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
+import { DomainConflictError, UnavailableError } from "./errors.ts";
 import { armAppointmentReminders } from "../reminders/appointment-schedule.ts";
 import { instantAtLocalWallClock, localDateAt } from "./time.ts";
 
@@ -246,9 +250,73 @@ export type AppointmentCreateOutcome =
   | { kind: "key-conflict" };
 
 /**
- * Create one appointment. The household is read for two things: the zone
- * snapshot and the default reminder offsets (`settings.appointmentReminderOffsetsMin`
- * — the plan's one source; `[]` means the household turned reminders off).
+ * The commit half of a create, shared by the HTTP route and an approved agent
+ * proposal (§9.3, §10.3: one domain function, no second write path). It runs
+ * entirely inside the caller's transaction: the record, the armed reminders and
+ * the activity line land together or not at all.
+ */
+export type AppointmentCreateCommit = {
+  /** Already resolved from the household this transaction reads (§9.2). */
+  readonly actor: ActorRef;
+  readonly actionId: string;
+  /** Normalised fields; `reminderOffsetsMin` absent means the household default. */
+  readonly fields: AppointmentFields;
+  readonly now: Date;
+  /** Test seam; a fresh uuid otherwise. */
+  readonly id?: string;
+};
+
+/**
+ * Create one appointment inside the caller's commit. The household is read for
+ * two things: the zone snapshot and the default reminder offsets
+ * (`settings.appointmentReminderOffsetsMin` — the plan's one source; `[]` means
+ * the household turned reminders off).
+ */
+export async function createAppointmentIn(tx: Tx, input: AppointmentCreateCommit): Promise<Appointment> {
+  const household = await tx.doc(HouseholdDoc);
+  const id = input.id ?? randomUUID();
+
+  const appointment = appointmentFrom(
+    input.fields,
+    { id, rev: 0, createdBy: input.actor.id, createdByLabel: input.actor.label, actionId: input.actionId },
+    household.timezone,
+    input.fields.reminderOffsetsMin ?? [...household.settings.appointmentReminderOffsetsMin],
+    input.now,
+  );
+  // Backstop, as `logFeed` does: a record the parser refuses would fail the
+  // next boot, so the completed list is validated before it is stored.
+  // P4-03: the same commit arms the reminders on the hidden system
+  // conversation. The refs are stored on the record before the backstop
+  // parse, so a task whose id could not be stored rolls the create back.
+  appointment.reminders = await armAppointmentReminders(tx, household, appointment, input.now);
+  const parsed = parseAppointment(appointment);
+  if (!parsed) throw new DomainConflictError(APPOINTMENT_RULE);
+
+  const draft = await tx.doc(CalendarDoc);
+  if (draft.createdAt === "") draft.createdAt = input.now.toISOString();
+  const appointments = [...draft.appointments, parsed];
+  if (!parseAppointmentList(appointments)) throw new DomainConflictError(APPOINTMENT_RULE);
+  draft.appointments = appointments;
+
+  appendActivity(
+    await tx.doc(ActivityDoc),
+    activityEntry({
+      kind: "appointment.created",
+      // The title is caregiver free text; it is quoted so a title that reads
+      // like a sentence cannot pass itself off as one in the feed.
+      summary: `${input.actor.label} added the appointment ${JSON.stringify(parsed.title)}`,
+      actorId: input.actor.id,
+      actorLabel: input.actor.label,
+      now: input.now,
+    }),
+  );
+
+  return parsed;
+}
+
+/**
+ * Create one appointment from a route or a tool: parse the caller's fields, then
+ * one idempotent commit around `createAppointmentIn`.
  */
 export async function createAppointment(
   store: DocStore,
@@ -270,44 +338,15 @@ export async function createAppointment(
     async (tx) => {
       const household = await tx.doc(HouseholdDoc);
       const actor = await input.actor(tx, household);
-      const id = input.id ?? randomUUID();
-
-      const appointment = appointmentFrom(
-        fields,
-        { id, rev: 0, createdBy: actor.id, createdByLabel: actor.label, actionId: input.actionId },
-        household.timezone,
-        fields.reminderOffsetsMin ?? [...household.settings.appointmentReminderOffsetsMin],
-        now,
-      );
-      // Backstop, as `logFeed` does: a record the parser refuses would fail the
-      // next boot, so the completed list is validated before it is stored.
-      // P4-03: the same commit arms the reminders on the hidden system
-      // conversation. The refs are stored on the record before the backstop
-      // parse, so a task whose id could not be stored rolls the create back.
-      appointment.reminders = await armAppointmentReminders(tx, household, appointment, now);
-      const parsed = parseAppointment(appointment);
-      if (!parsed) throw new DomainConflictError(APPOINTMENT_RULE);
-
-      const draft = await tx.doc(CalendarDoc);
-      if (draft.createdAt === "") draft.createdAt = now.toISOString();
-      const appointments = [...draft.appointments, parsed];
-      if (!parseAppointmentList(appointments)) throw new DomainConflictError(APPOINTMENT_RULE);
-      draft.appointments = appointments;
-
-      appendActivity(
-        await tx.doc(ActivityDoc),
-        activityEntry({
-          kind: "appointment.created",
-          // The title is caregiver free text; it is quoted so a title that reads
-          // like a sentence cannot pass itself off as one in the feed.
-          summary: `${actor.label} added the appointment ${JSON.stringify(parsed.title)}`,
-          actorId: actor.id,
-          actorLabel: actor.label,
+      return {
+        appointment: await createAppointmentIn(tx, {
+          actor,
+          actionId: input.actionId,
+          fields,
           now,
+          ...(input.id !== undefined ? { id: input.id } : {}),
         }),
-      );
-
-      return { appointment: parsed };
+      };
     },
   );
 
@@ -356,6 +395,137 @@ export type AppointmentChangeOutcome =
   | { kind: "stale"; appointment: Appointment }
   | { kind: "key-conflict" };
 
+/**
+ * The commit half of an update or a cancellation, shared by the HTTP route and
+ * an approved agent proposal (§9.3, §10.3). Everything §7.4 asks for happens
+ * inside the caller's transaction: the revision check, the lifecycle check, the
+ * replacement record (and, for an update, the re-armed reminders), the document
+ * backstop and the activity line.
+ */
+export type AppointmentChangeCommit = {
+  /** Already resolved from the household this transaction reads (§9.2). */
+  readonly actor: ActorRef;
+  readonly actionId: string;
+  readonly id: string;
+  /** The revision the caller read; the action was proposed against it. */
+  readonly rev: number;
+  readonly now: Date;
+} & (
+  | { readonly kind: "update"; /** The normalised fields the edit carries. */ readonly fields: AppointmentFields }
+  | { readonly kind: "cancel" }
+);
+
+export type AppointmentChangeCommitted = {
+  appointment: Appointment;
+  retiredTaskIds: number[];
+};
+
+/**
+ * The revision a change was read at is no longer current. A private
+ * control-flow signal inside the domain — the callers turn it into a 409 that
+ * carries the committed record — so it is not a caregiver-facing refusal. The
+ * record is detached from the transaction's draft overlay, because the commit is
+ * about to roll back and a draft reference cannot be read afterwards.
+ */
+export class AppointmentStaleError extends Error {
+  readonly current: Appointment;
+
+  constructor(current: Appointment) {
+    super("the appointment changed since it was read");
+    this.name = "AppointmentStaleError";
+    this.current = current;
+  }
+}
+
+/**
+ * Update or cancel one appointment inside the caller's commit. The one writer
+ * behind both surfaces, so an approved proposal cannot drift from the button in
+ * the app.
+ */
+export async function changeAppointmentIn(tx: Tx, input: AppointmentChangeCommit): Promise<AppointmentChangeCommitted> {
+  const household = await tx.doc(HouseholdDoc);
+  const draft = await tx.doc(CalendarDoc);
+  const index = draft.appointments.findIndex((entry) => entry.id === input.id);
+  const found = index === -1 ? undefined : draft.appointments[index];
+  // A missing record is not a stale one: the caller gets 404, not 409.
+  if (!found) throw new AppointmentUnknownError();
+  if (found.rev !== input.rev) {
+    const current = parseAppointment(found);
+    if (current === undefined) throw new DomainConflictError(APPOINTMENT_RULE);
+    throw new AppointmentStaleError(current);
+  }
+  // A cancellation is final and a completed visit is history: neither is
+  // editable, and neither is silently reopened by a retried key.
+  if (found.status !== "scheduled") {
+    throw new DomainConflictError(
+      found.status === "cancelled" ? "that appointment is cancelled" : "that appointment is completed",
+    );
+  }
+
+  // Every edit or cancellation replaces the armed tasks; their ids travel back
+  // so the caller can abort them once this commit lands.
+  const retiredTaskIds = found.reminders.map((ref) => ref.taskId);
+
+  let next: Appointment;
+  if (input.kind === "cancel") {
+    next = {
+      ...found,
+      status: "cancelled",
+      updatedAt: input.now.toISOString(),
+      rev: found.rev + 1,
+      actionId: input.actionId,
+      // A cancelled visit has no pending reminders; the caller retires the
+      // tasks the record used to carry.
+      reminders: [],
+    };
+  } else {
+    const fields = input.fields;
+    const updated = appointmentFrom(
+      fields,
+      {
+        id: found.id,
+        rev: found.rev + 1,
+        createdBy: found.createdBy,
+        createdByLabel: found.createdByLabel,
+        actionId: input.actionId,
+      },
+      // The editor writes wall-clock times on the household's current clock.
+      household.timezone,
+      fields.reminderOffsetsMin ?? found.reminderOffsetsMin,
+      input.now,
+    );
+    // A new revision is a new arm: the old tasks carry the previous revision and
+    // no-op, and the caller aborts them after this commit. Offsets already past
+    // are skipped by the plan.
+    updated.reminders = await armAppointmentReminders(tx, household, updated, input.now);
+    next = updated;
+  }
+
+  const parsed = parseAppointment(next);
+  if (!parsed) throw new DomainConflictError(APPOINTMENT_RULE);
+  const appointments = draft.appointments.map((entry, position) => (position === index ? parsed : entry));
+  if (!parseAppointmentList(appointments)) throw new DomainConflictError(APPOINTMENT_RULE);
+  draft.appointments = appointments;
+
+  appendActivity(
+    await tx.doc(ActivityDoc),
+    activityEntry({
+      kind: input.kind === "cancel" ? "appointment.cancelled" : "appointment.updated",
+      // The title is caregiver free text; it is quoted so a title that reads like
+      // a sentence cannot pass itself off as one in the feed.
+      summary:
+        input.kind === "cancel"
+          ? `${input.actor.label} cancelled the appointment ${JSON.stringify(parsed.title)}`
+          : `${input.actor.label} changed the appointment ${JSON.stringify(parsed.title)}`,
+      actorId: input.actor.id,
+      actorLabel: input.actor.label,
+      now: input.now,
+    }),
+  );
+
+  return { appointment: parsed, retiredTaskIds };
+}
+
 type AppointmentChangeRun = {
   readonly store: DocStore;
   readonly context: Context;
@@ -366,23 +536,19 @@ type AppointmentChangeRun = {
   readonly now: Date;
   /** Hashed into the idempotency record: identical bodies replay, others conflict. */
   readonly request: JsonObject;
-  /** Build the next record from the committed one; the runner parses it. */
-  readonly next: (current: Appointment, household: Household, tx: Tx) => Appointment | Promise<Appointment>;
-  readonly activityKind: string;
-  readonly activitySummary: (actorLabel: string, title: string) => string;
-};
+} & (
+  | { readonly kind: "update"; readonly fields: AppointmentFields }
+  | { readonly kind: "cancel" }
+);
 
 /**
  * The one place update and cancel share their §7.4 ceremony: idempotency lookup,
- * the actor resolved inside the commit, the revision check, the lifecycle check,
- * the document backstop and the activity line. Only the new record and the
- * activity sentence differ, which is what `next` and `activitySummary` supply.
+ * the actor resolved inside the commit, then `changeAppointmentIn`. A stale
+ * revision rolls the whole commit back, key included: the caller re-reads and
+ * retries as a new action, it does not replay this one.
  */
 async function runAppointmentChange(run: AppointmentChangeRun): Promise<AppointmentChangeOutcome> {
-  // Captured at the revision check so the stale answer carries the record the
-  // transaction read, rather than re-reading the document after the rollback.
-  let current: Appointment | undefined;
-  let outcome: CommandOutcome<{ appointment: Appointment }>;
+  let outcome: CommandOutcome<AppointmentChangeCommitted>;
   try {
     outcome = await runIdempotent(
       { store: run.store, context: run.context },
@@ -390,62 +556,26 @@ async function runAppointmentChange(run: AppointmentChangeRun): Promise<Appointm
       async (tx: Tx) => {
         const household = await tx.doc(HouseholdDoc);
         const actor = await run.actor(tx, household);
-        const draft = await tx.doc(CalendarDoc);
-        const index = draft.appointments.findIndex((entry) => entry.id === run.id);
-        const found = index === -1 ? undefined : draft.appointments[index];
-        // A missing record is not a stale one: the caller gets 404, not 409.
-        if (!found) throw new AppointmentUnknownError();
-        if (found.rev !== run.rev) {
-          // Detach the record from the transaction's draft overlay: the commit
-          // is about to roll back, and a draft reference cannot be read after.
-          current = parseAppointment(found);
-          if (current === undefined) throw new DomainConflictError(APPOINTMENT_RULE);
-          throw new StaleRevisionError("the appointment changed since it was read");
-        }
-        // A cancellation is final and a completed visit is history: neither is
-        // editable, and neither is silently reopened by a retried key.
-        if (found.status !== "scheduled") {
-          throw new DomainConflictError(
-            found.status === "cancelled" ? "that appointment is cancelled" : "that appointment is completed",
-          );
-        }
-
-        // Every edit or cancellation replaces the armed tasks; their ids travel
-        // back so the caller can abort them once this commit lands.
-        const retiredTaskIds = found.reminders.map((ref) => ref.taskId);
-        const parsed = parseAppointment(await run.next(found, household, tx));
-        if (!parsed) throw new DomainConflictError(APPOINTMENT_RULE);
-        const appointments = draft.appointments.map((entry, position) => (position === index ? parsed : entry));
-        if (!parseAppointmentList(appointments)) throw new DomainConflictError(APPOINTMENT_RULE);
-        draft.appointments = appointments;
-
-        appendActivity(
-          await tx.doc(ActivityDoc),
-          activityEntry({
-            kind: run.activityKind,
-            summary: run.activitySummary(actor.label, parsed.title),
-            actorId: actor.id,
-            actorLabel: actor.label,
-            now: run.now,
-          }),
+        const common = {
+          actor,
+          actionId: run.actionId,
+          id: run.id,
+          rev: run.rev,
+          now: run.now,
+        };
+        return changeAppointmentIn(
+          tx,
+          run.kind === "update" ? { ...common, kind: "update", fields: run.fields } : { ...common, kind: "cancel" },
         );
-        return { appointment: parsed, retiredTaskIds };
       },
     );
   } catch (error) {
-    // A stale revision rolls the whole commit back, key included: the caller
-    // re-reads and retries as a new action, it does not replay this one.
-    if (error instanceof StaleRevisionError && current !== undefined) {
-      return { kind: "stale", appointment: current };
-    }
+    if (error instanceof AppointmentStaleError) return { kind: "stale", appointment: error.current };
     throw error;
   }
 
   if (outcome.kind === "conflict") return { kind: "key-conflict" };
-  const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as {
-    appointment: Appointment;
-    retiredTaskIds?: number[];
-  };
+  const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as AppointmentChangeCommitted;
   return {
     kind: outcome.kind === "replayed" ? "replayed" : "changed",
     appointment: recorded.appointment,
@@ -479,40 +609,18 @@ export async function updateAppointment(
     rev: input.rev,
     now,
     request: { id: input.id, rev: input.rev, ...requestFields(fields) } as JsonObject,
-    next: async (current, household, tx) => {
-      const updated = appointmentFrom(
-        fields,
-        {
-          id: current.id,
-          rev: current.rev + 1,
-          createdBy: current.createdBy,
-          createdByLabel: current.createdByLabel,
-          actionId: input.actionId,
-        },
-        // The editor writes wall-clock times on the household's current clock.
-        household.timezone,
-        fields.reminderOffsetsMin ?? current.reminderOffsetsMin,
-        now,
-      );
-      // A new revision is a new arm: the old tasks carry the previous revision
-      // and no-op, and the caller aborts them after this commit. Offsets already
-      // past are skipped by the plan.
-      updated.reminders = await armAppointmentReminders(tx, household, updated, now);
-      return updated;
-    },
-    activityKind: "appointment.updated",
-    // The title is caregiver free text; it is quoted so a title that reads like
-    // a sentence cannot pass itself off as one in the feed.
-    activitySummary: (label, title) => `${label} changed the appointment ${JSON.stringify(title)}`,
+    kind: "update",
+    fields,
   });
 }
 
 /**
  * Cancel an appointment: a **state change**, not a delete (P4-01's guardrail).
  * The record keeps its history and its armed task ids; P4-03's cancel path
- * cancels the tasks, and P4-07 wraps the user-facing action in an approval.
- * Cancelling an already-cancelled record with a *new* key is refused rather
- * than silently bumping the revision a second time.
+ * cancels the tasks, and P4-07 makes the agent's cancellation a proposal a
+ * caregiver confirms (the confirm commit calls `changeAppointmentIn`, the same
+ * code this wrapper does). Cancelling an already-cancelled record with a *new*
+ * key is refused rather than silently bumping the revision a second time.
  */
 export async function cancelAppointment(
   store: DocStore,
@@ -530,17 +638,6 @@ export async function cancelAppointment(
     rev: input.rev,
     now,
     request: { id: input.id, rev: input.rev } as JsonObject,
-    next: (current) => ({
-      ...current,
-      status: "cancelled",
-      updatedAt: now.toISOString(),
-      rev: current.rev + 1,
-      actionId: input.actionId,
-      // A cancelled visit has no pending reminders; the runner returns the old
-      // ids so the caller retires the tasks.
-      reminders: [],
-    }),
-    activityKind: "appointment.cancelled",
-    activitySummary: (label, title) => `${label} cancelled the appointment ${JSON.stringify(title)}`,
+    kind: "cancel",
   });
 }

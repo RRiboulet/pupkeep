@@ -54,6 +54,7 @@ import { createGrowthTools } from "./agent/growth-tools.ts";
 import { createTrainingTools } from "./agent/training-tools.ts";
 import { createShowerTools } from "./agent/shower-tools.ts";
 import { createCalendarTools } from "./agent/calendar-tools.ts";
+import { createApprovalTools } from "./agent/approval-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
@@ -260,9 +261,12 @@ export function installAppExtensions(registry: Registry<ToolRegistration>): void
   registry.install(createGrowthTools());
   registry.install(createTrainingTools());
   registry.install(createShowerTools());
-  // P4-02: the free calendar reads. Appointment writes are schedule changes and
-  // wait for P4-07's approval path, so this extension has no write tool.
+  // P4-02: the free calendar reads.
   registry.install(createCalendarTools());
+  // P4-07: the proposing tools. They write an `app.approvals` record and change
+  // nothing else; the caregiver's confirm route executes the stored action, so
+  // the agent has no way to book, move or cancel an appointment itself.
+  registry.install(createApprovalTools());
   // P2-09: the feeding reminder task definition. Installing it is what lets a
   // task armed by the meal schedule sleep and wake; the hidden system
   // conversation owns it and never selects an extension of its own (§9.1).

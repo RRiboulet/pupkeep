@@ -10,6 +10,28 @@
 /** The custom Pi Durable entry kind both caregivers submit through. */
 export const CHAT_ENTRY_KIND = "app.chat";
 
+/**
+ * §9.3's outcome entry: a confirmed or declined proposal, appended to the shared
+ * thread by the commit that decided it. It carries no model content, so it costs
+ * no tokens and starts no run; it exists so the caregiver who did **not** tap the
+ * button sees what happened, next to what the agent proposed.
+ */
+export const APPROVAL_ENTRY_KIND = "app.approval";
+
+/** `data` of an `app.approval` entry, built by the approval service. */
+export type ApprovalEntryData = {
+  approvalId: string;
+  /** The deciding commit's clock, so the transcript can stamp the entry. */
+  at: string;
+  /** Which way it went; `expired` is never committed, it is only read. */
+  status: "confirmed" | "cancelled";
+  /** App-built sentence: who decided what, with caregiver text quoted. */
+  text: string;
+  /** Config member id of the decider, or `null` for the household fallback. */
+  byUserId: string | null;
+  byLabel: string;
+};
+
 /** Display name when no household profile matches the author. */
 export const HOUSEHOLD_FALLBACK_LABEL = "Household";
 
@@ -52,6 +74,17 @@ export type TranscriptEntry =
       toolCallId: string;
       toolName: string;
       status: "ok" | "error";
+      text: string;
+      /** Household attribution fence: never `undefined` (PLAN §9.2). */
+      byUserId: string | null;
+      byLabel: string;
+    }
+  | {
+      kind: "approval";
+      entryId: number;
+      at?: string;
+      approvalId: string;
+      status: "confirmed" | "cancelled";
       text: string;
       /** Household attribution fence: never `undefined` (PLAN §9.2). */
       byUserId: string | null;

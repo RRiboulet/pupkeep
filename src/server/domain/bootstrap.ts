@@ -3,7 +3,7 @@
 // The first boot is one commit: two ownerless conversations (the human-facing
 // thread and the hidden system thread) and the household, puppy, activity,
 // commands, feeding, notifications, walks, growth, training, showers and
-// calendar documents. A crash therefore leaves either all of it or none of it;
+// calendar and approvals documents. A crash therefore leaves either all of it or none of it;
 // a second boot reads the household and only repairs what is missing —
 // including `app.feeding` for a database that predates P1-14 and
 // `app.notifications` for one that predates P2-02, so an upgraded phone gets
@@ -18,6 +18,7 @@ import type { Context } from "@earendil-works/chord";
 import type { ConversationId, Harness } from "@earendil-works/pi-durable";
 import type {
   Activity,
+  Approvals,
   Calendar,
   Commands,
   Feeding,
@@ -34,6 +35,7 @@ import { isIanaZone } from "../../shared/profile.ts";
 import { activeMembers, reconcileMembers, type AppConfig, type Reconciliation } from "../config.ts";
 import {
   ActivityDoc,
+  ApprovalsDoc,
   CalendarDoc,
   CommandsDoc,
   FeedingDoc,
@@ -45,6 +47,7 @@ import {
   PuppyDoc,
   WalksDoc,
   emptyActivity,
+  emptyApprovals,
   emptyCalendar,
   emptyCommands,
   emptyFeeding,
@@ -56,6 +59,7 @@ import {
   emptyPuppy,
   emptyWalks,
   parseActivity,
+  parseApprovals,
   parseCalendar,
   parseCommands,
   parseFeeding,
@@ -180,6 +184,10 @@ function initialNotifications(createdAt: string): Notifications {
   return { ...emptyNotifications(), createdAt };
 }
 
+function initialApprovals(createdAt: string): Approvals {
+  return { ...emptyApprovals(), createdAt };
+}
+
 function initialWalks(createdAt: string): Walks {
   return { ...emptyWalks(), createdAt };
 }
@@ -239,6 +247,9 @@ export async function bootstrapSession(
     if ((await harness.snapshot(CalendarDoc, context)) !== undefined) {
       throw new BootstrapError("app.household is missing but app.calendar exists; refusing to reset it");
     }
+    if ((await harness.snapshot(ApprovalsDoc, context)) !== undefined) {
+      throw new BootstrapError("app.household is missing but app.approvals exists; refusing to reset it");
+    }
 
     const createdAt = now().toISOString();
     const timezone = options.timezone ?? defaultTimezone();
@@ -262,6 +273,7 @@ export async function bootstrapSession(
       Object.assign(await tx.doc(TrainingDoc), initialTraining(createdAt));
       Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
       Object.assign(await tx.doc(CalendarDoc), initialCalendar(createdAt));
+      Object.assign(await tx.doc(ApprovalsDoc), initialApprovals(createdAt));
 
       return { shared: shared.id, system: system.id };
     }, context);
@@ -285,6 +297,7 @@ export async function bootstrapSession(
         "app.training",
         "app.showers",
         "app.calendar",
+        "app.approvals",
       ],
       clearedSystemModel,
     };
@@ -384,6 +397,11 @@ export async function bootstrapSession(
   if (calendarSnapshot !== undefined && !calendar) {
     throw new BootstrapError("app.calendar is not a shape this build understands; refusing to reset it");
   }
+  const approvalsSnapshot = await harness.snapshot(ApprovalsDoc, context);
+  const approvals = approvalsSnapshot === undefined ? undefined : parseApprovals(approvalsSnapshot);
+  if (approvalsSnapshot !== undefined && !approvals) {
+    throw new BootstrapError("app.approvals is not a shape this build understands; refusing to reset it");
+  }
 
   const docsCreated: string[] = [];
   if (!puppy) docsCreated.push("app.puppy");
@@ -396,6 +414,7 @@ export async function bootstrapSession(
   if (!training) docsCreated.push("app.training");
   if (!showers) docsCreated.push("app.showers");
   if (!calendar) docsCreated.push("app.calendar");
+  if (!approvals) docsCreated.push("app.approvals");
 
   if (membersChanged || docsCreated.length > 0) {
     const createdAt = now().toISOString();
@@ -414,6 +433,7 @@ export async function bootstrapSession(
       if (!training) Object.assign(await tx.doc(TrainingDoc), initialTraining(createdAt));
       if (!showers) Object.assign(await tx.doc(ShowersDoc), initialShowers(createdAt));
       if (!calendar) Object.assign(await tx.doc(CalendarDoc), initialCalendar(createdAt));
+      if (!approvals) Object.assign(await tx.doc(ApprovalsDoc), initialApprovals(createdAt));
     }, context);
   }
 

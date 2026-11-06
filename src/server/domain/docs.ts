@@ -1,7 +1,8 @@
 // The session documents PLAN §8.1 assigns to P1-08 (household, puppy, activity,
 // commands), plus the care documents later phases added (`app.feeding` with the
 // meal slots and feed events, `app.notifications`, `app.walks`, `app.growth`,
-// `app.training`, `app.showers`, `app.calendar`), and their parsers.
+// `app.training`, `app.showers`, `app.calendar`, `app.approvals`), and their
+// parsers.
 //
 // The doc `version` and the value's `schemaVersion` start at 1. A shape change
 // increments both and adds `migrate(value, fromVersion)`; the parsers below then
@@ -42,6 +43,7 @@ import type { CheckpointInfo, DocumentReader, Tx } from "@earendil-works/pi-dura
 import { defineDoc } from "@earendil-works/pi-durable";
 import {
   ACTIVITY_SCHEMA_VERSION,
+  APPROVALS_SCHEMA_VERSION,
   CALENDAR_SCHEMA_VERSION,
   COMMANDS_SCHEMA_VERSION,
   DEFAULT_HOUSEHOLD_NAME,
@@ -58,6 +60,7 @@ import {
   WALKS_SCHEMA_VERSION,
   type Activity,
   type ActivityEntry,
+  type Approvals,
   type Calendar,
   type CommandRecord,
   type Commands,
@@ -76,6 +79,7 @@ import {
   type Walks,
 } from "../../shared/domain.ts";
 import { parseAppointmentList, parseReminderOffsets } from "../../shared/calendar.ts";
+import { parseApprovalList } from "../../shared/approvals.ts";
 import { SLOT_ID_LIMIT, parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
 import { parseGrowthMeasurements } from "../../shared/growth.ts";
 import { parseTrainingList } from "../../shared/training.ts";
@@ -168,6 +172,11 @@ export function emptyCalendar(): Calendar {
 /** No committed notification intents yet. */
 export function emptyNotifications(): Notifications {
   return { schemaVersion: NOTIFICATIONS_SCHEMA_VERSION, items: [], createdAt: "" };
+}
+
+/** No proposals yet; a fresh household has nothing waiting for a decision. */
+export function emptyApprovals(): Approvals {
+  return { schemaVersion: APPROVALS_SCHEMA_VERSION, approvals: [], createdAt: "" };
 }
 
 export function emptyWalks(): Walks {
@@ -357,6 +366,18 @@ export const NotificationsDoc = defineDoc<Notifications>({
     if (!parsed) throw new Error("app.notifications version 1 does not migrate to a valid version 2");
     return parsed;
   },
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/**
+ * The high-impact proposals (P4-07). Version 1 is the first shape, so there is
+ * no `migrate`: an approval document from an older build does not exist.
+ */
+export const ApprovalsDoc = defineDoc<Approvals>({
+  kind: "app.approvals",
+  version: 1,
+  scope: "session",
+  initial: emptyApprovals,
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
@@ -716,4 +737,19 @@ export function parseNotifications(value: unknown): Notifications | undefined {
   const items = parseNotificationIntents(record.items);
   if (!items) return undefined;
   return { schemaVersion: NOTIFICATIONS_SCHEMA_VERSION, items, createdAt: record.createdAt };
+}
+
+/**
+ * `app.approvals`: the high-impact proposals. Every invariant (the complete
+ * stored action, the §9.2 pairing, the decision fields riding on a decided
+ * record, a result only on a confirmed one) lives in `shared/approvals.ts`, so
+ * the service validates a proposal with the same rules the document uses.
+ */
+export function parseApprovals(value: unknown): Approvals | undefined {
+  const record = asRecord(value);
+  if (!record || record.schemaVersion !== APPROVALS_SCHEMA_VERSION) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  const approvals = parseApprovalList(record.approvals);
+  if (!approvals) return undefined;
+  return { schemaVersion: APPROVALS_SCHEMA_VERSION, approvals, createdAt: record.createdAt };
 }

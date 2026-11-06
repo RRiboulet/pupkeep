@@ -134,7 +134,7 @@ test("an intent is a category title, in-app copy, a dedupe key and a reader", ()
 
   const bad: Array<[string, Record<string, unknown>]> = [
     ["unknown key", { ...intent(), extra: true }],
-    ["a category only a later task writes", { ...intent(), category: "approval" }],
+    ["a category only settings offer", { ...intent(), category: "walk_reminder" }],
     ["unknown category", { ...intent(), category: "walk_reminder" }],
     ["missing delivery", { ...intent(), delivery: undefined }],
     ["unknown delivery state", { ...intent(), delivery: { state: "queued", attempts: 0, lastAttemptAt: null } }],

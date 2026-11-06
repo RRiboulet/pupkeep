@@ -12,6 +12,9 @@ import type { JsonValue } from "@earendil-works/chord";
 // Type-only on purpose: `notifications.ts` value-imports this module, so a value
 // import here would make the document shapes and the catalog load-order cyclic.
 import type { NotificationIntentCategory } from "./notifications.ts";
+// The same rule for the approval action's payload: `calendar.ts` value-imports
+// this module's validators, so only the types travel back.
+import type { AppointmentFields } from "./calendar.ts";
 
 /**
  * Version 2 adds `rev` and `timezoneConfirmedAt` (P1-14); version 3 adds
@@ -54,6 +57,8 @@ export const WALKS_SCHEMA_VERSION = 2 as const;
  * cancel/update can target exactly the tasks it must retire.
  */
 export const CALENDAR_SCHEMA_VERSION = 2 as const;
+/** Approvals (P4-07): proposals, their decision and the executed result. */
+export const APPROVALS_SCHEMA_VERSION = 1 as const;
 
 export type MemberProfile = { id: string; name: string };
 
@@ -566,6 +571,105 @@ export type NotificationIntent = {
 export type Notifications = {
   schemaVersion: typeof NOTIFICATIONS_SCHEMA_VERSION;
   items: NotificationIntent[];
+  createdAt: string;
+};
+
+/**
+ * §9.3's approval lifecycle. `expired` is **derived** from `expiresAt` and the
+ * commit's clock (`approvalStateAt`), never stored: a phone whose clock is a day
+ * fast must be able to answer "this is still pending" again once it is fixed,
+ * and nothing has to rewrite terminal records on a timer. The stored statuses are
+ * the decisions a human made.
+ */
+export const APPROVAL_STATUSES = ["pending", "confirmed", "cancelled"] as const;
+export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
+/** The status a reader sees: the stored decision, or `expired` while pending. */
+export type ApprovalState = ApprovalStatus | "expired";
+
+/**
+ * The action a caregiver confirms (§9.3). The stored payload is the **complete,
+ * already-validated** effect: the confirm route executes exactly this, and a
+ * target that moved since the proposal was made is refused (the revision it was
+ * proposed against travels with it) rather than applied to whatever is there now.
+ *
+ * The zone is deliberately **not** part of any appointment action: §8.4 keeps a
+ * booking a wall-clock promise, and the household's zone at execution is the one
+ * the caregiver is living in. The reminder offsets are, though — a household
+ * setting that changes between proposal and confirmation must not silently
+ * change what the caregiver was shown.
+ */
+export type ApprovalAction =
+  | { kind: "appointment.create"; fields: AppointmentFields }
+  | {
+      kind: "appointment.update";
+      appointmentId: string;
+      /** The appointment revision the proposal was read from (§7.4). */
+      rev: number;
+      fields: AppointmentFields;
+    }
+  | { kind: "appointment.cancel"; appointmentId: string; rev: number }
+  | {
+      kind: "feeding.schedule";
+      /** The meal-schedule revision the proposal was read from (§7.4). */
+      rev: number;
+      slots: MealSlot[];
+    };
+
+/** What confirming did, kept so a double confirm returns the same answer. */
+export type ApprovalResult = {
+  kind: ApprovalAction["kind"];
+  /** App-built sentence, already resolved; caregiver text stays quoted. */
+  summary: string;
+  /**
+   * The appointment the action wrote, present for the three appointment kinds.
+   * It is how a decided proposal points at its record after the fact — a create
+   * has no other way to name what it made.
+   */
+  appointmentId?: string;
+};
+
+/**
+ * One proposed high-impact action (§9.3). A proposal **changes nothing else**:
+ * the domain effect happens in the commit that confirms it, so a pending record
+ * is a request, not a change. `rev` is the optimistic-concurrency revision of the
+ * approval itself (propose → 0; confirm or cancel bumps it), separate from the
+ * revision of the record the action targets, which rides inside `action`.
+ */
+export type Approval = {
+  id: string;
+  action: ApprovalAction;
+  /** App-built one line describing what confirming would do. */
+  summary: string;
+  status: ApprovalStatus;
+  /** Config member id the agent proposed on behalf of, or `null` (§9.2). */
+  requestedBy: string | null;
+  requestedByLabel: string;
+  /** Server clock of the proposal. */
+  createdAt: string;
+  /** `createdAt` + `APPROVAL_TTL_MS`; expiry is derived from this (§9.3). */
+  expiresAt: string;
+  /** The last write's commit key (§7.3). */
+  actionId: string;
+  /** Revision, not schema version. */
+  rev: number;
+  /** The member who confirmed or cancelled; present iff decided. */
+  decidedBy?: string | null;
+  decidedByLabel?: string;
+  decidedAt?: string;
+  /** Present exactly when `status` is `confirmed`. */
+  result?: ApprovalResult;
+};
+
+/**
+ * `app.approvals`: the high-impact proposals (§9.3, P4-07). Bounded like
+ * `app.activity`: a live pending proposal is never pruned, and terminal ones are
+ * kept newest-first up to a small cap so the document cannot grow with the
+ * household's history.
+ */
+export type Approvals = {
+  schemaVersion: typeof APPROVALS_SCHEMA_VERSION;
+  /** Append order; a reader sorts by `createdAt` where it needs chronology. */
+  approvals: Approval[];
   createdAt: string;
 };
 

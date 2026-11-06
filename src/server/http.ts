@@ -39,6 +39,9 @@
 //   POST /api/appointments       create an appointment (Idempotency-Key)
 //   POST /api/appointments/update  replace an appointment's fields (rev + Idempotency-Key)
 //   POST /api/appointments/cancel  cancel an appointment (rev + Idempotency-Key)
+//   GET  /api/approvals          the proposals with their derived state
+//   POST /api/approvals/confirm  execute a proposal a caregiver confirmed (rev + Idempotency-Key)
+//   POST /api/approvals/cancel   decline a proposal (rev + Idempotency-Key)
 //   GET  /api/push/public-key     the VAPID application server key
 //   POST /api/push/subscriptions  store this device's push subscription
 //   POST /api/push/unsubscribe    remove this device's push subscription
@@ -138,7 +141,16 @@ import {
   updateAppointment,
   upcomingAppointments,
   type AppointmentChangeOutcome,
+  type AppointmentView,
 } from "./domain/calendar.ts";
+import {
+  approvalView,
+  approvalViews,
+  cancelApproval,
+  confirmApproval,
+  readApprovals,
+  type DecideOutcome,
+} from "./domain/approvals.ts";
 import {
   ThreadUnavailableError,
   labelFor,
@@ -615,6 +627,22 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
       return;
     }
 
+    if (pathname === "/api/approvals" && req.method === "GET") {
+      requireCare(session);
+      await handleApprovalsRead(deps, res);
+      return;
+    }
+
+    if (pathname === "/api/approvals/confirm" && req.method === "POST") {
+      await handleApprovalDecision(deps, req, res, requireCare(session), "confirm");
+      return;
+    }
+
+    if (pathname === "/api/approvals/cancel" && req.method === "POST") {
+      await handleApprovalDecision(deps, req, res, requireCare(session), "cancel");
+      return;
+    }
+
     if (pathname === "/api/push/public-key" && req.method === "GET") {
       requireAgent(session);
       await handlePushPublicKey(deps, res);
@@ -680,6 +708,7 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
         "showers GET /api/showers, POST /api/showers, " +
         "appointments GET /api/appointments, GET /api/appointments/next, " +
         "POST /api/appointments, POST /api/appointments/update, POST /api/appointments/cancel, " +
+        "approvals GET /api/approvals, POST /api/approvals/confirm, POST /api/approvals/cancel, " +
         "push GET /api/push/public-key, POST /api/push/subscriptions, POST /api/push/unsubscribe, " +
         "and notifications GET /api/notifications, GET /api/notifications/unread, " +
         "POST /api/notifications/read, POST /api/notifications/test, " +
@@ -1989,13 +2018,17 @@ function appointmentBody(raw: unknown, allowed: readonly string[], subject: stri
   return record;
 }
 
-/** The appointment id from a body; the record is addressed by id, not path. */
-function appointmentIdOf(record: Record<string, unknown>): string {
+/** The record id from a body; appointments and proposals are addressed by id. */
+function bodyIdOf(record: Record<string, unknown>, subject: string): string {
   const id = record.id;
   if (typeof id !== "string" || id.trim() === "") {
-    throw new ConflictError("an appointment change needs the appointment's id");
+    throw new ConflictError(`a ${subject} needs its id`);
   }
   return id.trim();
+}
+
+function appointmentIdOf(record: Record<string, unknown>): string {
+  return bodyIdOf(record, "appointment change");
 }
 
 /**
@@ -2160,6 +2193,114 @@ async function handleAppointmentCancel(
     now: new Date(deps.now?.() ?? Date.now()),
   });
   await respondToAppointmentWrite(deps, res, outcome);
+}
+
+// --- approvals (P4-07) -------------------------------------------------------
+
+/**
+ * The proposals and their derived state, newest first. Expiry is evaluated with
+ * this process's clock, exactly as the confirming commit will, so a card that
+ * says "expired" cannot be confirmed by a race.
+ */
+async function handleApprovalsRead(deps: HttpDeps, res: ServerResponse): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  const approvals = await readApprovals(deps.thread.harness, deps.thread.context);
+  sendJson(res, 200, { approvals: approvalViews(approvals, now) });
+}
+
+function approvalIdOf(record: Record<string, unknown>): string {
+  return bodyIdOf(record, "decision");
+}
+
+/**
+ * One answer for confirm and cancel (§7.4, §9.3). A stale revision is a terminal
+ * 409 carrying the committed proposal; an expired, declined or already-confirmed
+ * proposal is a 409 naming why nothing happened; a reused key is the one
+ * key-conflict answer; success carries the decided proposal, so the caller never
+ * merges a partial card.
+ *
+ * The decision committed already; retiring the reminder tasks the executed
+ * action replaced is best-effort and must not turn a successful decision into an
+ * error (the old tasks also no-op on their revision check).
+ */
+async function respondToDecision(deps: HttpDeps, res: ServerResponse, outcome: DecideOutcome): Promise<void> {
+  const now = new Date(deps.now?.() ?? Date.now());
+  if (outcome.kind === "key-conflict") {
+    sendKeyConflict(res);
+    return;
+  }
+  if (outcome.kind === "stale" || outcome.kind === "expired" || outcome.kind === "declined" || outcome.kind === "already-confirmed") {
+    const messages = {
+      stale: "the proposal changed since it was read",
+      expired: "that proposal expired; nothing was executed",
+      declined: "that proposal was declined; nothing was executed",
+      "already-confirmed": "that proposal was already confirmed; the change is done",
+    } as const;
+    sendJson(res, 409, {
+      error: outcome.kind === "already-confirmed" ? "already_confirmed" : outcome.kind,
+      message: messages[outcome.kind],
+      approval: approvalView(outcome.approval, now),
+    });
+    return;
+  }
+  if (outcome.kind === "target-changed") {
+    // The commit rolled back, so the proposal is still pending: the caregiver can
+    // decline it, and the agent can propose the change again.
+    sendJson(res, 409, { error: "target_changed", message: outcome.message });
+    return;
+  }
+  if (outcome.retiredTaskIds.length > 0) {
+    const failed = await retireAppointmentReminders(deps.thread.harness, outcome.retiredTaskIds, deps.thread.context);
+    if (failed.length > 0) {
+      deps.logger.warn("could not abort replaced appointment reminders", { taskIds: failed });
+    }
+  }
+  // A confirmed appointment action names its record; answering with the derived
+  // view lets the caller open what the decision wrote without a second read. The
+  // record may have moved since (a later edit), which is the view it should see.
+  let appointment: AppointmentView | undefined;
+  const appointmentId = outcome.approval.result?.appointmentId;
+  if (appointmentId !== undefined) {
+    const calendar = await readCalendar(deps.thread.harness, deps.thread.context);
+    const found = calendar.appointments.find((entry) => entry.id === appointmentId);
+    if (found !== undefined) appointment = appointmentView(found);
+  }
+  sendJson(res, 200, {
+    approval: approvalView(outcome.approval, now),
+    replayed: outcome.kind === "replayed",
+    ...(appointment !== undefined ? { appointment } : {}),
+  });
+}
+
+/**
+ * Confirm or decline one proposal. The confirmation is a **caregiver's session**,
+ * not a tool call (§9.3): the model can only propose, and this route is where a
+ * human tap executes the stored action.
+ */
+async function handleApprovalDecision(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+  decision: "confirm" | "cancel",
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const record = appointmentBody(await readJsonBody(req), ["id", "rev"], "approval decision");
+  const id = approvalIdOf(record);
+  const rev = revisionOf(record);
+  const now = new Date(deps.now?.() ?? Date.now());
+  const input = {
+    actor: careActor(session),
+    actionId: `http:${key}`,
+    id,
+    rev,
+    now,
+  };
+  const outcome =
+    decision === "confirm"
+      ? await confirmApproval(deps.thread.harness, deps.thread.context, input)
+      : await cancelApproval(deps.thread.harness, deps.thread.context, input);
+  await respondToDecision(deps, res, outcome);
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

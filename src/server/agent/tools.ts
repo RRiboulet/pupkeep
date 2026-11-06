@@ -50,6 +50,11 @@ import {
   calendarView,
   readCalendar,
 } from "../domain/calendar.ts";
+import {
+  ApprovalsUnavailableError,
+  approvalViews,
+  readApprovals,
+} from "../domain/approvals.ts";
 import { readHousehold } from "../domain/household.ts";
 import { nextAppointmentText } from "./calendar-text.ts";
 import { openWalkText } from "./walk-text.ts";
@@ -158,6 +163,22 @@ export function createProfileTools(): Extension<ToolRegistration> {
       } catch (error) {
         if (!(error instanceof CalendarUnavailableError)) throw error;
       }
+      // §10.1's context must say what is already waiting, or a later turn can
+      // propose the same change again and double the cards and notifications.
+      let confirmations = "Pending confirmations: unavailable (retry after boot)";
+      try {
+        const pending = approvalViews(await readApprovals(api, context), now).filter(
+          (approval) => approval.state === "pending",
+        );
+        confirmations =
+          pending.length === 0
+            ? "Pending confirmations: none."
+            : `Pending confirmations: ${pending.length}. ` +
+              pending.map((approval) => JSON.stringify(approval.summary)).join("; ") +
+              ". Do not propose the same change again; a caregiver has to confirm it.";
+      } catch (error) {
+        if (!(error instanceof ApprovalsUnavailableError)) throw error;
+      }
       const activity = await api.snapshot(ActivityDoc, context);
       const parsed = activity === undefined ? undefined : parseActivity(activity);
       // Names are free text too (an invite's display name), so they get the
@@ -190,6 +211,8 @@ export function createProfileTools(): Extension<ToolRegistration> {
           showers,
           // §10.1's next appointments (P4-02), with a household-local countdown.
           appointments,
+          // P4-07: what the household was already asked to confirm.
+          confirmations,
           `Recent activity:\n${activityText(parsed ? recentActivity(parsed, 10) : [])}`,
         ].join("\n"),
       );

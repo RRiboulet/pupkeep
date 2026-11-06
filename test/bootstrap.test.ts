@@ -95,6 +95,7 @@ test("a fresh boot creates the household, puppy, activity, commands and two conv
     assert.equal(result.profilesRemoved, 0);
     assert.deepEqual(result.docsCreated.sort(), [
       "app.activity",
+      "app.approvals",
       "app.calendar",
       "app.commands",
       "app.feeding",
