@@ -86,18 +86,27 @@ function catalogOf(models: Models | (() => Models) | undefined): Models | undefi
 /**
  * The attachment candidate. The probe cache wins when it has live answers; a
  * phone before its first probe gets the plan's default ref, so the thread is
- * usable out of the box. Either way the injected Pi AI catalog must be able to
- * name the model — never attach one the runtime cannot call. `undefined` means
- * "start with no model attached"; an owner picks a model in the UI (P4-08).
+ * usable out of the box. Three things must all be true to attach a model:
+ *
+ *   * the catalog can name it (never attach one the runtime cannot call);
+ *   * its provider has a stored key — a keyless provider would attach a model
+ *     every turn fails 401 on, and the budget's paid check would refuse it;
+ *   * the allowlist check above passed (or it is the plan's default, which is
+ *     what a first boot has to trust until the probe runs).
+ *
+ * `undefined` means "start with no model attached"; an owner picks one in
+ * Settings. `configured` is the set of providers with a key (P4-08).
  */
 export function pickInitialModel(
   cache: ModelProbeCache | undefined,
   models: Models | (() => Models) | undefined,
+  configured?: ReadonlySet<string>,
 ): ModelRef | undefined {
   const catalog = catalogOf(models);
   if (!catalog) return undefined;
   const probed = cache && usableProbeResults(cache.results).length > 0;
   const chosen = probed ? chooseModelRef(cache!.results) : probeRefOf(DEFAULT_MODEL_ID);
   if (!chosen || catalog.getModel(chosen.provider, chosen.modelId) === undefined) return undefined;
+  if (configured !== undefined && !configured.has(chosen.provider)) return undefined;
   return chosen;
 }
