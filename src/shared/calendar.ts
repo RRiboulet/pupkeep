@@ -56,7 +56,7 @@ export const APPOINTMENT_RULE =
   "an appointment needs a title, a date and an HH:MM time, a 5 to 720 minute duration, and up to 8 distinct reminder offsets no more than 30 days before it";
 
 /** The one sentence a refused date range answers with (route and tool). */
-export const CALENDAR_WINDOW_RULE = `an appointment range is two calendar dates (YYYY-MM-DD), the start on or before the end, spanning at most ${CALENDAR_WINDOW_MAX_DAYS} days`;
+export const CALENDAR_WINDOW_RULE = `an appointment range is two calendar dates (YYYY-MM-DD), the start on or before the end, at most ${CALENDAR_WINDOW_MAX_DAYS} days apart`;
 
 export const APPOINTMENT_STATUSES = ["scheduled", "cancelled", "completed"] as const;
 

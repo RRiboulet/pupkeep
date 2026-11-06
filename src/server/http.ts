@@ -1647,28 +1647,26 @@ async function handleAppointmentCreate(
 
 /**
  * One answer for update and cancel (§7.4): a stale revision is a terminal 409
- * carrying the **current appointment** (the caller re-reads and re-decides), a
- * reused key is the one key-conflict answer, and success carries the committed
- * record with its derived instants. A missing appointment reaches the mapper as
- * a 404; it is neither stale nor a key conflict.
+ * carrying the **current appointment** the domain read (the caller re-reads and
+ * re-decides), a reused key is the one key-conflict answer, and success carries
+ * the committed record with its derived instants. A missing appointment reaches
+ * the mapper as a 404; it is neither stale nor a key conflict.
  */
 async function respondToAppointmentWrite(
-  deps: HttpDeps,
   res: ServerResponse,
   outcome: AppointmentChangeOutcome,
-  id: string,
 ): Promise<void> {
   if (outcome.kind === "key-conflict") {
     sendKeyConflict(res);
     return;
   }
   if (outcome.kind === "stale") {
-    const calendar = await readCalendar(deps.thread.harness, deps.thread.context);
-    const current = calendar.appointments.find((entry) => entry.id === id);
+    // The domain carries the committed record it read at the revision check, so
+    // the conflict names the other caregiver's values without a second read.
     sendJson(res, 409, {
       error: "stale",
       message: "the appointment changed since it was read",
-      ...(current === undefined ? {} : { appointment: appointmentView(current) }),
+      appointment: appointmentView(outcome.appointment),
     });
     return;
   }
@@ -1702,7 +1700,7 @@ async function handleAppointmentUpdate(
     fields,
     now: new Date(deps.now?.() ?? Date.now()),
   });
-  await respondToAppointmentWrite(deps, res, outcome, id);
+  await respondToAppointmentWrite(res, outcome);
 }
 
 /** Cancel an appointment: a state change, so the record stays readable. */
@@ -1723,7 +1721,7 @@ async function handleAppointmentCancel(
     rev,
     now: new Date(deps.now?.() ?? Date.now()),
   });
-  await respondToAppointmentWrite(deps, res, outcome, id);
+  await respondToAppointmentWrite(res, outcome);
 }
 
 async function snapshotOf(deps: HttpDeps): Promise<ThreadSnapshot> {

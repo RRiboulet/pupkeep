@@ -80,10 +80,14 @@ export class Today extends Component {
   componentDidMount() {
     this.request = this.props?.request ?? requestJson;
     this.unsubscribe = subscribe((state) => this.onStore(state));
-    // The day route needs no profile: read it on mount instead of waiting for
-    // the first care frame (which may never come if `/api/puppy` keeps failing).
-    if (!this.gated()) void this.load();
-    if (!this.gated()) void this.loadWalks();
+    // These routes need no profile: read them on mount instead of waiting for
+    // the first care frame (which may never come if `/api/puppy` keeps failing),
+    // and because a route change remounts this view with no frame to wait for.
+    if (!this.gated()) {
+      void this.load();
+      void this.loadWalks();
+      void this.loadNextAppointment();
+    }
     this.timer = setInterval(() => this.onTick(), TICK_MS);
     this.timer.unref?.();
   }
@@ -137,7 +141,18 @@ export class Today extends Component {
     const day = this.state.day;
     if (!day) return;
     const today = localDate(new Date(), this.timezone());
-    if (today !== null && today !== day.localDate) void this.load();
+    if (today !== null && today !== day.localDate) {
+      void this.load();
+      void this.loadNextAppointment();
+    }
+    // The card says "next", so once its start has passed it must ask again. The
+    // device clock only decides *when to ask*; the server decides what is next.
+    const next = this.state.nextAppointment?.next;
+    const startsAt = next ? Date.parse(next.startsAt) : Number.NaN;
+    if (Number.isFinite(startsAt) && Date.now() >= startsAt && this.nextStarted !== next.id) {
+      this.nextStarted = next.id;
+      void this.loadNextAppointment();
+    }
   }
 
   /**
@@ -188,12 +203,16 @@ export class Today extends Component {
         return;
       }
       if (!result.ok || !result.body) {
+        this.nextStarted = undefined;
         this.setState({ nextLoading: false, nextError: "Could not load the next appointment." });
         return;
       }
       this.setState({ nextAppointment: result.body, nextLoading: false, nextError: null });
     } catch (error) {
       if (seq !== this.nextSeq) return;
+      // Let the ticker try again: the guard that stops one request per started
+      // appointment must not swallow a failed read.
+      this.nextStarted = undefined;
       this.setState({
         nextLoading: false,
         nextError: error instanceof NetworkError ? error.message : "Could not load the next appointment.",

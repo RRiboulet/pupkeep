@@ -6,11 +6,13 @@
 // instruction stays visibly data in the model's context (§9.5) — the same rule
 // the feeding, training and shower tools follow.
 //
-// The dates and times here are the record's stored household wall clock, never
-// re-derived from an instant: a 09:00 visit stays 09:00 in the text across a DST
-// change. A zone snapshot that differs from the household's current zone is
-// named, because that is the one case where the wall clock is not the household
-// clock the reader expects.
+// The times are rendered from the record's derived instants in its own zone: on
+// an ordinary day that is the stored wall clock (a 09:00 visit stays 09:00), and
+// on a DST transition the shifted instant is when the visit actually happens.
+// The stored wall clock is the form's editable value, not the timeline's. A zone
+// snapshot that differs from the household's current zone is named, because that
+// is the one case where the time is not on the household clock the reader
+// expects.
 
 import { daysBetween } from "../../shared/dates.ts";
 import type { AppointmentView, CalendarView } from "../domain/calendar.ts";
@@ -46,9 +48,9 @@ export function remindersText(offsets: readonly number[]): string {
  * appointment's own zone, so both halves are the same clock.
  */
 export function appointmentText(appointment: AppointmentView, householdTimezone: string): string {
-  const starts = new Date(appointment.startsAt);
-  const startsIn = localTimeAt(starts, appointment.timezone);
-  const endsIn = localTimeAt(new Date(starts.getTime() + appointment.durationMin * 60_000), appointment.timezone);
+  const startsIn = localTimeAt(new Date(appointment.startsAt), appointment.timezone);
+  // The committed end instant, not a second duration sum.
+  const endsIn = localTimeAt(new Date(appointment.endsAt), appointment.timezone);
   const parts = [`${appointment.localDate} ${startsIn}-${endsIn} ${q(appointment.title)}`];
   if (appointment.timezone !== householdTimezone) parts.push(`in ${appointment.timezone}`);
   parts.push(appointment.status === "scheduled" ? "scheduled" : appointment.status);
@@ -61,18 +63,28 @@ export function appointmentText(appointment: AppointmentView, householdTimezone:
 
 /** The whole ranged answer `list_appointments` returns. */
 export function calendarReportText(view: CalendarView): string {
-  const scheduled = view.appointments.filter((appointment) => appointment.status === "scheduled").length;
-  const cancelled = view.appointments.length - scheduled;
-  const counts =
+  // Count by status, not "total minus scheduled": a completed visit is not a
+  // cancellation (the parser accepts the status for a future writer).
+  const counts = { scheduled: 0, cancelled: 0, completed: 0 };
+  for (const appointment of view.appointments) counts[appointment.status] += 1;
+  const summary =
     view.appointments.length === 0
       ? "none"
-      : `${scheduled} scheduled${cancelled === 0 ? "" : `, ${cancelled} cancelled`}`;
-  const header = `Appointments ${view.from} to ${view.to} (${view.timezone}), today ${view.today}: ${counts}.`;
+      : [
+          `${counts.scheduled} scheduled`,
+          ...(counts.cancelled === 0 ? [] : [`${counts.cancelled} cancelled`]),
+          ...(counts.completed === 0 ? [] : [`${counts.completed} completed`]),
+        ].join(", ");
+  const header = `Appointments ${view.from} to ${view.to} (${view.timezone}), today ${view.today}: ${summary}.`;
   const lines = view.appointments.map((appointment) => appointmentText(appointment, view.timezone));
+  // The next line's time belongs to the appointment's own zone; name it when the
+  // household has moved since it was booked.
   const next =
     view.next === null
       ? "Next: none scheduled."
-      : `Next: ${view.next.localDate} ${view.next.timeLocal} ${q(view.next.title)}.`;
+      : `Next: ${view.next.localDate} ${view.next.timeLocal} ${q(view.next.title)}${
+          view.next.timezone === view.timezone ? "" : ` (${view.next.timezone})`
+        }.`;
   return [header, ...(lines.length === 0 ? [] : ["", ...lines]), "", next].join("\n");
 }
 
@@ -83,7 +95,11 @@ export function calendarReportText(view: CalendarView): string {
  */
 export function nextAppointmentText(view: CalendarView): string {
   if (view.next === null) return "Next appointment: none scheduled.";
+  // The countdown is a date question, but a household that moved east of the
+  // booked zone can have a stored local date before today while the instant is
+  // still upcoming: say "upcoming", never a negative number of days. The time is
+  // the appointment's wall clock, so its own zone is the one named.
   const days = daysBetween(view.today, view.next.localDate);
-  const when = days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
-  return `Next appointment: ${view.next.localDate} ${view.next.timeLocal} ${q(view.next.title)} (${when}, ${view.timezone}).`;
+  const when = days < 0 ? "upcoming" : days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
+  return `Next appointment: ${view.next.localDate} ${view.next.timeLocal} ${q(view.next.title)} (${when}, ${view.next.timezone}).`;
 }

@@ -16,13 +16,18 @@
 // It imports no Preact and touches no DOM, like `meals.js`, `walk.js` and
 // `growth-chart.js`. `clock.js` supplies the shell's one date formatter.
 
-import { dateText } from "./clock.js";
+import { dateText, localTimeText } from "./clock.js";
 
 /** The reminder offsets the form offers even when nothing uses them yet. */
 export const PRESET_OFFSETS = [1440, 60, 0];
 /** The document's duration bounds, mirrored here for the input. */
 export const DURATION_MIN = 5;
 export const DURATION_MAX = 720;
+/** The document's text caps, mirrored here for the inputs (server is the fence). */
+export const TITLE_MAX = 120;
+export const LOCATION_MAX = 120;
+export const VET_MAX = 80;
+export const NOTES_MAX = 500;
 /** A day's chips: the grid shows the first few, the agenda shows the rest. */
 export const DAY_CHIP_LIMIT = 3;
 
@@ -54,19 +59,6 @@ export function daysBetween(from, to) {
 export function monthOf(localDate) {
   const at = utcOf(localDate) ?? new Date();
   return { year: at.getUTCFullYear(), month: at.getUTCMonth() + 1 };
-}
-
-/** `2026-11` for this month, and back; the cursor the screen moves by one. */
-export function monthKey({ year, month }) {
-  return `${year}-${String(month).padStart(2, "0")}`;
-}
-
-export function parseMonthKey(key) {
-  const match = /^(\d{4})-(\d{2})$/.exec(String(key ?? ""));
-  if (match === null) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  return month >= 1 && month <= 12 ? { year, month } : null;
 }
 
 export function shiftMonth({ year, month }, delta) {
@@ -143,15 +135,32 @@ export function durationText(minutes) {
   return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
 }
 
-/** "09:00–09:30": the stored wall clock plus the stored duration. */
+/**
+ * "09:00–09:30": the derived instants rendered in the appointment's own zone.
+ * Wall-clock arithmetic is wrong on a DST day (Paris 01:30 + 2 h is 02:30 after
+ * the fall-back, not 03:30), so the server's `startsAt`/`endsAt` are the source
+ * when they are present; the stored wall clock is only the fallback (and the
+ * form's editable value).
+ */
 export function timeRangeText(appointment) {
-  const start = String(appointment?.timeLocal ?? "");
+  const zone = appointment?.timezone;
+  const start =
+    typeof appointment?.startsAt === "string" && zone
+      ? localTimeText(appointment.startsAt, zone)
+      : String(appointment?.timeLocal ?? "");
   if (!/^\d{2}:\d{2}$/.test(start)) return "";
+  const end =
+    typeof appointment?.endsAt === "string" && zone
+      ? localTimeText(appointment.endsAt, zone)
+      : wallClockEnd(appointment, start);
+  return /^\d{2}:\d{2}$/.test(end) ? `${start}–${end}` : start;
+}
+
+/** The old arithmetic, kept for a record the view built without instants. */
+function wallClockEnd(appointment, start) {
   const [hour, minute] = start.split(":").map(Number);
   const end = hour * 60 + minute + Math.round(Number(appointment?.durationMin));
-  const endHour = String(Math.floor(end / 60) % 24).padStart(2, "0");
-  const endMinute = String(end % 60).padStart(2, "0");
-  return `${start}–${endHour}:${endMinute}`;
+  return `${String(Math.floor(end / 60) % 24).padStart(2, "0")}:${String(end % 60).padStart(2, "0")}`;
 }
 
 /** The reminder offset's copy; the same shape the agent's text uses. */
@@ -200,6 +209,8 @@ export function blankDraft(localDate, defaults = []) {
     vetName: "",
     notes: "",
     offsets: [...(defaults ?? [])],
+    /** The record's zone snapshot (null for a new one); the form warns on a move. */
+    timezone: null,
   };
 }
 
@@ -217,6 +228,7 @@ export function draftFrom(appointment) {
     vetName: appointment.vetName ?? "",
     notes: appointment.notes ?? "",
     offsets: [...appointment.reminderOffsetsMin],
+    timezone: appointment.timezone,
   };
 }
 
@@ -259,8 +271,10 @@ export function nextAppointmentText(view) {
   const days = daysBetween(view.today, next.localDate);
   const when =
     days === 0 ? "Today" : days === 1 ? "Tomorrow" : days > 1 ? `In ${days} days` : dateText(next.localDate);
-  const time = `${next.timeLocal}`;
-  const detail = [time, next.location].filter((part) => part !== undefined && part !== "").join(" · ");
+  // The appointment's own zone is named when the household has moved since it
+  // was booked; the stored wall clock is then not the household's clock.
+  const zone = next.timezone !== undefined && next.timezone !== view.timezone ? [next.timezone] : [];
+  const detail = [next.timeLocal, ...zone, next.location].filter((part) => part !== undefined && part !== "").join(" · ");
   return { headline: `${when} · ${next.title}`, detail };
 }
 

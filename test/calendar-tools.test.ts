@@ -15,8 +15,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createCalendarTools } from "../src/server/agent/calendar-tools.ts";
+import { calendarReportText, nextAppointmentText } from "../src/server/agent/calendar-text.ts";
 import { createProfileTools } from "../src/server/agent/tools.ts";
-import { cancelAppointment, createAppointment } from "../src/server/domain/calendar.ts";
+import { cancelAppointment, createAppointment, type CalendarView } from "../src/server/domain/calendar.ts";
+import { CalendarDoc } from "../src/server/domain/docs.ts";
 import { CALENDAR_WINDOW_RULE } from "../src/shared/calendar.ts";
 import type { Appointment } from "../src/shared/domain.ts";
 import {
@@ -136,6 +138,68 @@ test("list_appointments honours a range, shows cancelled history and refuses a b
   } finally {
     await fixture.stop();
   }
+});
+
+test("a completed record is counted as completed, not as a cancellation", async () => {
+  const fixture = await startToolsApp();
+  try {
+    await seed(fixture, "http:one", { title: "Scheduled visit", localDate: "2026-11-20" });
+    const done = await seed(fixture, "http:two", { title: "Done visit", localDate: "2026-11-21" });
+    await fixture.app.app.commit(async (tx) => {
+      const draft = await tx.doc(CalendarDoc);
+      draft.appointments = draft.appointments.map((appointment) =>
+        appointment.id === done.id ? { ...appointment, status: "completed" as const } : appointment,
+      );
+    }, context);
+    const list = tools().get("list_appointments");
+    assert.ok(list);
+    const text = resultText(
+      await list.execute({ from: "2026-11-01", to: "2026-11-30" }, toolApi(fixture, await conversationIdOf(fixture)), context),
+    );
+    assert.match(text, /: 1 scheduled, 1 completed\.$/m, "a completed visit is not a cancellation");
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("the next line names the appointment's zone and never counts negative days", () => {
+  // A household that moved east of the booked zone: the stored date is
+  // "yesterday" while the instant is still upcoming.
+  const view = {
+    timezone: "Europe/Paris",
+    today: "2026-12-21",
+    from: "2026-12-01",
+    to: "2026-12-31",
+    appointments: [],
+    defaultReminderOffsetsMin: [],
+    next: {
+      id: "late",
+      title: "Late visit",
+      localDate: "2026-12-20",
+      timeLocal: "23:30",
+      timezone: "America/Los_Angeles",
+      durationMin: 30,
+      status: "scheduled",
+      reminderOffsetsMin: [],
+      reminderTaskIds: [],
+      createdBy: null,
+      createdByLabel: "Household",
+      updatedAt: "2026-12-01T00:00:00.000Z",
+      rev: 0,
+      actionId: "http:seed",
+      startsAt: "2026-12-21T07:30:00.000Z",
+      endsAt: "2026-12-21T08:00:00.000Z",
+    },
+  } as unknown as CalendarView;
+  assert.equal(
+    nextAppointmentText(view),
+    'Next appointment: 2026-12-20 23:30 "Late visit" (upcoming, America/Los_Angeles).',
+  );
+  assert.match(
+    calendarReportText(view),
+    /Next: 2026-12-20 23:30 "Late visit" \(America\/Los_Angeles\)\./,
+    "the next line names the zone the time belongs to",
+  );
 });
 
 test("get_context carries the next appointment and no untracked line", async () => {

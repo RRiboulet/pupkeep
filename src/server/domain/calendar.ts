@@ -43,7 +43,6 @@ import type { ActorResolver } from "./actor.ts";
 import { requestHashOf, runIdempotent, type CommandOutcome } from "./commands.ts";
 import { ActivityDoc, CalendarDoc, HouseholdDoc, parseCalendar, type DocStore } from "./docs.ts";
 import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
-import { readHousehold } from "./household.ts";
 import { instantAtLocalWallClock, localDateAt } from "./time.ts";
 
 /** `app.calendar` is missing or unreadable; retry once the server has booted. */
@@ -225,20 +224,6 @@ export function calendarView(
   };
 }
 
-/** The view from committed documents: one reader behind every surface. */
-export async function readCalendarView(
-  store: DocStore,
-  context: Context,
-  now: Date,
-  window?: CalendarWindow,
-): Promise<CalendarView> {
-  const [household, calendar] = await Promise.all([
-    readHousehold(store, context),
-    readCalendar(store, context),
-  ]);
-  return calendarView(household, calendar, now, window);
-}
-
 // --- creating ---------------------------------------------------------------
 
 export type AppointmentWrite = {
@@ -350,8 +335,12 @@ export type AppointmentCancel = {
 
 export type AppointmentChangeOutcome =
   | { kind: "changed" | "replayed"; appointment: Appointment }
-  /** A newer revision exists; the caller re-reads, it does not auto-retry. */
-  | { kind: "stale" }
+  /**
+   * A newer revision exists: the committed record travels with the answer, so
+   * the caller can show the other caregiver's values without a second read and
+   * without guessing that the record still exists.
+   */
+  | { kind: "stale"; appointment: Appointment }
   | { kind: "key-conflict" };
 
 type AppointmentChangeRun = {
@@ -377,6 +366,9 @@ type AppointmentChangeRun = {
  * activity sentence differ, which is what `next` and `activitySummary` supply.
  */
 async function runAppointmentChange(run: AppointmentChangeRun): Promise<AppointmentChangeOutcome> {
+  // Captured at the revision check so the stale answer carries the record the
+  // transaction read, rather than re-reading the document after the rollback.
+  let current: Appointment | undefined;
   let outcome: CommandOutcome<{ appointment: Appointment }>;
   try {
     outcome = await runIdempotent(
@@ -387,19 +379,25 @@ async function runAppointmentChange(run: AppointmentChangeRun): Promise<Appointm
         const actor = await run.actor(tx, household);
         const draft = await tx.doc(CalendarDoc);
         const index = draft.appointments.findIndex((entry) => entry.id === run.id);
-        const current = index === -1 ? undefined : draft.appointments[index];
+        const found = index === -1 ? undefined : draft.appointments[index];
         // A missing record is not a stale one: the caller gets 404, not 409.
-        if (!current) throw new AppointmentUnknownError();
-        if (current.rev !== run.rev) throw new StaleRevisionError("the appointment changed since it was read");
+        if (!found) throw new AppointmentUnknownError();
+        if (found.rev !== run.rev) {
+          // Detach the record from the transaction's draft overlay: the commit
+          // is about to roll back, and a draft reference cannot be read after.
+          current = parseAppointment(found);
+          if (current === undefined) throw new DomainConflictError(APPOINTMENT_RULE);
+          throw new StaleRevisionError("the appointment changed since it was read");
+        }
         // A cancellation is final and a completed visit is history: neither is
         // editable, and neither is silently reopened by a retried key.
-        if (current.status !== "scheduled") {
+        if (found.status !== "scheduled") {
           throw new DomainConflictError(
-            current.status === "cancelled" ? "that appointment is cancelled" : "that appointment is completed",
+            found.status === "cancelled" ? "that appointment is cancelled" : "that appointment is completed",
           );
         }
 
-        const parsed = parseAppointment(run.next(current, household));
+        const parsed = parseAppointment(run.next(found, household));
         if (!parsed) throw new DomainConflictError(APPOINTMENT_RULE);
         const appointments = draft.appointments.map((entry, position) => (position === index ? parsed : entry));
         if (!parseAppointmentList(appointments)) throw new DomainConflictError(APPOINTMENT_RULE);
@@ -421,7 +419,9 @@ async function runAppointmentChange(run: AppointmentChangeRun): Promise<Appointm
   } catch (error) {
     // A stale revision rolls the whole commit back, key included: the caller
     // re-reads and retries as a new action, it does not replay this one.
-    if (error instanceof StaleRevisionError) return { kind: "stale" };
+    if (error instanceof StaleRevisionError && current !== undefined) {
+      return { kind: "stale", appointment: current };
+    }
     throw error;
   }
 

@@ -51,12 +51,14 @@ schedule and reminders for both caregivers.**
 The agent:
 
 - reads and changes **app state** through tools;
-- can log a feed, start or end a walk, record a weight, create an appointment,
-  update a milestone, log a shower, read today’s state, and propose a
-  cancellation;
+- can log a feed, start or end a walk, record a weight, update a milestone, log
+  a shower, read today’s state, and read the calendar; appointment writes are
+  **proposals for a human confirmation** (§9.3) and land with P4-07, together
+  with the cancellation proposal;
 - cannot run shell commands, read files, browse the web or query a database;
 - does not give veterinary, nutrition or training advice. If asked, it says so
-  briefly and offers to log a vet appointment or a training milestone;
+  briefly and offers to log a training milestone, or to propose a vet
+  appointment once the approval path lands;
 - treats care notes as data, not instructions.
 
 The only “advice” in the product is deterministic growth-trend copy (for
@@ -1208,7 +1210,8 @@ The prompt is deliberately narrow:
 
 - “You are Pupkeep’s household operator. You change app state through tools.”
 - “You are not a veterinarian, trainer or nutritionist. Do not give care advice.
-  If asked, say so briefly and offer to log a vet appointment or a milestone.”
+  If asked, say so briefly and offer to log a milestone; an appointment change needs
+  the caregiver’s confirmation (P4-07).”
 - “This is a shared thread for two caregivers. Address the person who spoke. Do
   not attribute one person’s request to the other.”
 - “Use `get_context`; never invent state. Report what changed, for whom, and
@@ -3854,8 +3857,8 @@ process kill; both clients see the same state; the partner notification
       prunes a cancelled history (P5-07); and no phone has run it.
 - [x] **P4-02** Appointment HTTP + agent tools + Calendar UI.
       **Landed:** `parseCalendarWindow`/`CALENDAR_WINDOW_RULE`/`APPOINTMENT_FIELD_KEYS`
-      in `src/shared/calendar.ts`; `appointmentView`/`calendarView`/
-      `readCalendarView` in `src/server/domain/calendar.ts`; the routes
+      in `src/shared/calendar.ts`; `appointmentView`/`calendarView` in
+      `src/server/domain/calendar.ts`; the routes
       (`GET /api/appointments?from=&to=`, `GET /api/appointments/next`,
       `POST /api/appointments`, `POST /api/appointments/update`,
       `POST /api/appointments/cancel`) with the mutation guards, the stale 409
@@ -3876,8 +3879,9 @@ process kill; both clients see the same state; the partner notification
       (2) **Flat routes with the id in the body**, as `/api/training/milestone`
       does: create takes only the fields (the zone and default offsets come from
       the household inside the commit), update takes `id` + `rev` + fields, cancel
-      `id` + `rev`. A stale revision answers the current record; a missing one is
-      a 404 through the one mapper. (3) **the read filters by stored local date,
+      `id` + `rev`. A stale revision answers the current record, detached from
+      the rolled-back transaction by the domain itself (no second read, and the
+      contract is literally true); a missing one is a 404 through the one mapper. (3) **the read filters by stored local date,
       sorts by derived instant**: a month grid asks a calendar question, a
       timeline asks an instant question. Cancelled history stays in the range
       (struck through in the agenda), the default range is today and the next 90
@@ -3889,18 +3893,33 @@ process kill; both clients see the same state; the partner notification
       profile form's rule. (5) **`GET /api/appointments/next` is its own small
       route**, so Today never carries a month of records; its countdown is a
       household-date question on the server's `today`, not the device clock.
-      (6) A differing zone snapshot is named in the detail, never converted; the
-      form writes the household wall clock and the server derives the instant.
+      (6) A differing zone snapshot is named in the detail and on Today's card,
+      never converted; the form writes the household wall clock and the server
+      derives the instant.
       **Verified:** 9 route tests in `test/calendar-routes.test.ts` (empty read,
       defaults, create, DST-correct instant, replay/key conflict/refusal, range
       filtering with cancelled history, next, update/stale/404, cancel/replay,
-      the mutation guards and a partner), 5 tool tests in
+      the mutation guards and a partner), 7 tool tests in
       `test/calendar-tools.test.ts` (the ranged answer, quoted text and reminder
-      copy, a refused window, the `get_context` line and the reads-only security
-      assertion) and 5 client tests (`test/client.test.js`: the Monday-first grid,
-      the window, the body/draft rules, the countdown copy and the save/stale
-      path). The suite is 634/634 and `npm run typecheck` passes; the existing
-      `get_context` assertions in four suites were updated to the new line.
+      copy, a refused window, completed counted apart from cancelled, the
+      `get_context` line, a foreign-zone next line with no negative countdown,
+      and the reads-only security assertion) and 5 client tests
+      (`test/client.test.js`: the Monday-first grid, the window, the body/draft
+      rules including a DST-derived range, the countdown copy and the save/stale
+      path, plus Today reading the next route on mount). The suite is 636/636
+      and `npm run typecheck` passes; the existing `get_context` assertions in
+      four suites were updated to the new line.
+      **Review follow-ups:** Today's card now loads on mount (a remount with no
+      care frame was stuck on "Loading…") and re-reads when the household date
+      moves or the current next appointment's start passes; the Calendar renders
+      the derived `startsAt`/`endsAt` in the record's own zone instead of adding
+      the duration to the stored wall clock (Paris 01:30 + 2 h is 02:30 after the
+      fall-back, 04:30 after the spring-forward); the agent's next line names
+      the appointment's zone and says "upcoming" rather than a negative day
+      count; a completed appointment is counted as completed, not cancelled; the
+      notes field is a single line with the parser's caps mirrored (a newline was
+      always refused); and a stale save re-reads the range before showing the
+      detail.
       **Carried out / not verified:** the agent write tools and the approval that
       backs them are P4-07; no reminder task is armed or delivered (P4-03/P4-05);
       no browser or phone has rendered the grid; the grid relies on tab order

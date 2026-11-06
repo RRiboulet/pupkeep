@@ -33,6 +33,10 @@ import {
   DAY_CHIP_LIMIT,
   DURATION_MAX,
   DURATION_MIN,
+  LOCATION_MAX,
+  NOTES_MAX,
+  TITLE_MAX,
+  VET_MAX,
   appointmentBody,
   appointmentsByDate,
   blankDraft,
@@ -152,18 +156,20 @@ export class Calendar extends Component {
 
   moveMonth(delta) {
     this.navigated = true;
-    this.setState({ cursor: shiftMonth(this.state.cursor, delta), message: null, error: null }, () => {
-      void this.load();
-    });
+    const cursor = shiftMonth(this.state.cursor, delta);
+    this.setState({ cursor, message: null, error: null });
+    // Pass the month explicitly rather than relying on a `setState` callback:
+    // the fetch must start even before the class re-renders.
+    void this.load(cursor);
   }
 
   goToday() {
     const today = this.state.view?.today;
     if (!today) return;
     this.navigated = false;
-    this.setState({ cursor: monthOf(today), message: null, error: null }, () => {
-      void this.load();
-    });
+    const cursor = monthOf(today);
+    this.setState({ cursor, message: null, error: null });
+    void this.load(cursor);
   }
 
   openCreate(localDate) {
@@ -254,7 +260,8 @@ export class Calendar extends Component {
       const answer = result.body ?? {};
       if (answer.error === "stale" && answer.appointment) {
         // Keep the caregiver's draft, adopt the committed revision, and show the
-        // other caregiver's values in the detail below.
+        // other caregiver's values in the detail below. The re-read is what makes
+        // the detail (and the Cancel button's revision) the committed record.
         this.setState({
           busy: false,
           pending: null,
@@ -262,13 +269,19 @@ export class Calendar extends Component {
           form: { ...form, rev: answer.appointment.rev },
           detailId: answer.appointment.id,
         });
+        void this.load();
         return;
       }
-      this.setState({ busy: false, error: String(answer.error ?? "The appointment was refused.") });
+      // `stale` and `idempotency_conflict` are codes with a sentence beside
+      // them; the domain's other refusals put the sentence in `error` itself.
+      this.setState({ busy: false, error: String(answer.message ?? answer.error ?? "The appointment was refused.") });
       return;
     }
     if (result.status === 404) {
-      this.setState({ busy: false, error: "That appointment is no longer in the calendar." });
+      this.setState({
+        busy: false,
+        error: String(result.body?.message ?? result.body?.error ?? "That appointment is no longer in the calendar."),
+      });
       void this.load();
       return;
     }
@@ -309,10 +322,15 @@ export class Calendar extends Component {
       return;
     }
     if (!result.ok) {
+      const answer = result.body ?? {};
       this.setState({
         busy: false,
         cancelOpen: false,
-        message: "The appointment changed before it could be cancelled; it has been re-read.",
+        message: String(
+          answer.message ??
+            answer.error ??
+            "The appointment changed before it could be cancelled; it has been re-read.",
+        ),
       });
       void this.load();
       return;
@@ -360,7 +378,14 @@ export class Calendar extends Component {
         <h2 class="calendar__month" aria-live="polite">${monthLabel(cursor)}</h2>
         <button type="button" class="button button--ghost" aria-label="Next month" onClick=${() => this.moveMonth(1)}>›</button>
         <button type="button" class="button button--ghost" onClick=${() => this.goToday()} disabled=${!this.state.view}>Today</button>
-        <button type="button" class="button" onClick=${() => this.openCreate()}>New appointment</button>
+        <button
+          type="button"
+          class="button"
+          disabled=${this.state.loading && this.state.view === null}
+          onClick=${() => this.openCreate()}
+        >
+          New appointment
+        </button>
       </div>
     `;
   }
@@ -558,6 +583,7 @@ export class Calendar extends Component {
             id="appointment-title"
             type="text"
             required
+            maxLength=${TITLE_MAX}
             value=${form.title}
             onInput=${(event) => this.setField("title", event.target.value)}
           />
@@ -597,14 +623,23 @@ export class Calendar extends Component {
           </div>
         </div>
         <p class="field__hint">
-          Times are in the household's zone${this.state.view ? ` (${this.state.view.timezone})` : ""}; they do not move
-          when the household travels.
+          Times are the household's wall clock${this.state.view ? ` (${this.state.view.timezone})` : ""}; a
+          daylight-saving change does not move them.
         </p>
+        ${
+          editing && form.timezone && form.timezone !== this.state.view?.timezone
+            ? html`<p class="field__hint">
+                This appointment was booked in ${form.timezone}; saving re-anchors it to
+                ${this.state.view?.timezone}.
+              </p>`
+            : null
+        }
         <div class="field">
           <label for="appointment-location">Where (optional)</label>
           <input
             id="appointment-location"
             type="text"
+            maxLength=${LOCATION_MAX}
             value=${form.location}
             onInput=${(event) => this.setField("location", event.target.value)}
           />
@@ -614,18 +649,20 @@ export class Calendar extends Component {
           <input
             id="appointment-vet"
             type="text"
+            maxLength=${VET_MAX}
             value=${form.vetName}
             onInput=${(event) => this.setField("vetName", event.target.value)}
           />
         </div>
         <div class="field">
           <label for="appointment-notes">Notes (optional)</label>
-          <textarea
+          <input
             id="appointment-notes"
-            rows="2"
+            type="text"
+            maxLength=${NOTES_MAX}
             value=${form.notes}
             onInput=${(event) => this.setField("notes", event.target.value)}
-          ></textarea>
+          />
         </div>
         <fieldset class="calendar__reminders">
           <legend>Remind me</legend>

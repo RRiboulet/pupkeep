@@ -400,6 +400,11 @@ test("mounting reads the day and starts the ticker, even before a profile arrive
       1,
       "the day route needs no profile to answer",
     );
+    assert.equal(
+      request.calls.filter((call) => call.path === "/api/appointments/next").length,
+      1,
+      "the next-appointment card is read on mount, so a remount is not stuck on Loading",
+    );
     assert.ok(today.timer, "the overdue ticker runs");
   } finally {
     today.componentWillUnmount();
@@ -545,14 +550,15 @@ test("an open screen notices midnight and re-reads today instead of keeping yest
 
   // With no walk open the screen re-renders every 30th tick; the day check runs
   // then, so the rollover is caught within half a minute.
+  const dayReads = () => request.calls.filter((call) => call.path === "/api/feeding/day").length;
   for (let index = 0; index < 30; index += 1) stale.onTick();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(request.calls.length, 1, "yesterday's day is re-read once the household date moves");
+  assert.equal(dayReads(), 1, "yesterday's day is re-read once the household date moves");
 
   const current = todayWith(request, { day: mealDay({ localDate: today, today }) });
   for (let index = 0; index < 30; index += 1) current.onTick();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(request.calls.length, 1, "the same day is not re-read by the ticker");
+  assert.equal(dayReads(), 1, "the same day is not re-read by the ticker");
 });
 
 test("a slow read cannot overwrite a day a write already committed", async () => {
@@ -1339,6 +1345,7 @@ test("the appointment body trims text, omits empty fields and keeps an explicit 
     durationMin: 30,
     reminderOffsetsMin: [0],
     location: "Rue",
+    timezone: "Europe/Paris",
   };
   assert.deepEqual(draftFrom(stored), {
     mode: "edit",
@@ -1352,11 +1359,36 @@ test("the appointment body trims text, omits empty fields and keeps an explicit 
     vetName: "",
     notes: "",
     offsets: [0],
+    timezone: "Europe/Paris",
   });
 });
 
 test("a chip, a duration and the reminder labels are derived, never stored", () => {
   assert.equal(timeRangeText({ timeLocal: "09:00", durationMin: 90 }), "09:00–10:30");
+  // The derived instants beat wall-clock arithmetic on a DST day: Paris 01:30
+  // + 2 h is 02:30 after the fall-back (the 02:00 hour repeats) and 04:30 after
+  // the spring-forward, never 03:30.
+  assert.equal(
+    timeRangeText({
+      timeLocal: "01:30",
+      durationMin: 120,
+      timezone: "Europe/Paris",
+      startsAt: "2026-10-24T23:30:00.000Z",
+      endsAt: "2026-10-25T01:30:00.000Z",
+    }),
+    "01:30–02:30",
+  );
+  assert.equal(
+    timeRangeText({
+      timeLocal: "01:30",
+      durationMin: 120,
+      timezone: "Europe/Paris",
+      startsAt: "2026-03-29T00:30:00.000Z",
+      endsAt: "2026-03-29T02:30:00.000Z",
+    }),
+    "01:30–04:30",
+  );
+  assert.equal(timeRangeText({ timeLocal: "01:30", durationMin: 120 }), "01:30–03:30", "wall-clock fallback");
   assert.equal(durationText(30), "30 min");
   assert.equal(durationText(90), "1 h 30 min");
   assert.equal(durationText(120), "2 h");
@@ -1392,11 +1424,21 @@ test("the next-appointment copy counts household dates, not the device clock", (
     headline: "No appointment scheduled.",
     detail: "",
   });
+  // A record booked before the household moved keeps its own zone, and the
+  // card names it rather than pretending the wall clock is the household's.
+  assert.equal(
+    nextAppointmentText({
+      ...view,
+      next: { ...view.next, timezone: "America/New_York" },
+    }).detail,
+    "09:00 · America/New_York · Rue de Lyon",
+  );
 });
 
 test("the calendar card saves with one key, keeps a stale draft and adopts the revision", async () => {
   const calls = [];
   let answer = { status: 200, ok: true, body: { appointment: { id: "a-1", rev: 0 } } };
+  let loads = 0;
   const card = new Calendar({});
   card.request = async (path, options) => {
     calls.push({ path, options });
@@ -1406,7 +1448,9 @@ test("the calendar card saves with one key, keeps a stale draft and adopts the r
     Object.assign(card.state, patch);
     if (typeof callback === "function") callback();
   };
-  card.load = async () => {};
+  card.load = async () => {
+    loads += 1;
+  };
 
   card.setState({ form: { ...blankDraft("2026-12-20", [1440, 60]), title: " Vet visit " } });
   const event = { preventDefault() {} };
@@ -1430,12 +1474,16 @@ test("the calendar card saves with one key, keeps a stale draft and adopts the r
     ok: false,
     body: { error: "stale", appointment: { id: "a-1", rev: 4 } },
   };
-  card.setState({ form: { ...blankDraft("2026-12-20", [1440]), title: "Mine" } });
+  const loadsBeforeStale = loads;
+  card.setState({
+    form: { ...blankDraft("2026-12-20", [1440]), mode: "edit", id: "a-1", rev: 3, title: "Mine" },
+  });
   await card.save(event);
   assert.equal(card.state.form.title, "Mine", "the draft is kept");
   assert.equal(card.state.form.rev, 4, "the next save is a deliberate override");
+  assert.equal(card.state.form.mode, "edit");
   assert.match(card.state.message, /Someone else changed/);
-  assert.equal(card.state.form.mode, "create", "a stale create stays a create");
+  assert.equal(loadsBeforeStale + 1, loads, "the committed record is re-read, so the detail and Cancel use it");
 
   // A refused duration never reaches the wire.
   calls.length = 0;
