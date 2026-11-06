@@ -23,6 +23,7 @@
 
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTask } from "@earendil-works/pi-durable";
+import { AppointmentReminder } from "./appointment-reminder.ts";
 import type { Feeding, Household } from "../../shared/domain.ts";
 import { FeedingDoc, HouseholdDoc } from "../domain/docs.ts";
 import { instantAtLocalWallClock } from "../domain/time.ts";
@@ -181,5 +182,5 @@ export const FeedReminder = defineTask<FeedReminderInput, FeedReminderCheckpoint
  * conversation needs no selection of its own.
  */
 export function createReminders(): Extension<ToolRegistration> {
-  return { name: "reminders", tasks: [FeedReminder] };
+  return { name: "reminders", tasks: [FeedReminder, AppointmentReminder] };
 }

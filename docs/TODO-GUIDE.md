@@ -20,9 +20,13 @@ cancel with the stale-409-carrying-the-record rule; the Calendar screen renders
 the month grid, agenda, detail and form, and Today shows the next appointment.
 The agent has the free `list_appointments` read and a `get_context` line; its
 appointment **write** tools wait for P4-07's approval path, because a schedule
-change needs a human confirmation. The next task is **P4-03** (appointment
-reminder tasks owned by the system conversation). P0-03/P0-08/P0-10 remain
-device-gated partner checks and do not block the host-side work.
+change needs a human confirmation. **P4-03** is complete: `app.reminder` tasks
+are armed in the same commit on the hidden system conversation, their refs live
+on the appointment, a reschedule or cancel retires the old tasks (and a task
+that survives the abort no-ops on its revision check), and past offsets are
+skipped. The next task is **P4-04** (the daily feed planner and feed reminder
+tasks). P0-03/P0-08/P0-10 remain device-gated partner checks and do not block
+the host-side work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The

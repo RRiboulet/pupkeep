@@ -19,6 +19,9 @@
 //   * `app.household` moved to version 3 when P2-09 added `feedReminders`, the
 //     ids of the feeding reminders the meal schedule armed; `migrate` adds the
 //     empty list on top of the version-2 fields.
+//   * `app.calendar` moved to version 2 when P4-03 replaced `reminderTaskIds`
+//     with the armed reminder refs; `migrate` adds the empty list, because P4-01
+//     never armed a task.
 // A phone that ran an older build therefore keeps its household and profile
 // instead of failing boot.
 //
@@ -285,12 +288,35 @@ export const ShowersDoc = defineDoc<Showers>({
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 
-/** The appointments (P4-01). Version 1; a cancelled record stays in the list. */
+/**
+ * The appointments (P4-01). Version 2 (P4-03) replaces the bare
+ * `reminderTaskIds` with the armed reminder refs; a version-1 document had no
+ * armed task (P4-01 never created one), so `migrate` adds the empty list. A
+ * cancelled record stays in the list.
+ */
 export const CalendarDoc = defineDoc<Calendar>({
   kind: "app.calendar",
-  version: 1,
+  version: 2,
   scope: "session",
   initial: emptyCalendar,
+  migrate(value, fromVersion) {
+    if (fromVersion !== 1) {
+      throw new Error(`app.calendar has no migration from version ${fromVersion}`);
+    }
+    const record = value as unknown as Record<string, unknown>;
+    const appointments = Array.isArray(record.appointments) ? record.appointments : [];
+    const migrated = {
+      ...record,
+      schemaVersion: CALENDAR_SCHEMA_VERSION,
+      appointments: appointments.map((appointment) => {
+        const { reminderTaskIds: _taskIds, ...rest } = (appointment ?? {}) as Record<string, unknown>;
+        return { ...rest, reminders: [] };
+      }),
+    };
+    const parsed = parseCalendar(migrated);
+    if (!parsed) throw new Error("app.calendar version 1 does not migrate to a valid version 2");
+    return parsed;
+  },
   checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
 });
 

@@ -137,7 +137,13 @@ test("creating an appointment answers the derived instants, the zone snapshot an
     assert.equal(answer.appointment.rev, 0);
     assert.equal(answer.appointment.status, "scheduled");
     assert.deepEqual(answer.appointment.reminderOffsetsMin, [1440, 60], "the household default");
-    assert.deepEqual(answer.appointment.reminderTaskIds, [], "P4-03 arms the tasks");
+    assert.equal(answer.appointment.reminders.length, 2, "both default offsets are ahead of the clock");
+    assert.deepEqual(
+      answer.appointment.reminders.map((ref) => ref.offsetMin),
+      [1440, 60],
+      "one task per offset, in the stored order",
+    );
+    assert.ok(answer.appointment.reminders.every((ref) => ref.taskId > 0));
     assert.equal(answer.appointment.createdByLabel, "Alex");
 
     const { body } = await get(fixture, "/api/appointments");
