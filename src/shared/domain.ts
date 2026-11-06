@@ -16,10 +16,11 @@ import type { NotificationIntentCategory } from "./notifications.ts";
 /**
  * Version 2 adds `rev` and `timezoneConfirmedAt` (P1-14); version 3 adds
  * `feedReminders`, the persisted ids of the feeding reminders the schedule
- * armed (P2-09). Older documents migrate on read, so a phone that ran P1-08 or
- * P1-14 keeps its household, members and settings.
+ * armed (P2-09); version 4 adds `feedPlannerTaskId`, the one daily feed planner
+ * (P4-04). Older documents migrate on read, so a phone that ran P1-08, P1-14 or
+ * P2-09 keeps its household, members and settings.
  */
-export const HOUSEHOLD_SCHEMA_VERSION = 3 as const;
+export const HOUSEHOLD_SCHEMA_VERSION = 4 as const;
 /** Version 2 adds `rev` (P1-11); a version-1 document migrates on read. */
 export const PUPPY_SCHEMA_VERSION = 2 as const;
 export const ACTIVITY_SCHEMA_VERSION = 1 as const;
@@ -100,6 +101,13 @@ export type Household = {
    * household, so it never bumps `rev`.
    */
   feedReminders: FeedReminderRef[];
+  /**
+   * The one daily feed planner task (P4-04), or `null` before reconciliation
+   * has armed it. Persisted so a second boot can tell "already running" from
+   * "missing/terminal" instead of creating a duplicate planner; like
+   * `feedReminders`, this is not a human edit and never bumps `rev`.
+   */
+  feedPlannerTaskId: number | null;
 };
 
 /**

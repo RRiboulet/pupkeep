@@ -6,7 +6,10 @@
 //
 //   * a reminder is identified by `(slotId, localDate)`. An arm is a task plus a
 //     ref in `app.household`, and an arm with the same due instant **reuses** the
-//     task — saving the same schedule twice must not double every reminder;
+//     task while it is still live — saving the same schedule twice must not
+//     double every reminder. A ref whose task has gone terminal (a fired or
+//     aborted task) is dead, not a reminder: P4-04's reconciliation replaces it,
+//     so a re-save cannot trust a stale id;
 //   * a rescheduled slot gets a new task, and the old one no-ops when it wakes
 //     because its input no longer matches the schedule (`feedReminderDecision`).
 //
@@ -18,7 +21,7 @@
 // is not armed at all: a phone that boots at noon must not fire this morning's
 // missed reminders in a burst (§12.2).
 
-import type { ConversationId, Tx } from "@earendil-works/pi-durable";
+import type { ConversationId, TaskId, Tx } from "@earendil-works/pi-durable";
 import type { FeedReminderRef, Household, MealSlot } from "../../shared/domain.ts";
 import { parseFeedReminderRefs } from "../domain/docs.ts";
 import { DomainConflictError, UnavailableError } from "../domain/errors.ts";
@@ -57,14 +60,15 @@ export function planFeedReminders(
   household: Pick<Household, "timezone" | "settings">,
   slots: readonly MealSlot[],
   now: Date,
+  timezone: string = household.timezone,
 ): FeedReminderInput[] {
-  const localDate = localDateAt(now, household.timezone);
+  const localDate = localDateAt(now, timezone);
   const delayMs = reminderDelayMs(household);
   const cutoff = now.getTime() - FEED_REMINDER_GRACE_MS;
   const plan: FeedReminderInput[] = [];
   for (const slot of slots) {
     if (!slot.active) continue;
-    const dueAt = instantAtLocalWallClock(localDate, slot.timeLocal, household.timezone).getTime() + delayMs;
+    const dueAt = instantAtLocalWallClock(localDate, slot.timeLocal, timezone).getTime() + delayMs;
     if (dueAt < cutoff) continue;
     plan.push({ slotId: slot.id, label: slot.label, localDate, dueAt });
   }
@@ -85,15 +89,19 @@ export function planFeedReminders(
  * The ref, not the task table, is the identity: a same-day A→B→A edit can arm a
  * second task with the same input as the first. Both wake and both decide
  * `due`, and delivery stays exactly-once because the server dedupe key (§12.3)
- * is authoritative; P4-04's reconciliation can prune the orphan from the
- * terminal task records. Scanning the task table on every schedule save would
- * buy nothing here.
+ * is authoritative. A ref whose task went terminal is replaced on the next arm;
+ * scanning the whole task table would buy nothing here.
  */
 export async function armFeedReminders(
   tx: Tx,
   household: Household,
   slots: readonly MealSlot[],
   now: Date,
+  /**
+   * The zone the plan is for. The timezone write passes the new zone before
+   * storing it, so the due instants are the ones the caregiver will live in.
+   */
+  timezone: string = household.timezone,
 ): Promise<void> {
   // A household without its hidden thread has not booted; creating a task now
   // would either fail or attach it to nothing. Refuse rather than half-arm.
@@ -103,16 +111,27 @@ export async function armFeedReminders(
     throw new UnavailableError("the household is not ready for reminders yet; retry after boot");
   }
 
-  const plan = planFeedReminders(household, slots, now);
-  const localDate = localDateAt(now, household.timezone);
+  const plan = planFeedReminders(household, slots, now, timezone);
+  const localDate = localDateAt(now, timezone);
   const existing = household.feedReminders;
   const kept = existing.filter((ref) => ref.localDate > localDate);
+
+  // A ref outlives its task: a fired or aborted task is terminal while the ref
+  // still names the right instant. Read every ref's state **now**, before the
+  // first write of this commit (a table read after a write is `ReadAfterWrite`),
+  // so a dead task is replaced rather than trusted.
+  const dead = new Set<number>();
+  for (const ref of existing) {
+    const record = await tx.task(ref.taskId as TaskId);
+    if (record === undefined || record.state.status === "terminal") dead.add(ref.taskId);
+  }
 
   const armed: FeedReminderRef[] = [];
   for (const item of plan) {
     const current = existing.find((ref) => ref.slotId === item.slotId && ref.localDate === item.localDate);
-    if (current !== undefined && current.dueAt === item.dueAt) {
-      // The same slot, the same instant: this task already is today's reminder.
+    if (current !== undefined && current.dueAt === item.dueAt && !dead.has(current.taskId)) {
+      // The same slot, instant and a live task: this already is today's
+      // reminder. A ref whose task went terminal is replaced below.
       armed.push(current);
       continue;
     }

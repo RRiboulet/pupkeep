@@ -101,13 +101,16 @@ export async function updateMealSlots(
         if (draft.rev !== input.rev) throw new StaleRevisionError("the meal schedule changed since it was read");
 
         const first = draft.slots.length === 0;
-        draft.slots = slots;
-        draft.rev = input.rev + 1;
 
         // P2-09: the same commit arms today's feeding reminders on the hidden
         // system conversation (§12.2). A reschedule re-arms; an unchanged
-        // schedule reuses the tasks it already has.
+        // schedule reuses the tasks it already has. It runs before the schedule
+        // write because it reads the reminder tasks' state, and a table read
+        // after a write is `ReadAfterWrite`.
         await armFeedReminders(tx, household, slots, now);
+
+        draft.slots = slots;
+        draft.rev = input.rev + 1;
 
         appendActivity(
           await tx.doc(ActivityDoc),

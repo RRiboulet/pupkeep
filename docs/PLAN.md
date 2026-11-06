@@ -917,7 +917,7 @@ defines `checkpointWhen` (do not use `() => false` forever).
 
 | Document | Contents | Invariants |
 |---|---|---|
-| `app.household` | Name, timezone and when a caregiver confirmed it, display-member profiles, settings, shared conversation ID, hidden system conversation ID, reminder task IDs, revision | Max two members; auth/roles live in `config.json`; the system conversation never calls a model; the roster is reconciled without bumping the revision |
+| `app.household` | Name, timezone and when a caregiver confirmed it, display-member profiles, settings, shared and hidden-system conversation IDs, the armed meal-reminder refs and the one feed-planner task id, revision | Max two members; auth/roles live in `config.json`; the system conversation never calls a model; the roster is reconciled without bumping the revision |
 | `app.puppy` | Name, birthday, breed, sex, target weight, revision | One puppy; birthday is a local date; age computed; the shower interval is `app.household.settings.showerIntervalDays` (one source) |
 | `app.feeding` | Meal slots (P1-14), feed events (P2-01) | One normal feed per slot per local date; extra feeds have no slot; at least one active slot once a schedule exists |
 | `app.walks` | One open walk + history | One open walk at a time; duration from server timestamps |
@@ -964,7 +964,9 @@ schema 3 and document version 3, and `migrate` adds the empty list — on top of
 P1-08 or P1-14 keeps its members, settings and confirmed zone. The sixth is
 P4-03's `app.calendar` reminder refs: schema 2 and document version 2, and
 `migrate` drops the bare `reminderTaskIds` and adds `reminders: []`, because
-P4-01 never armed a task.
+P4-01 never armed a task. The seventh is P4-04's `app.household.feedPlannerTaskId`:
+schema 4 and document version 4, and `migrate` starts it null (no older build
+armed a planner; the next boot reconciliation arms one).
 
 ### 8.2 Host-side data
 
@@ -1427,7 +1429,13 @@ displayed but not pushed in v1.
   was fed; if yes, it exits; if not, it writes a reminder.
 - **Planner reconciliation:** on boot, if the planner task is missing/terminal,
   recreate it idempotently from the stored task ID; create missing slot tasks in
-  one commit; skip offsets already past; never duplicate on restart.
+  one commit; skip offsets already past; never duplicate on restart. P4-04
+  implements this: the planner id is `app.household.feedPlannerTaskId`, the plan
+  phase reads the refs' task states **outside** its commit (`ReadAfterWrite`)
+  and replaces a dead ref, and the planner sleeps to local midnight + 1 minute,
+  capped in six-hour chunks so a clock or zone change is noticed within a chunk.
+  A timezone change also re-arms today's refs in that write's own commit, so the
+  arms do not wait for the next midnight.
 - Rescheduling creates new tasks; old tasks no-op when they wake.
 - Cancelling deletes pending notifications and marks old tasks no-op.
 - Server-side dedupe keys are authoritative; Web Push `tag` only collapses
@@ -4003,17 +4011,54 @@ process kill; both clients see the same state; the partner notification
       cancelled visit. Nothing delivers today; when delivery lands, re-check the
       record (or the ref/rev) in the commit that writes the intent, or accept the
       window explicitly.
-- [ ] **P4-04** Daily feed planner + feed reminder tasks; stale windows; no
-      duplicate planner; boot reconciliation; skip past offsets. Builds on
-      P2-09's task, `planFeedReminders`/`armFeedReminders` and
-      `app.household.feedReminders`. **Carried out of P2-09:** the ref, not the
-      task table, is the identity, so a re-save inside a day reuses the ref by
-      due instant even if its task has already gone terminal — reconciliation
-      must read `getTask(ref.taskId).state` rather than assume a ref means a
-      live task; a timezone change leaves today's arms stale until the planner
-      re-runs; and P4-05 must decide what to do with `due` decisions a version-1
-      task committed before delivery existed (deliver them, or state that they
-      were never delivered).
+- [x] **P4-04** Daily feed planner + feed reminder tasks; stale windows; no
+      duplicate planner; boot reconciliation; skip past offsets.
+      **Landed:** `src/server/reminders/feed-planner.ts` — the `app.feed.planner`
+      task (`wait`/`plan` phases, one checkpoint), `feedPlannerWake` (next local
+      midnight + 1 minute, capped at six hours), and `reconcileFeedReminders`
+      (one commit: reuse or replace the planner, then arm the day);
+      `app.household.feedPlannerTaskId` with `HOUSEHOLD_SCHEMA_VERSION` 4 and the
+      migration; `armFeedReminders` reads the refs' task state at its start and
+      replaces a dead ref, before its own first write; boot reconciliation in
+      `startApp` after bootstrap and before `resume()`; and the timezone write
+      re-arms today's refs in its own commit, passing the new zone before
+      storing it. Registered beside the feed and appointment tasks in
+      `createReminders`.
+      Decisions: (1) **one looping planner, not one task per day.** The id lives
+      in the household, reconciliation reuses it while live and replaces it when
+      terminal, so two boots cannot double every reminder. (2) **the checkpoint
+      is the planned local date.** `wait` either wakes `plan` (a day not yet
+      planned) or sleeps to the next local midnight + 1 minute, capped at six
+      hours so a clock jump or zone change is noticed within a chunk rather than
+      a day. (3) **no late burst**: the arming plan skips offsets already past,
+      so a boot at noon arms only the day's remaining slots, and a long outage
+      plans the next day rather than replaying yesterday. (4) **dead refs are
+      found by reading task state outside the commit.** A table read after a
+      document write is `ReadAfterWrite`, so both boot reconciliation and the
+      daily plan read `getTask` first and pass the terminal/missing ids to the
+      arm; an ordinary schedule save trusts the due instant until the next plan or
+      boot. (5) **a timezone change re-arms today** in the zone write's commit,
+      closing P2-09's carried gap; the planner picks the new zone up at its next
+      wake. (6) **boot reconciliation is reported, not fatal**: a failure is
+      logged, and the next boot or schedule save arms again. (7) a planner parked
+      by a missing definition is not auto-replaced (its record is not terminal);
+      `inspect` surfaces it, and P5 owns definition migrations.
+      **Verified:** 7 new tests in `test/feed-planner.test.ts` — one planner on
+      first reconciliation plus one more reconcile arming nothing, past offsets
+      skipped, a dead ref replaced (by the plan or reconciliation), a terminal
+      planner replaced, the midnight rollover arming the next day once (and not
+      re-planning the same day), `feedPlannerWake`'s chunk/midnight arithmetic, a
+      timezone change re-arming in the new zone, and a reopen keeping the same
+      planner and refs; plus the household v1/v2→v4 and v3→v4 migrations in
+      `test/setup.test.ts`/`test/reminders.test.ts`, with the document version
+      pinned to the schema version. The suite is 654/654 and
+      `npm run typecheck` passes.
+      **Not verified / carried out:** delivery is P4-05 (which also inherits the
+      P4-03 note about re-checking the record in the intent commit, and the
+      P2-09 note about deciding what a version-1 `due` decision means); no phone
+      has run it; and the planner's `plan` phase runs at most once a day plus a
+      chunk, so a schedule saved after it on the same day is armed by the save
+      itself, not by the planner.
 - [ ] **P4-05** `app.notifications` + outbox + Web Push + VAPID + service worker;
       server dedupe key authoritative. Inherits P4-03's appointment task, whose
       `due` result is decided from a snapshot read outside the terminal commit:

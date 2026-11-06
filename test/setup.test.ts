@@ -29,6 +29,7 @@ import {
   HouseholdDoc,
   PuppyDoc,
   emptyFeeding,
+  emptyHousehold,
   parseFeeding,
   parseHousehold,
 } from "../src/server/domain/docs.ts";
@@ -94,18 +95,21 @@ test("a version-1 household migrates to rev 0 and an unconfirmed timezone", () =
       agentBudgetUsd: 10,
     },
   };
+  assert.equal(HouseholdDoc.definition.version, 4, "the document version tracks the schema version");
+  assert.equal(emptyHousehold().schemaVersion, 4);
   const migrated = migrate(legacy as never, 1);
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   assert.equal(migrated.rev, 0);
   assert.equal(migrated.timezone, "Europe/Paris", "the captured zone is kept");
   assert.equal(migrated.timezoneConfirmedAt, null, "but nobody has confirmed it yet");
   assert.deepEqual(migrated.feedReminders, [], "no reminder was armed by an older build");
+  assert.equal(migrated.feedPlannerTaskId, null, "no planner was armed by an older build");
   assert.throws(() => migrate(legacy as never, 0), /no migration/);
 });
 
 test("the household parser needs a revision and a real confirmation instant", () => {
   const base = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     rev: 3,
     name: "Our household",
     timezone: "Europe/Paris",
@@ -121,6 +125,7 @@ test("the household parser needs a revision and a real confirmation instant", ()
       agentBudgetUsd: 10,
     },
     feedReminders: [],
+    feedPlannerTaskId: null,
   };
   assert.deepEqual(parseHousehold(base)?.rev, 3);
   assert.equal(parseHousehold({ ...base, rev: -1 }), undefined);
@@ -163,7 +168,7 @@ test("the meal-slot parser enforces the schedule invariants", () => {
 
 test("the setup checklist is derived from the documents, in wizard order", () => {
   const household = {
-    schemaVersion: 3 as const,
+    schemaVersion: 4 as const,
     rev: 0,
     name: "Our household",
     timezone: "Europe/Paris",
@@ -179,6 +184,7 @@ test("the setup checklist is derived from the documents, in wizard order", () =>
       agentBudgetUsd: 10,
     },
     feedReminders: [],
+    feedPlannerTaskId: null,
   };
   const puppy = {
     schemaVersion: 2 as const,

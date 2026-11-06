@@ -101,7 +101,7 @@ test("a slot's wall-clock time becomes one instant in the household zone, DST in
 
 function household(overrides: Partial<Household> = {}): Household {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     rev: 0,
     name: "Our household",
     timezone: "Europe/Paris",
@@ -117,6 +117,7 @@ function household(overrides: Partial<Household> = {}): Household {
       agentBudgetUsd: 10,
     },
     feedReminders: [],
+    feedPlannerTaskId: null,
     ...overrides,
   };
 }
@@ -245,10 +246,18 @@ test("the reminder list parses strictly and a version-2 household migrates to an
     settings: household().settings,
   };
   const migrated = migrate(versionTwo as never, 2);
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   assert.equal(migrated.rev, 4, "a version-2 household keeps its revision");
   assert.deepEqual(migrated.feedReminders, []);
+  assert.equal(migrated.feedPlannerTaskId, null, "P4-04 arms the planner at the next boot");
   assert.deepEqual(migrated.members, [{ id: "owner", name: "Alex" }]);
+
+  // A version-3 document only lacks the planner id; its refs are kept.
+  const versionThree = { ...versionTwo, schemaVersion: 3, feedReminders: [ref] };
+  const fromThree = migrate(versionThree as never, 3);
+  assert.equal(fromThree.schemaVersion, 4);
+  assert.deepEqual(fromThree.feedReminders, [ref], "the version-3 refs survive");
+  assert.equal(fromThree.feedPlannerTaskId, null);
 });
 
 // --- the armed tasks against a fake harness clock ---------------------------

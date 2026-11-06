@@ -24,9 +24,14 @@ change needs a human confirmation. **P4-03** is complete: `app.reminder` tasks
 are armed in the same commit on the hidden system conversation, their refs live
 on the appointment, a reschedule or cancel retires the old tasks (and a task
 that survives the abort no-ops on its revision check), and past offsets are
-skipped. The next task is **P4-04** (the daily feed planner and feed reminder
-tasks). P0-03/P0-08/P0-10 remain device-gated partner checks and do not block
-the host-side work.
+skipped. **P4-04** is complete: one looping `app.feed.planner` task, persisted in
+the household, plans each household-local day (midnight + 1 minute, six-hour
+chunks), boot reconciliation repairs a missing or terminal planner and the day's
+refs (reading task state outside the commit), past offsets are skipped, and a
+timezone change re-arms today in the same commit. The next task is **P4-05**
+(`app.notifications`, outbox, Web Push, VAPID and the service worker). P0-03/
+P0-08/P0-10 remain device-gated partner checks and do not block the host-side
+work.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The
