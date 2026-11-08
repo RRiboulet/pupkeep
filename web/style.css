@@ -1016,3 +1016,268 @@ a.button {
   font-size: 0.85rem;
   opacity: 0.85;
 }
+
+/* --- agent thread (shared household thread) ------------------------------ */
+
+.agent__status {
+  margin-bottom: 1rem;
+}
+
+.agent__model {
+  margin: 0;
+  font-weight: 600;
+}
+
+.agent__model-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.agent__tag {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: #f0e9fd;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.agent__busy {
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius);
+  background: #f0e9fd;
+  font-weight: 600;
+}
+
+.thread {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* Each side is a position and a name, never colour alone: the label above the
+   bubble says who spoke, and the current caregiver's messages sit on the right. */
+.thread__entry {
+  display: flex;
+  flex-direction: column;
+  max-width: 85%;
+}
+
+.thread__entry--theirs,
+.thread__entry--agent {
+  align-self: flex-start;
+}
+
+.thread__entry--mine {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.thread__entry--tool,
+.thread__entry--approval {
+  max-width: 100%;
+  align-self: stretch;
+}
+
+.thread__meta {
+  margin: 0 0 0.15rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.thread__time {
+  font-variant-numeric: tabular-nums;
+}
+
+.thread__bubble {
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid #e4e0ec;
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.thread__entry--mine .thread__bubble {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: transparent;
+}
+
+.thread__bubble--agent {
+  background: #f0e9fd;
+}
+
+.thread__end {
+  height: 0;
+  /* Keep the newest bubble clear of the sticky composer and the bottom nav. */
+  scroll-margin-bottom: calc(var(--nav-height) + 10rem);
+}
+
+.tool-card {
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid #e4e0ec;
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+}
+
+.tool-card summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tool-card__args,
+.tool-card__result {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.6rem;
+  max-height: 14rem;
+  overflow: auto;
+  background: var(--bg);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-card__args {
+  border-left: 2px solid #cfc7dd;
+}
+
+.approvals {
+  margin-bottom: 1rem;
+}
+
+.approval-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+/* Status is not colour-only: the card's badge says Waiting / Confirmed /
+   Declined / Expired, and the left border repeats it. */
+.approval-card {
+  padding: 0.65rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid #e4e0ec;
+  border-left-width: 4px;
+  border-radius: var(--radius);
+}
+
+.approval-card--pending {
+  border-left-color: #b58a1c;
+}
+
+.approval-card--confirmed {
+  border-left-color: #2f7d4f;
+}
+
+.approval-card--cancelled {
+  border-left-color: #8b8494;
+}
+
+.approval-card--expired {
+  border-left-color: #b0413e;
+}
+
+.approval-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.approval-card__summary {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.approval-card__state {
+  flex: none;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid #e4e0ec;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.approvals__recent {
+  margin-top: 0.75rem;
+}
+
+.approvals__recent summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.approval-note {
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border: 1px dashed #cfc7dd;
+  border-radius: var(--radius);
+}
+
+.approval-note--confirmed {
+  border-color: #2f7d4f;
+}
+
+.approval-note--cancelled {
+  border-color: #8b8494;
+}
+
+.approval-note__text {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent__composer {
+  position: sticky;
+  bottom: calc(var(--nav-height) + env(safe-area-inset-bottom, 0) + 0.5rem);
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background: var(--surface);
+  border: 1px solid #e4e0ec;
+  border-radius: var(--radius);
+  box-shadow: 0 -2px 12px rgba(36, 28, 51, 0.06);
+}
+
+.agent__input {
+  width: 100%;
+  min-height: 4.5rem;
+  padding: 0.5rem 0.65rem;
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid #cfc7dd;
+  border-radius: var(--radius);
+  resize: vertical;
+}
+
+.agent__composer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.agent__composer-row .field__hint {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.agent__composer .notice {
+  margin: 0.5rem 0 0;
+}

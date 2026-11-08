@@ -72,6 +72,30 @@ the app and Web Push are tested only on the HTTPS path in §4.
 4. If the page does not load, see §6. Do **not** switch to the tunnel URL from
    §4 for daily use.
 
+### The Agent screen
+
+The **Agent** tab is one shared thread for both of you. Use it for what you would
+otherwise text each other about: "fed breakfast", "started a walk", "what does
+today look like?", "move the vet visit to Friday".
+
+- **One message at a time.** While the assistant is replying, both composers are
+  disabled and the thread says who it is answering. Your draft stays in the box;
+  send it when the assistant is free.
+- **Tool cards** show what the assistant actually did. They start collapsed; tap
+  one to see the result it returned, and the arguments when this screen saw the
+  call live (a reload keeps the result, not the arguments).
+- **A schedule change is proposed, never applied by the assistant.** When it
+  wants to add, move or cancel an appointment, or change the meal schedule, a
+  card appears under **Waiting for your confirmation** on the Agent screen. Read
+  the summary and tap **Confirm** or **Decline**. Both caregivers can decide;
+  the first answer wins and the thread records it for both of you. A proposal
+  expires after 24 hours, and if someone changed the same appointment in the
+  meantime the card refreshes and says so instead of overwriting their change.
+- **The model and this month's spend** are at the top of the screen. If it says
+  no model is attached, or the monthly cap has blocked a paid model, open
+  **Settings → Model and budget** to add a provider key, run the check, choose a
+  model or raise the cap. A free model still answers at the cap.
+
 ## 4. Notifications
 
 There are three paths. Only the first is authoritative.
@@ -206,9 +230,7 @@ replaces the quick one — until then, do not work around it.
   here: ntfy.sh's 12-hour message cache, the separate cookie jar an iOS
   home-screen clip gets over plain HTTP, and Apple's iOS 16.4 Web Push
   requirement. P0-10 records what the partner's phone actually does.
-- **No decisions in notifications.** Approving a proposal is an in-app action.
-  The **approval card is not on screen yet**: the agent can record a proposal
-  (it appears in the activity feed, and a "confirmation is waiting" notification
-  goes out), but the thread screen that confirms it is still a placeholder
-  (PLAN §16 P4-07), so nothing can be confirmed from the browser today. This
-  guide will say how once that screen lands.
+- **No decisions in notifications.** A notification can say a confirmation is
+  waiting, but deciding is an in-app action: tap **Confirm** or **Decline** on
+  the proposal card on the **Agent** screen. A notification never executes
+  anything.

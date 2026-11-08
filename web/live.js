@@ -1,10 +1,11 @@
 // Live care state for the whole shell (PLAN §9.4 as extended by P1-11).
 //
 // One authenticated EventSource carries the shared thread's events and the
-// committed care state. This module only understands the `profile` frame today;
-// the thread renderer will subscribe to the same connection when its own task
-// lands, so there is exactly one stream, one reconnect policy and one
-// per-member connection cap.
+// committed care state. The Agent screen subscribes to the same connection
+// through `subscribeThread`, so there is exactly one stream, one reconnect
+// policy and one per-member connection cap — two connections from one tab would
+// spend two of the four slots the server allows and make an eviction more
+// likely for no benefit.
 //
 // Frames the shell does not render yet are ignored, never fatal: an event name
 // without a listener is simply not delivered, and a malformed payload must not
@@ -16,6 +17,42 @@ import { isNewer } from "./profile-form.js";
 import { getState, setState } from "./store.js";
 
 const RECONNECT_DELAY_MS = 1000;
+
+/**
+ * Thread listeners, notified by the one stream `startLive` owns. The payloads
+ * mirror the server's wire contract (thread.ts / http.ts `writeEvent`):
+ *
+ *   { type: "snapshot", snapshot }  the authoritative thread snapshot
+ *   { type: "batch", seq, events }  one commit's Pi Durable events
+ *   { type: "open" }                the connection opened or re-opened
+ *   { type: "reconnect" }           the server asked the client to reattach
+ *   { type: "error" }               the browser is retrying the connection
+ */
+const threadListeners = new Set();
+
+function notifyThread(event) {
+  for (const listener of [...threadListeners]) {
+    try {
+      listener(event);
+    } catch {
+      // One broken listener must not starve the others or the care frames.
+    }
+  }
+}
+
+/** Subscribe an Agent screen to the shared thread's live frames. */
+export function subscribeThread(listener) {
+  threadListeners.add(listener);
+  return () => threadListeners.delete(listener);
+}
+
+function parsedThreadFrame(event, notify) {
+  try {
+    notify(JSON.parse(event.data));
+  } catch {
+    // Ignore one bad frame; the next snapshot or a reload re-syncs.
+  }
+}
 
 /**
  * Apply a whole care view, never backwards. A reconnect's `GET` and the stream
@@ -79,8 +116,27 @@ export function startLive(deps = {}) {
 
     // Fires on the first connection and on every automatic reconnect.
     source.addEventListener("open", () => {
+      notifyThread({ type: "open" });
       void refresh();
       void refreshBadge();
+    });
+
+    // The server's first frame: the whole thread, so a missed delta cannot
+    // leave half-old state on screen.
+    source.addEventListener("snapshot", (event) => {
+      parsedThreadFrame(event, (snapshot) => notifyThread({ type: "snapshot", snapshot }));
+    });
+
+    // One commit's raw Pi Durable events. The Agent screen is the one place
+    // that understands them; the shell itself only cares about `profile`.
+    source.addEventListener("batch", (event) => {
+      parsedThreadFrame(event, (batch) => notifyThread({ type: "batch", ...batch }));
+    });
+
+    // The browser is retrying by itself; tell the Agent screen so it can show a
+    // polite reconnecting state rather than an unexplained gap.
+    source.addEventListener("error", () => {
+      notifyThread({ type: "error" });
     });
 
     // A full view, not a delta: applying it is a replacement, so a missed frame
@@ -100,6 +156,7 @@ export function startLive(deps = {}) {
     // browser's own retry would replay the same dead connection, so close and
     // open a fresh one instead (which starts from a fresh snapshot).
     source.addEventListener("reconnect", () => {
+      notifyThread({ type: "reconnect" });
       source?.close();
       source = null;
       if (retry !== null) clearTimeout(retry);

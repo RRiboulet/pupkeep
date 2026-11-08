@@ -44,9 +44,11 @@ not stored); the agent can only propose (`create_appointment`,
 `request_feeding_schedule_change`), and a caregiver's
 `POST /api/approvals/confirm` runs the stored action in one commit with its own
 revision check, activity line, notification and `app.approval` thread entry,
-while a double confirm replays the stored result. There is no approval card UI
-yet (the Agent screen is a placeholder), and `request_history_correction` is
-carried because history is append-only and no correction writer exists. **P4-08**
+while a double confirm replays the stored result. The carried browser half has
+landed: the **Agent** screen now renders the shared thread, its tool cards and
+the pending-proposal cards (Confirm/Decline), so a caregiver decides in the app.
+`request_history_correction` is still carried because history is append-only and
+no correction writer exists. **P4-08**
 is complete: `app.usage` is a baseline, not a ledger (the month's spend is
 `harness.usage()` minus where the month began), a paid model's message is refused
 verbatim at the cap while a free one runs, `secrets.json` is the only credential
@@ -64,6 +66,13 @@ which is now fixed with a five-minute grace. The device legs of G4 (Termux:API,
 Web Push over the tunnel, the partner's iPhone) stay P0-10/P4-09 checks. The next
 task is **P5-01** (the kill/restart matrix on the phone). P0-03/P0-08/P0-10
 remain device-gated partner checks and do not block the host-side work.
+
+The owner's browser path now has its own suite: `test/owner-ui.test.js` drives
+the real views through the real `requestJson` against a real app over HTTP (only
+the three things a browser adds — the relative URL, the session cookie and
+`Origin` — are bridged). That is the seam `test/client.test.js` (a fake
+`request`) and the `*-routes` suites (hand-built requests) both skip, and it is
+where P4-06's bodyless-mutation 415 lived: the suite fails on that regression.
 
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The
