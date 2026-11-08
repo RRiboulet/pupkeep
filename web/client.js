@@ -30,8 +30,13 @@ export async function requestJson(path, options = {}) {
   const method = options.method ?? "GET";
   const headers = { Accept: "application/json", ...(options.headers ?? {}) };
   let body;
+  // Every mutation carries a JSON content type (§14.2), even when it has no
+  // body: the server refuses a mutation without one, and a browser that has
+  // cached an older client must not be able to drop it.
+  if (method !== "GET" && method !== "HEAD") {
+    headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
+  }
   if (options.body !== undefined) {
-    headers["Content-Type"] = "application/json";
     body = JSON.stringify(options.body);
   }
   if (method !== "GET" && method !== "HEAD") headers[REQUEST_HEADER] = REQUEST_HEADER_VALUE;

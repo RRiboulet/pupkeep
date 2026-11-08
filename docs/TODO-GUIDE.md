@@ -67,6 +67,13 @@ Web Push over the tunnel, the partner's iPhone) stay P0-10/P4-09 checks. The nex
 task is **P5-01** (the kill/restart matrix on the phone). P0-03/P0-08/P0-10
 remain device-gated partner checks and do not block the host-side work.
 
+The owner's browser path now has its own suite: `test/owner-ui.test.js` drives
+the real views through the real `requestJson` against a real app over HTTP (only
+the three things a browser adds — the relative URL, the session cookie and
+`Origin` — are bridged). That is the seam `test/client.test.js` (a fake
+`request`) and the `*-routes` suites (hand-built requests) both skip, and it is
+where P4-06's bodyless-mutation 415 lived: the suite fails on that regression.
+
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The
 durable backlog is PLAN §16.
