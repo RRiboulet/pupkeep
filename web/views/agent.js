@@ -306,6 +306,11 @@ export class Agent extends Component {
         // A reconnect is a catch-up point: the stream does not replay commits
         // that landed while it was down, and approvals have no frame of their
         // own. The snapshot is authoritative, so one read of each is enough.
+        // `seq` is a per-process counter and restarts at 0 with the server, so
+        // the ordering baseline must not survive a reattach: a fresh counter
+        // would otherwise look older than every snapshot and freeze the thread.
+        this.seqFloor = 0;
+        this.lastBatchSeq = undefined;
         this.setState({ connection: "open" });
         void this.loadThread();
         void this.loadApprovals();
@@ -1072,7 +1077,13 @@ export class Agent extends Component {
     const disabled = busy || sending || this.state.threadError === SIGNED_OUT;
 
     return html`
-      <form class="agent__composer" onSubmit=${(event) => void this.send(event)}>
+      <form
+        class="agent__composer"
+        onSubmit=${(event) => {
+          event.preventDefault();
+          void this.send();
+        }}
+      >
         <label class="visually-hidden" for="agent-compose">Message to the household assistant</label>
         <textarea
           id="agent-compose"

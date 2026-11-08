@@ -1306,6 +1306,21 @@ function findVnode(node, type) {
   return undefined;
 }
 
+function findElement(node, tag) {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, tag);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (node && typeof node === "object") {
+    if (node.type === tag) return node;
+    return findElement(node.props?.children, tag);
+  }
+  return undefined;
+}
+
 function vnodeText(node, needle) {
   if (typeof node === "string") return node.includes(needle);
   if (Array.isArray(node)) return node.some((child) => vnodeText(child, needle));
@@ -2108,6 +2123,42 @@ test("the agent thread applies snapshots by seq and follows runs, args and appro
   assert.equal(refreshes, beforeGap, "a consecutive batch needs no catch-up read");
   agent.onBatch({ seq: 13, events: [{ type: "run_start" }] });
   assert.equal(refreshes, beforeGap + 1, "a missing commit schedules a snapshot read");
+});
+
+test("a reattached stream re-baselines the counter so a restarted server is accepted", async () => {
+  const agent = agentWith(async () => ({ status: 200, ok: true, body: {} }));
+  agent.loadThread = async () => {};
+  agent.loadApprovals = async () => {};
+  agent.loadStatus = async () => {};
+
+  assert.equal(agent.applySnapshot(threadSnapshot(40, [chatEntry(1)])), true);
+  assert.equal(agent.seqFloor, 40);
+  assert.equal(agent.lastBatchSeq, 40);
+
+  // The server's counter is per-process and restarts at 0 with it. A reattach
+  // is the only signal the client gets, so it has to clear the baseline; a
+  // surviving floor would reject every snapshot and freeze the thread.
+  agent.onThreadEvent({ type: "open" });
+  assert.equal(agent.seqFloor, 0, "the reattached stream re-baselines the counter");
+  assert.equal(agent.lastBatchSeq, undefined, "and forgets the old gap baseline");
+
+  assert.equal(agent.applySnapshot(threadSnapshot(1, [chatEntry(2)])), true, "the fresh counter is accepted");
+  assert.equal(agent.state.thread.seq, 1);
+  assert.equal(agent.state.thread.entries[0].entryId, 2, "the restarted thread is not stranded");
+});
+
+test("the composer's Send button posts through send() and never navigates", async () => {
+  const agent = agentWith(async () => ({ status: 200, ok: true, body: {} }));
+  let sends = 0;
+  agent.send = async () => void (sends += 1);
+
+  const form = findElement(agent.render(), "form");
+  assert.ok(form, "the composer renders a form");
+  let prevented = 0;
+  form.props.onSubmit({ preventDefault: () => void (prevented += 1) });
+  assert.equal(prevented, 1, "the native submission is cancelled before send()");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sends, 1, "and the message is sent through the view, not the browser");
 });
 
 test("a refused agent message keeps the draft and its key; an accepted one clears them", async () => {
