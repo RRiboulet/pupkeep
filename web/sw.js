@@ -27,7 +27,7 @@
 // Web Push event handlers (push, notificationclick) are P4-05's; the payload is
 // validated and carries the category title only.
 
-const VERSION = "pupkeep-shell-v14";
+const VERSION = "pupkeep-shell-v15";
 const CACHE = `pupkeep-static-${VERSION}`;
 
 // Relative to the worker's scope. Only minimum shell assets: the document,
@@ -62,6 +62,8 @@ const PRECACHE = [
   "./views/settings.js",
   "./views/invite.js",
   "./views/setup.js",
+  "./views/meal-slots.js",
+  "./views/meal-times.js",
   // Only what the shell imports. `preact-hooks.mjs` and `htm-preact.mjs` are
   // vendored and pinned (NOTICE.md) but not precached: they contain bare
   // preact/htm specifiers that resolve only through an import map, which this

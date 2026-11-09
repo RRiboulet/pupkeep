@@ -64,7 +64,10 @@ cancelled one never fires, the dedupe key is authoritative and is the push tag),
 and it found a real bug — the "At the start" reminder offset could never fire,
 which is now fixed with a five-minute grace. The device legs of G4 (Termux:API,
 Web Push over the tunnel, the partner's iPhone) stay P0-10/P4-09 checks. The next
-task is **P5-01** (the kill/restart matrix on the phone). P0-03/P0-08/P0-10
+task is **P5-01** (the kill/restart matrix on the phone). The backlog request
+to edit meal times after setup landed as **P4-11** (the Settings “Meal times”
+card, reusing the wizard’s slot editor; the wizard hides its own meal section
+once setup is complete). P0-03/P0-08/P0-10
 remain device-gated partner checks and do not block the host-side work.
 
 The owner's browser path now has its own suite: `test/owner-ui.test.js` drives
@@ -241,6 +244,7 @@ Next: <task IDs>
 | `P4-08` | Budget ledger, model picker and provider keys | P1-06, P4-05 | phase-4, models, security, web |
 | `P4-09` | Daily access and notification runbook | P4-05, P1-13 | phase-4, docs, host, access |
 | `P4-10` | Phase 4 tests | P4-03..P4-07 | phase-4, tests |
+| `P4-11` | Backlog: edit the meal schedule outside the wizard | P4-07 | phase-4, feature, ui, feeding |
 | `P5-01` | Kill/restart matrix on the phone | G4 | phase-5, durability, host |
 | `P5-02` | Backup/restore drill | P0-07, G4 | phase-5, durability, security |
 | `P5-03` | Two-client E2E (partner leg also needs P0-10) | G4 | phase-5, tests, web |

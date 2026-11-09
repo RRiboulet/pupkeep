@@ -2678,10 +2678,11 @@ that the partner is reached out-of-app is gated on P0-10.
       **Carried out:** an unsaved wizard draft is lost when the caregiver
       navigates away (the component remounts); it is not persisted and nothing
       warns, which matters only if someone uses Today and Settings as two
-      editors at once. The agent cannot read or write the schedule yet;
-      `get_context` still lists meals as untracked, and the meal read/write tools
-      are **P2-04**/**P2-05** while the schedule change stays **P4-07**'s
-      approval. **P2-01** inherits `app.feeding` version 1 (slots, revision) and
+      editors at once. The agent’s schedule change stays **P4-07**’s approval
+      (`request_feeding_schedule_change`); the meal read/log tools are
+      **P2-04**’s. **P4-11** later added a Settings “Meal times” editor so the
+      schedule can be changed after setup without reopening the wizard.
+      **P2-01** inherits `app.feeding` version 1 (slots, revision) and
       adds the feed events as version 2.
 
 **Gate G1:** two caregivers sign in, edit the puppy profile, see each other live;
@@ -4609,6 +4610,54 @@ process kill; both clients see the same state; the partner notification
       tunnel, no real ntfy topic here); the partner's iPhone remains **P0-10**;
       and a live `harness.resume()` on a phone while a reminder sleeps is P5-01's
       kill/restart matrix on the real device.
+
+- [x] **P4-11** Backlog: edit the meal schedule outside the first-run wizard.
+      Requested by the caregiver after Phase 3 — moving a meal time meant
+      reopening the setup wizard, which is a first-run checklist, not a place a
+      person goes to change breakfast. **Landed:** `web/views/meal-slots.js`
+      (the wizard’s slot editor extracted verbatim — `MealSlots`, `slotId`,
+      `suggestedSlots`, `slotDraftsOf`, `scheduleDrafts`, the pure
+      `editSlot`/`toggleSlot`/`appendSlot`/`removeSlotAt`, `MEAL_SLOTS_MAX`,
+      `wireSlots`, and the shared `CONFLICT_MESSAGE`/`SLOT_HINT` — so the two
+      screens cannot accept different shapes or report the same refusal with
+      different sentences), `web/views/meal-times.js` (the Settings card:
+      reads `/api/puppy`, subscribes to the `profile` frame, saves
+      `PATCH /api/feeding/slots` with the `rev` it read plus a `pendingSave`
+      key, and answers a stale 409 by keeping the draft and showing the current
+      schedule), `web/views/settings.js` (renders the card once
+      `setup.complete`), and `web/views/setup.js` (uses the shared editor; hides
+      its own meal section once setup is complete and points at the card).
+      **No server change:** the route, the domain writer and the reminder
+      re-arm are P1-14/P2-09’s, and the shared `MEAL_SCHEDULE_RULE` copy is
+      untouched.
+      Decisions: (1) **one editor per screen** — the card is shown only once
+      setup is complete and the wizard hides its meal section then, so Settings
+      never offers two editors for one schedule; during first-run the wizard
+      owns it. (2) **The agent gets no new direct tool:**
+      `request_feeding_schedule_change` (P4-07) is already the approval-gated
+      schedule write, and a direct tool would be a schedule-changing write with
+      no confirmation. (3) The card reuses `pendingSave`/`isNewer`, so its
+      idempotency and freshness rules are the wizard’s, not a second copy.
+      **Verified:** `npm run typecheck`; `npm test` 813/813 — 7 new tests in
+      `test/owner-ui.test.js` (a time edit round-trips through the real client
+      and keeps the slot id; a partner’s reschedule is an explicit stale
+      conflict with the draft kept; a live frame flags a dirty draft and
+      follows a clean one; a successful save clears the draft so a later frame
+      is not a false conflict; a live-frame conflict advances the revision so
+      one save is the knowing replacement; a lost save response keeps its key
+      so the retry replays one revision; a duplicate time is refused with the
+      shared rule) and 5 in `test/client.test.js` (`wireSlots`/`slotDraftsOf`,
+      the wizard’s handoff, the card’s render, and Settings’ one-card gate).
+      **Review follow-ups:** the shared module also owns the pure slot edits,
+      the cap and the two copies, so the two screens cannot drift on a refusal
+      sentence or the Add button’s limit; the card’s success path now clears
+      `dirty` and re-adopts the saved slots, and its conflict frame advances the
+      revision — the two copy-induced bugs the review found. The Add button
+      moved into the shared component, so the wizard’s action row is now Add
+      then Save (two rows, not one); the plan records it here because the
+      extraction was otherwise verbatim.
+      **Not verified:** no browser or phone run — the card’s render is pinned
+      by the client suite, not a real browser.
 
 **Gate G4:** reminder fires after a restart; cancel removes it; the host’s
 Termux:API local notification works; Web Push is proven over the quick tunnel;
