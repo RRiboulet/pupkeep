@@ -69,7 +69,7 @@ Finding 3.
 | 1 | **Server child** killed (`SIGKILL`) | **pass** | 2026-11-10 12:09:35 |
 | 2 | **Launcher** killed (`SIGKILL`) | **pass**, with the documented consequence | 2026-11-10 12:09:56 |
 | 3 | **Termux app** killed (every process of the UID) | **pass** | 2026-11-10 13:53 |
-| 4 | **Phone reboot** | **to run** — needs the owner | Tailscale now up (`100.90.202.61`); sshd verified on the tailnet address |
+| 4 | **Phone reboot** | **fail as shipped** — the data and the session survive, the boot path does not start the app | 2026-11-10 ~15:0x reboot, `boot_id` `3e85e392-…` |
 | 5 | **Tunnel restart** | **fail** — two defects | 2026-11-10 12:10–12:14 |
 | 6 | **Agent mid-turn** | **not observed** — no provider key on this host | — |
 
@@ -152,33 +152,45 @@ before the state can be read.
 So: the data outlives the process, nothing restarts the app by itself, and the
 next start finds everything (and clears its own dead locks).
 
-### 4. Phone reboot — to run
+### 4. Phone reboot — the data survives, the boot path does not start the app
 
-**Update 2026-11-10 13:48:** Tailscale is now installed and signed in on the
-phone (`100.90.202.61`), so the boot path's precondition is met. `scripts/termux-sshd.sh`
-binds sshd on the tailnet address, verified from the phone itself
-(`connect 100.90.202.61:8022 → open`); the devcontainer **cannot** reach that
-address directly (`/dev/tcp/100.90.202.61/8022` from here times out — the host
-does not forward the tailnet into the container), so access after the reboot
-still comes from the owner re-running `~/start-voice.sh`.
+**The durability half passes; the boot half fails.** Two separate claims, and it
+matters which one is which.
 
-`scripts/termux-boot.sh` execs the launcher with `--access tailscale` and **no
-`--port`**, so the booted instance binds the tailnet address on the default
-**8787** — not the 8791 this matrix used, which is the port the operator's own
-`ssh` config claims while a session is open. Expect: `boot:` line with a **new**
-`boot_id`, wake lock, sshd, `listening url=http://100.90.202.61:8787`.
+| | |
+|---|---|
+| `boot_id` | `cf7373f5-…` → **`3e85e392-e208-4eb8-925a-03c97feea9cf`** — a real reboot |
+| Boot line at reboot | **none**. The first `boot:` line in `server.log` is from 15:13:56, written by the *manual* run below |
+| App after the reboot | **down**: no `node`, `healthz` `000` on 8787 (127.0.0.1 and the tailnet address) |
+| Data after the reboot | intact: 23 documents, `pi_tasks` 27/28/29 `sleeping`, `pragma synchronous` = 2 |
+| Session after the reboot | the same cookie still worked; the driver never re-signed in |
+| Started by hand the way the boot path intends (`--access tailscale --boot`) | launcher `19857`, server `19869`, `listening url=http://100.90.202.61:8787`, `healthz 200` |
+| State after that | identical: setup complete, `profileRev 1`, open walk `6eb50678-…`, appointment `e84c230a-…`, tasks 27/28/29 still `sleeping` |
 
-```text
-reboot the phone
-# after it comes back, from Termux (do NOT start Pupkeep by hand first —
-# whether it is already up is the thing under test):
-~/start-voice.sh
+**Why the boot path fails** (Findings 8–9): `~/.termux/boot/pupkeep.sh` execs
+`scripts/termux-boot.sh`, whose shebang is `#!/usr/bin/env bash` — and Termux has
+no `/usr/bin/env` (its `env` is `$PREFIX/bin/env`). Under a minimal environment
+that is:
+
+```
+…/scripts/termux-boot.sh: /usr/bin/env: bad interpreter: No such file or directory
 ```
 
-Record: `boot_id` **changed**, the boot line's timestamp, whether Termux:Boot ran
-the wrapper at all (the boot line proves it), the launcher's exit or its
-`listening` line, whether a manual start afterwards is refused by the pid lock
-(it should be, if the boot worked), and the state read.
+and with the interpreter passed explicitly, the next line that needs the
+environment bites: `line 57: PREFIX: unbound variable` (`set -u`, and
+Termux:Boot exports neither `PATH` nor `PREFIX`). The same script run from an
+interactive Termux shell works — that is the run that produced the `boot:` line
+and the tailnet listener above.
+
+What this means for G5: **the reboot does not lose anything** (the gate's data
+claim holds), but "phone reboot recovers" does **not** hold until the boot
+scripts are fixed — the operator has to start the launcher by hand after every
+reboot. That is P5-04's, and `test/runbook.test.ts` currently *requires* the
+`#!/usr/bin/env bash` shebang, so the fix has to move that assertion too.
+
+Whether Termux:Boot ran the wrapper at all cannot be distinguished from here:
+the wrapper dying at the `exec` and the app never being armed both leave exactly
+this evidence (no boot line). The boot script needs the fix either way.
 
 ### 5. Tunnel restart — fail (two defects)
 
@@ -292,6 +304,23 @@ spinning. The turn must complete after the restart with one care write.
    actually needs (it may be stopping the wrong package: `com.termux` vs
    `com.termux.boot`/`com.termux.api`), because "the operator can force stop the
    app" is a release-procedure assumption.
+8. **The boot path cannot start on Termux at all** (observed 2026-11-10 15:14).
+   `~/.termux/boot/pupkeep.sh` execs `scripts/termux-boot.sh`, whose shebang is
+   `#!/usr/bin/env bash`; Termux has no `/usr/bin/env`, so under a minimal
+   environment the exec fails with `bad interpreter: No such file or directory`.
+   With the interpreter passed explicitly, `set -u` then kills it at
+   `line 57: PREFIX: unbound variable`. `scripts/termux-sshd.sh` has the same
+   shebang and fails the same way when exec'd. The scripts work from an
+   interactive Termux shell (that is how they have always been run), which is
+   exactly why this was never seen.
+9. **Termux:Boot's environment is the missing contract.** It supplies neither
+   `PATH` nor `PREFIX`, and the scripts assume both. The wrapper `termux-install.sh`
+   writes should `exec "$PREFIX/bin/bash" "<repo>/scripts/termux-boot.sh"` and the
+   script should set `PATH`/`PREFIX` itself; `test/runbook.test.ts` asserts the
+   `#!/usr/bin/env bash` shebang today, so it has to change with the fix.
+   Whether Termux:Boot ran the wrapper on this reboot cannot be distinguished
+   from the log (a death at the exec and a never-armed app look identical); the
+   fix is required either way.
 
 ## Where the result lands
 
