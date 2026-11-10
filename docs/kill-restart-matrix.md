@@ -68,7 +68,7 @@ Finding 3.
 |---|---|---|---|
 | 1 | **Server child** killed (`SIGKILL`) | **pass** | 2026-11-10 12:09:35 |
 | 2 | **Launcher** killed (`SIGKILL`) | **pass**, with the documented consequence | 2026-11-10 12:09:56 |
-| 3 | **Termux app** killed (Android UI force stop) | **to run** — needs the owner | — |
+| 3 | **Termux app** killed (every process of the UID) | **pass** | 2026-11-10 13:53 |
 | 4 | **Phone reboot** | **to run** — needs the owner | Tailscale now up (`100.90.202.61`); sshd verified on the tailnet address |
 | 5 | **Tunnel restart** | **fail** — two defects | 2026-11-10 12:10–12:14 |
 | 6 | **Agent mid-turn** | **not observed** — no provider key on this host | — |
@@ -117,31 +117,40 @@ installed (P0-06 measured that it works; P5-04 decides whether to install it).
 The pid lock is what stops the operator's next start from becoming a second
 writer, and it says so in one sentence.
 
-### 3. Termux app killed — to run
+### 3. Termux app killed — pass
 
 `am force-stop com.termux` from **inside** Termux does **not** work on this phone
-(Finding 7), so the app has to be stopped from Android. Expected (P0-06, to be
-confirmed): data survives, nothing restarts until Termux is reopened, `sshd` does
-not come back by itself.
+(Finding 7), and the Android Settings force stop did not take either: after it the
+launcher (`23299`, started 12:10) and even `sshd` (`17945`, started 12:01) were
+still the same processes, which is only possible if no Termux process was stopped
+at all. What did work, and what the record below is from, is killing every
+process of the UID from inside Termux — the same end state as a force stop for
+the app's durability (all processes gone, no supervisor, sockets closed), though
+it is **not** Android's own force stop and is recorded as such:
 
-Run it, then reopen Termux and restore access before checking the data:
-
-```text
-Android Settings → Apps → Termux → Force stop
-# …reopen Termux from the launcher…
-~/start-voice.sh                      # sshd + the reverse tunnel back to the VPS
-~/pupkeep-start.sh --access local --port 8791 --data ~/.pupkeep
+```bash
+pkill -9 -u "$(id -u)"
 ```
 
-**Before** (2026-11-10 13:48): launcher `23299` and server `23313`, both from
-12:10, `healthz 200`, no `boot:` line in `server.log`, `boot_id` unchanged. That
-is the state the force stop has to end — and the first attempt did not end it:
-at 12:46:42 a start attempt logged `refusing to start: another instance already
-owns ~/.pupkeep (pid 23299)`, which is proof the old launcher was still alive.
+That ends the Termux app's whole process tree, `sshd` and the reverse `ssh -R`
+tunnel included, so the operator has to reopen Termux and re-establish the tunnel
+before the state can be read.
 
-Record: the `boot_id` (must be unchanged — this is not a reboot), whether a boot
-line was appended (it must **not** be: Termux:Boot runs at reboot only), the new
-pids, and the state read above.
+| | |
+|---|---|
+| Killed | every process of `u0_a178` at ~13:53 local (12:53Z was the last log line before it) |
+| `boot_id` | `cf7373f5-…` — **unchanged**: an app kill, not a reboot |
+| Boot line | **none** (`grep -c '^boot:'` → 0): Termux:Boot runs at reboot only |
+| Restarted by itself | **no** — `pgrep -a node` empty, `healthz` `000` after the kill and before the manual start |
+| Left behind | stale `launcher.pid` (`23299 …`) and `server.pid` (`23313 …`) with dead pids |
+| Data on disk | 23 documents; `pi_tasks` 27/28/29 still `sleeping`; `pragma synchronous` = 2 |
+| After `~/pupkeep-start.sh` | new launcher `4167`, server `4184`; the stale locks were cleared; `healthz 200`; `session bootstrap created=false`, `feed planner reconciliation createdPlanner=false`, `listening url=http://127.0.0.1:8791` |
+| State after | identical: setup complete, `profileRev 1`, open walk `6eb50678-…`, appointment `e84c230a-…` |
+| Session | the same cookie still worked; the driver never re-signed in |
+| Reminder tasks | 27/28/29 still `sleeping` — nothing was lost or re-armed twice |
+
+So: the data outlives the process, nothing restarts the app by itself, and the
+next start finds everything (and clears its own dead locks).
 
 ### 4. Phone reboot — to run
 
@@ -274,10 +283,15 @@ spinning. The turn must complete after the restart with one care write.
    2026-11-10 13:49): `java.lang.SecurityException: Permission Denial:
    forceStopPackage() … requires android.permission.FORCE_STOP_PACKAGES`. It also
    exits **0**, so a script cannot detect the failure, and P0-06's "user ran
-   `am force-stop com.termux`" is not reproducible this way on this build. The
-   Android UI (Settings → Apps → Termux → Force stop) is the path. The first
-   attempt left the app running: the 12:10 launcher was still alive at 13:48 and
-   a 12:46 start attempt was refused by its own pid lock.
+   `am force-stop com.termux`" is not reproducible this way on this build.
+   **The Android Settings force stop did not take either** on this phone: after
+   it, the launcher and even `sshd` were the same pids as before, so no Termux
+   process had been stopped. Cell 3 was therefore observed with
+   `pkill -9 -u "$(id -u)"`, which reaches the same end state for the app's
+   durability but is not Android's own kill. P5-05 should find out what this ROM
+   actually needs (it may be stopping the wrong package: `com.termux` vs
+   `com.termux.boot`/`com.termux.api`), because "the operator can force stop the
+   app" is a release-procedure assumption.
 
 ## Where the result lands
 
