@@ -27,6 +27,7 @@ import { startTestApp } from "./support/app.ts";
 import { NetworkError, newIdempotencyKey, requestJson } from "../web/client.js";
 import { Agent } from "../web/views/agent.js";
 import { Invite } from "../web/views/invite.js";
+import { MealTimes } from "../web/views/meal-times.js";
 import { Notifications } from "../web/views/notifications.js";
 import { Settings } from "../web/views/settings.js";
 import { Showers } from "../web/views/showers.js";
@@ -303,6 +304,237 @@ test("the owner's monthly cap is saved and read back", async () => {
 
     const budget = await requestJson("/api/budget");
     assert.equal(budget.body.budget.capUsd, 12.5);
+  } finally {
+    await ui.close();
+  }
+});
+
+// --- Settings → Meal times (the backlog feature) ----------------------------
+
+/** Seed one slot through the real route so the card has a schedule to edit. */
+async function seedSlots(slots) {
+  const profile = await requestJson("/api/puppy");
+  const saved = await requestJson("/api/feeding/slots", {
+    method: "PATCH",
+    body: { rev: profile.body.meals.rev, slots },
+    idempotencyKey: newIdempotencyKey(),
+  });
+  assert.equal(saved.status, 200, "the meal schedule is seeded");
+  return saved.body.profile;
+}
+
+const BREAKFAST = { id: "slot-breakfast", label: "Breakfast", timeLocal: "07:00", active: true };
+
+/** One slot at a given wall-clock time, keeping the seeded slot's identity. */
+function slotAt(timeLocal) {
+  return { ...BREAKFAST, timeLocal };
+}
+
+test("the owner changes a meal time from Settings and the schedule round-trips", async () => {
+  const ui = await ownerUi();
+  try {
+    await seedSlots([BREAKFAST]);
+    const card = mount(MealTimes);
+    await card.load();
+    assert.equal(card.state.error, null);
+    assert.equal(card.state.slots[0].timeLocal, "07:00");
+
+    card.onInput(0, "timeLocal", "07:30");
+    assert.equal(card.state.dirty, true, "an edit marks the draft dirty");
+    await card.save({ preventDefault() {} });
+    assert.equal(card.state.busy, false);
+    assert.equal(card.state.error, null);
+    assert.match(String(card.state.message), /Saved/);
+    assert.equal(card.state.slots[0].timeLocal, "07:30");
+
+    const profile = await requestJson("/api/puppy");
+    assert.equal(profile.body.meals.slots[0].timeLocal, "07:30");
+    assert.equal(
+      profile.body.meals.slots[0].id,
+      "slot-breakfast",
+      "the slot keeps its identity, so its logged meals stay attached",
+    );
+  } finally {
+    await ui.close();
+  }
+});
+
+test("a partner's reschedule while the owner edits is an explicit conflict, and the draft is kept", async () => {
+  const ui = await ownerUi({ partner: true });
+  try {
+    await seedSlots([BREAKFAST]);
+    const card = mount(MealTimes);
+    await card.load();
+    card.onInput(0, "timeLocal", "07:30");
+    assert.equal(card.state.dirty, true);
+
+    // The partner saves a different time from another device.
+    const before = await requestJson("/api/puppy");
+    const partnerSave = await requestJson("/api/feeding/slots", {
+      method: "PATCH",
+      body: { rev: before.body.meals.rev, slots: [slotAt("08:00")] },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    assert.equal(partnerSave.status, 200);
+
+    // The owner's next save is stale: the draft is kept, the conflict is shown,
+    // and the current schedule is the truth on screen.
+    await card.save({ preventDefault() {} });
+    assert.equal(card.state.busy, false);
+    assert.match(String(card.state.conflict), /Someone else changed/);
+    assert.equal(card.state.slots[0].timeLocal, "07:30", "the owner's draft is not replaced");
+    assert.equal(card.state.profile.meals.slots[0].timeLocal, "08:00");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("a live frame for the partner's reschedule flags a dirty draft and follows a clean one", async () => {
+  const ui = await ownerUi();
+  try {
+    await seedSlots([BREAKFAST]);
+    const card = mount(MealTimes);
+    await card.load();
+
+    // A clean draft follows the partner's committed change.
+    let current = await requestJson("/api/puppy");
+    await requestJson("/api/feeding/slots", {
+      method: "PATCH",
+      body: { rev: current.body.meals.rev, slots: [slotAt("08:00")] },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    card.onStore({ profile: (await requestJson("/api/puppy")).body });
+    assert.equal(card.state.slots[0].timeLocal, "08:00");
+    assert.equal(card.state.conflict, null);
+
+    // A dirty draft is kept and flagged; the frame does not silently replace it.
+    card.onInput(0, "timeLocal", "07:30");
+    current = await requestJson("/api/puppy");
+    await requestJson("/api/feeding/slots", {
+      method: "PATCH",
+      body: { rev: current.body.meals.rev, slots: [slotAt("09:00")] },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    card.onStore({ profile: (await requestJson("/api/puppy")).body });
+    assert.match(String(card.state.conflict), /Someone else changed/);
+    assert.equal(card.state.slots[0].timeLocal, "07:30", "the draft is kept");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("a successful save clears the dirty draft, so a later partner frame is not a false conflict", async () => {
+  const ui = await ownerUi();
+  try {
+    await seedSlots([BREAKFAST]);
+    const card = mount(MealTimes);
+    await card.load();
+    card.onInput(0, "timeLocal", "07:30");
+    await card.save({ preventDefault() {} });
+    assert.equal(card.state.dirty, false, "the save settles the draft");
+    assert.equal(card.state.slots[0].timeLocal, "07:30");
+
+    // The partner reschedules after the save: a settled card follows it.
+    let current = await requestJson("/api/puppy");
+    await requestJson("/api/feeding/slots", {
+      method: "PATCH",
+      body: { rev: current.body.meals.rev, slots: [slotAt("08:00")] },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    card.onStore({ profile: (await requestJson("/api/puppy")).body });
+    assert.equal(card.state.conflict, null, "a settled card does not accuse anyone");
+    assert.equal(card.state.slots[0].timeLocal, "08:00");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("a live-frame conflict advances the revision, so one save is the knowing replacement", async () => {
+  const ui = await ownerUi();
+  try {
+    await seedSlots([BREAKFAST]);
+    const card = mount(MealTimes);
+    await card.load();
+    card.onInput(0, "timeLocal", "07:30");
+
+    const before = (await requestJson("/api/puppy")).body.meals.rev;
+    await requestJson("/api/feeding/slots", {
+      method: "PATCH",
+      body: { rev: before, slots: [slotAt("08:00")] },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    card.onStore({ profile: (await requestJson("/api/puppy")).body });
+    assert.match(String(card.state.conflict), /Someone else changed/);
+    assert.equal(card.state.slots[0].timeLocal, "07:30", "the draft is kept");
+    assert.equal(card.state.profile.meals.rev, before + 1, "the frame moved the revision forward");
+
+    // One save replaces the partner's change: the card holds the current rev.
+    await card.save({ preventDefault() {} });
+    assert.equal(card.state.conflict, null);
+    assert.equal(card.state.error, null);
+    const profile = await requestJson("/api/puppy");
+    assert.equal(profile.body.meals.slots[0].timeLocal, "07:30");
+    assert.equal(profile.body.meals.rev, before + 2, "one save, one revision");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("a lost save response keeps its key, so the retry replays instead of conflicting", async () => {
+  const ui = await ownerUi();
+  try {
+    await seedSlots([BREAKFAST]);
+    let patches = 0;
+    const flaky = async (path, options) => {
+      if (path === "/api/feeding/slots") {
+        patches += 1;
+        const result = await requestJson(path, options);
+        // The commit lands; only the response is lost. A retry of the same body
+        // must replay it rather than commit a second revision.
+        if (patches === 1) throw new NetworkError("the response was lost");
+        return result;
+      }
+      return requestJson(path, options);
+    };
+    const card = mount(MealTimes);
+    card.request = flaky;
+    await card.load();
+    card.onInput(0, "timeLocal", "07:30");
+
+    await card.save({ preventDefault() {} });
+    assert.equal(card.state.busy, false);
+    assert.match(String(card.state.error), /lost/);
+    assert.equal(patches, 1);
+
+    // The same body gets the same key: the retry replays the committed write.
+    await card.save({ preventDefault() {} });
+    assert.equal(card.state.error, null);
+    assert.equal(card.state.message, "Already saved.");
+    assert.equal(patches, 2);
+
+    const profile = await requestJson("/api/puppy");
+    assert.equal(profile.body.meals.slots[0].timeLocal, "07:30");
+    assert.equal(profile.body.meals.rev, 2, "one commit, one revision");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("a duplicate meal time is refused with the shared rule, and the draft is kept", async () => {
+  const ui = await ownerUi();
+  try {
+    await seedSlots([BREAKFAST, { id: "slot-lunch", label: "Lunch", timeLocal: "12:00", active: true }]);
+    const card = mount(MealTimes);
+    await card.load();
+    card.onInput(1, "timeLocal", "07:00");
+
+    await card.save({ preventDefault() {} });
+    assert.equal(card.state.busy, false);
+    assert.match(String(card.state.error), /1 to 12 slots/);
+    assert.equal(card.state.slots[1].timeLocal, "07:00", "the refused draft is kept");
+
+    const profile = await requestJson("/api/puppy");
+    assert.equal(profile.body.meals.rev, 1, "nothing was committed");
   } finally {
     await ui.close();
   }

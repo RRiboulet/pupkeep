@@ -17,13 +17,15 @@ import { test } from "node:test";
 const { Pup } = await import("../web/views/pup.js");
 const { Today } = await import("../web/views/today.js");
 const { Setup } = await import("../web/views/setup.js");
+const { MealTimes } = await import("../web/views/meal-times.js");
+const { slotDraftsOf, wireSlots } = await import("../web/views/meal-slots.js");
 const { applyCareView, startLive, subscribeThread } = await import("../web/live.js");
 const { feedTimeText, localDate, localMinutes, mealClock, mealRows, mealStatus, minutesOf } = await import(
   "../web/meals.js"
 );
 const { correctedNow, timerText, walkSeconds, walkStale, walkTimeText } = await import("../web/walks.js");
 const { getState, setState } = await import("../web/store.js");
-const { changedFields, draftOf, isNewer, pendingSave, wireOf } = await import("../web/profile-form.js");
+const { changedFields, draftOf, emptyDraft, isNewer, pendingSave, wireOf } = await import("../web/profile-form.js");
 const { CHART_SIZE, chartGeometry, daysBetweenLocalDates, formatKg, measurementRows, windowLabel } =
   await import("../web/growth-chart.js");
 const { boardGroups, customMilestone, noteUpdate, rowMetaText, statusUpdate } = await import("../web/training.js");
@@ -311,8 +313,137 @@ test("a frame for the caregiver's own in-flight save does not accuse someone els
 
   const theirs = wizard({});
   theirs.onStore({ profile: profileOf({ rev: 2, name: "Other pup" }) });
-  assert.match(String(theirs.state.conflict), /Someone else changed this/);
+  assert.match(String(theirs.state.conflict), /Someone else changed this while you were editing/);
+  assert.doesNotMatch(String(theirs.state.conflict), /meal times/, "a puppy edit is not blamed on the meals");
   assert.equal(theirs.state.puppy.name, "Biscuit", "their typing is not replaced");
+
+  // The copy names the section that actually moved.
+  const meals = wizard({});
+  meals.state.puppyDirty = false;
+  meals.state.slotsDirty = true;
+  meals.state.slots = [{ id: "slot-a", label: "Breakfast", timeLocal: "06:30", portion: "", active: true }];
+  meals.onStore({ profile: profileOf({ rev: 2, mealsRev: 2 }) });
+  assert.match(String(meals.state.conflict), /Someone else changed the meal times/);
+  assert.equal(meals.state.slots[0].timeLocal, "06:30", "the meal draft is kept");
+});
+
+test("one frame that moves two dirty sections does not single out the meals", () => {
+  const before = profileOf();
+  const setup = new Setup({});
+  setup.state = {
+    profile: before,
+    zone: before.household.timezone,
+    zoneDirty: false,
+    puppy: draftOf(before),
+    puppyDirty: true,
+    slots: slotDraftsOf(before.meals.slots),
+    slotsDirty: true,
+    busy: null,
+    error: null,
+    message: null,
+    conflict: null,
+    pending: {},
+  };
+  setup.setState = (patch) => Object.assign(setup.state, patch);
+  // A reconnect re-reads one whole view, so a single frame can carry two bumps.
+  setup.onStore({ profile: profileOf({ rev: 2, mealsRev: 2, name: "Other pup" }) });
+  assert.match(String(setup.state.conflict), /Someone else changed this while you were editing/);
+  assert.doesNotMatch(String(setup.state.conflict), /meal times/, "two moved sections are not one");
+});
+
+test("a frame that completes setup drops the unsavable meal draft and says so", () => {
+  const before = { ...profileOf({ mealsRev: 1 }), setup: { complete: false, missing: ["meals"] } };
+  const setup = new Setup({});
+  setup.state = {
+    profile: before,
+    zone: before.household.timezone,
+    zoneDirty: false,
+    puppy: draftOf(before),
+    puppyDirty: false,
+    slots: [{ id: "slot-a", label: "Breakfast", timeLocal: "06:30", portion: "", active: true }],
+    slotsDirty: true,
+    busy: null,
+    error: null,
+    message: null,
+    conflict: null,
+    pending: {},
+  };
+  setup.setState = (patch) => Object.assign(setup.state, patch);
+  // The partner's save is the one that finishes setup: the wizard's meal form
+  // disappears with it, so "saving again" would name a button that is gone.
+  setup.onStore({ profile: profileOf({ mealsRev: 2 }) });
+
+  assert.equal(setup.state.conflict, null, "no banner promises a save the screen no longer offers");
+  assert.match(setup.state.message, /not kept/);
+  assert.match(setup.state.message, /Meal times card above/);
+  assert.equal(setup.state.slotsDirty, false);
+  assert.equal(setup.state.slots[0].timeLocal, "07:00", "the committed schedule replaces the unsavable draft");
+  assert.ok(!vnodeText(setup.render(), "Save meal times"), "no orphan save button after completion");
+});
+
+// --- the shared meal-slot editor (P1-14's wizard, reused by Settings) -------
+
+test("wireSlots trims labels, drops an empty portion and keeps the wall-clock minute", () => {
+  const wired = wireSlots([
+    { id: "slot-a", label: "  Breakfast  ", timeLocal: "07:00:00", portion: "   ", active: true },
+    { id: "slot-b", label: "Lunch", timeLocal: "12:30", portion: "1 cup", active: false },
+  ]);
+  assert.deepEqual(wired, [
+    { id: "slot-a", label: "Breakfast", timeLocal: "07:00", active: true },
+    { id: "slot-b", label: "Lunch", timeLocal: "12:30", portion: "1 cup", active: false },
+  ]);
+});
+
+test("slotDraftsOf fills an absent portion so the editor always has a string", () => {
+  assert.deepEqual(slotDraftsOf([{ id: "slot-a", label: "Breakfast", timeLocal: "07:00", active: true }]), [
+    { id: "slot-a", label: "Breakfast", timeLocal: "07:00", portion: "", active: true },
+  ]);
+});
+
+test("the wizard hides its meal section once setup is complete and says where it is edited", () => {
+  const unfinishedProfile = { ...profileOf({ slots: [] }), setup: { complete: false, missing: ["meals"] } };
+  const unfinished = new Setup({});
+  unfinished.state = {
+    profile: unfinishedProfile,
+    zone: "Europe/Paris",
+    zoneDirty: false,
+    puppy: emptyDraft(),
+    puppyDirty: false,
+    slots: [{ id: "slot-a", label: "Breakfast", timeLocal: "07:00", portion: "", active: true }],
+    slotsDirty: false,
+    busy: null,
+    error: null,
+    message: null,
+    conflict: null,
+    pending: {},
+  };
+  const editing = unfinished.render();
+  assert.ok(vnodeText(editing, "Save meal times"), "an unfinished household edits meals in the wizard");
+  assert.ok(findVnode(editing, "MealSlots"), "the wizard uses the shared slot editor");
+
+  const done = new Setup({});
+  done.state = { ...unfinished.state, profile: profileOf() };
+  const settled = done.render();
+  assert.ok(!findVnode(settled, "MealSlots"), "a finished household has no second editor in the wizard");
+  assert.ok(vnodeText(settled, "Meal times card"), "the wizard says where the schedule is edited");
+});
+
+test("the Settings meal-times card renders the shared editor and its save action", () => {
+  const card = new MealTimes({});
+  card.state = {
+    profile: profileOf(),
+    slots: slotDraftsOf(profileOf().meals.slots),
+    dirty: false,
+    busy: false,
+    error: null,
+    message: null,
+    conflict: null,
+    pending: null,
+  };
+  const vnode = card.render();
+  assert.ok(vnodeText(vnode, "Meal times"));
+  assert.ok(findVnode(vnode, "MealSlots"), "the card reuses the wizard's slot editor, not a second copy");
+  assert.ok(vnodeText(vnode, "Save meal times"));
 });
 
 // --- Today meals (P2-05) ----------------------------------------------------
@@ -1306,6 +1437,19 @@ function findVnode(node, type) {
   return undefined;
 }
 
+function countVnode(node, type) {
+  let count = 0;
+  const walk = (n) => {
+    if (Array.isArray(n)) return n.forEach(walk);
+    if (n && typeof n === "object") {
+      if (n.type?.name === type) count += 1;
+      walk(n.props?.children);
+    }
+  };
+  walk(node);
+  return count;
+}
+
 function findElement(node, tag) {
   if (Array.isArray(node)) {
     for (const child of node) {
@@ -1803,6 +1947,31 @@ test("settings renders the notification card and saves prefs and an empty topic"
   assert.deepEqual(calls[0].options.body, { enabled: true, categories: ["fed"] });
   await settings.saveNtfy("");
   assert.deepEqual(calls[1].options.body, { topic: null });
+});
+
+test("Settings shows the meal-times card only once setup is complete", () => {
+  const settings = new Settings({});
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({
+    supported: false,
+    prefs: { enabled: true, categories: [] },
+    ntfy: null,
+    ntfyDraft: "",
+  });
+
+  setState({ profile: profileOf() });
+  assert.equal(
+    countVnode(settings.render(), "MealTimes"),
+    1,
+    "a finished household gets exactly one meal-times card",
+  );
+
+  setState({ profile: { ...profileOf(), setup: { complete: false, missing: ["meals"] } } });
+  assert.equal(
+    countVnode(settings.render(), "MealTimes"),
+    0,
+    "a first-run household edits meals in the wizard, not a second card",
+  );
 });
 
 test("the notifications route is a real hash route, not a fallback to Today", async () => {

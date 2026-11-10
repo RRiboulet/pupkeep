@@ -20,13 +20,41 @@
 import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
 import { NetworkError, requestJson } from "../client.js";
-import { changedFields, draftOf, emptyDraft, isNewer, pendingSave } from "../profile-form.js";
+import { changedFields, CONFLICT_MESSAGE, draftOf, emptyDraft, isNewer, pendingSave } from "../profile-form.js";
 import { getState, setState, subscribe } from "../store.js";
+import {
+  MEAL_CONFLICT_MESSAGE,
+  MealSlots,
+  SLOT_HINT,
+  appendSlot,
+  editSlot,
+  removeSlotAt,
+  scheduleDrafts,
+  slotDraftsOf,
+  toggleSlot,
+  wireSlots,
+} from "./meal-slots.js";
 
 const html = htm.bind(h);
 
-const CONFLICT_MESSAGE =
-  "Someone else changed this while you were editing. Your values are kept below; saving again replaces their change.";
+/**
+ * Shown when the other caregiver's save completes setup while this screen holds
+ * an unsaved meal draft. The wizard's meal form is gone from then on, so the
+ * conflict banner's "saving again" promise would be false.
+ */
+const COMPLETED_MEAL_MESSAGE =
+  "Setup is complete, so this screen no longer edits meal times. Your unsaved times were not kept; the schedule in the Meal times card above is the one stored.";
+
+/**
+ * The one sentence for the sections a frame moved, if any. It names the meals
+ * only when the meals are the only thing that moved: one frame can carry
+ * several revisions (a reconnect re-reads the whole view), and blaming the
+ * meals for a puppy edit is the misattribution this copy exists to avoid.
+ */
+function conflictFor(sections) {
+  if (sections.length === 0) return undefined;
+  return sections.length === 1 && sections[0] === "slots" ? MEAL_CONFLICT_MESSAGE : CONFLICT_MESSAGE;
+}
 
 /**
  * A short list for the datalist, not the whole IANA catalog: the field accepts
@@ -50,61 +78,6 @@ const COMMON_ZONES = [
   "Asia/Tokyo",
   "Australia/Sydney",
 ];
-
-/** A new household's suggested meals; the caregiver edits them before saving. */
-const SUGGESTED_SLOTS = [
-  { label: "Breakfast", timeLocal: "07:00" },
-  { label: "Lunch", timeLocal: "12:00" },
-  { label: "Dinner", timeLocal: "18:00" },
-];
-
-function slotId() {
-  const crypto = globalThis.crypto;
-  if (crypto?.randomUUID) return `slot-${crypto.randomUUID()}`;
-  if (crypto?.getRandomValues) {
-    const bytes = crypto.getRandomValues(new Uint8Array(8));
-    let hex = "";
-    for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
-    return `slot-${hex}`;
-  }
-  return `slot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function suggestedSlots() {
-  return SUGGESTED_SLOTS.map((slot) => ({
-    id: slotId(),
-    label: slot.label,
-    timeLocal: slot.timeLocal,
-    portion: "",
-    active: true,
-  }));
-}
-
-function slotDraftsOf(slots) {
-  return slots.map((slot) => ({
-    id: slot.id,
-    label: slot.label,
-    timeLocal: slot.timeLocal,
-    portion: slot.portion ?? "",
-    active: slot.active,
-  }));
-}
-
-/** The wire shape; empty portions are omitted rather than stored as "". */
-function wireSlots(slots) {
-  return slots.map((slot) => {
-    const portion = slot.portion.trim();
-    return {
-      id: slot.id,
-      label: slot.label.trim(),
-      // `<input type="time">` gives `HH:MM`; a browser that adds seconds is
-      // still the same wall-clock minute, and the server's parser wants HH:MM.
-      timeLocal: String(slot.timeLocal).slice(0, 5),
-      ...(portion === "" ? {} : { portion }),
-      active: Boolean(slot.active),
-    };
-  });
-}
 
 function deviceZone() {
   try {
@@ -189,11 +162,7 @@ export class Setup extends Component {
       profile: next,
       ...(this.state.zoneDirty ? {} : { zone: next.household.timezone }),
       ...(this.state.puppyDirty ? {} : { puppy: draftOf(next) }),
-      ...(this.state.slotsDirty
-        ? {}
-        : {
-            slots: next.meals.slots.length > 0 ? slotDraftsOf(next.meals.slots) : suggestedSlots(),
-          }),
+      ...(this.state.slotsDirty ? {} : { slots: scheduleDrafts(next.meals) }),
       ...extra,
     });
   }
@@ -219,21 +188,40 @@ export class Setup extends Component {
     // else" is not. A real concurrent edit still answers 409 `stale`.
     const next = { profile: incoming };
     const mine = (section) => this.state.pending[section] !== undefined;
+    // Which dirty sections this frame moved; the banner's single sentence is
+    // chosen from the whole list, so a frame that moved two does not name one.
+    const moved = [];
+    const blame = (section) => {
+      if (!mine(section)) moved.push(section);
+    };
     if (incoming.household.rev !== current.household.rev) {
       if (!this.state.zoneDirty) next.zone = incoming.household.timezone;
-      else if (!mine("timezone")) next.conflict = CONFLICT_MESSAGE;
+      else blame("timezone");
     }
     if (incoming.rev !== current.rev) {
       if (!this.state.puppyDirty) next.puppy = draftOf(incoming);
-      else if (!mine("puppy")) next.conflict = CONFLICT_MESSAGE;
+      else blame("puppy");
     }
     if (incoming.meals.rev !== current.meals.rev) {
       if (!this.state.slotsDirty) {
-        next.slots = incoming.meals.slots.length > 0 ? slotDraftsOf(incoming.meals.slots) : suggestedSlots();
-      } else if (!mine("slots")) {
-        next.conflict = CONFLICT_MESSAGE;
+        next.slots = scheduleDrafts(incoming.meals);
+      } else {
+        blame("slots");
       }
     }
+    // The frame that completes setup takes the wizard's meal form away — the
+    // Settings card above owns the schedule from then on — so an unsaved meal
+    // draft has nowhere left to be saved. Replace it with the committed
+    // schedule and say so, rather than promising a save that has no button.
+    const completes = !current.setup.complete && incoming.setup.complete;
+    const droppedDraft = completes && this.state.slotsDirty && !mine("slots");
+    if (droppedDraft) {
+      next.slots = scheduleDrafts(incoming.meals);
+      next.slotsDirty = false;
+      next.message = COMPLETED_MEAL_MESSAGE;
+    }
+    const conflict = conflictFor(droppedDraft ? moved.filter((section) => section !== "slots") : moved);
+    if (conflict !== undefined) next.conflict = conflict;
     this.setState(next);
   }
 
@@ -257,12 +245,17 @@ export class Setup extends Component {
         // Keep the draft and show the current state; the next save is a knowing
         // replacement, and a new body gets a new key.
         const { [section]: _dropped, ...rest } = this.state.pending;
-        this.adopt(result.body.profile, { busy: null, conflict: CONFLICT_MESSAGE, pending: rest });
+        this.adopt(result.body.profile, { busy: null, conflict: conflictFor([section]), pending: rest });
         return;
       }
       if (!result.ok) {
         // The key stays pending: another attempt at the same body replays it.
-        this.setState({ busy: null, error: result.body?.message ?? "Could not save. Try again." });
+        // A hand-built refusal (`stale`, `idempotency_conflict`) carries its
+        // sentence in `message`; a thrown one carries it in `error`.
+        this.setState({
+          busy: null,
+          error: result.body?.message ?? result.body?.error ?? "Could not save. Try again.",
+        });
         return;
       }
       const { [section]: _used, ...rest } = this.state.pending;
@@ -350,32 +343,19 @@ export class Setup extends Component {
   };
 
   onSlotInput = (index, field, value) => {
-    const slots = this.state.slots.map((slot, position) => (position === index ? { ...slot, [field]: value } : slot));
-    this.setState({ slots, slotsDirty: true, message: null });
+    this.setState({ slots: editSlot(this.state.slots, index, field, value), slotsDirty: true, message: null });
   };
 
   onSlotToggle = (index) => {
-    const slots = this.state.slots.map((slot, position) =>
-      position === index ? { ...slot, active: !slot.active } : slot,
-    );
-    this.setState({ slots, slotsDirty: true, message: null });
+    this.setState({ slots: toggleSlot(this.state.slots, index), slotsDirty: true, message: null });
   };
 
   addSlot = () => {
-    if (this.state.slots.length >= 12) return;
-    const slots = [
-      ...this.state.slots,
-      { id: slotId(), label: `Meal ${this.state.slots.length + 1}`, timeLocal: "12:00", portion: "", active: true },
-    ];
-    this.setState({ slots, slotsDirty: true, message: null });
+    this.setState({ slots: appendSlot(this.state.slots), slotsDirty: true, message: null });
   };
 
   removeSlot = (index) => {
-    this.setState({
-      slots: this.state.slots.filter((_slot, position) => position !== index),
-      slotsDirty: true,
-      message: null,
-    });
+    this.setState({ slots: removeSlotAt(this.state.slots, index), slotsDirty: true, message: null });
   };
 
   render() {
@@ -535,86 +515,25 @@ export class Setup extends Component {
           </div>
         </form>
 
-        <form class="card form" onSubmit=${this.saveSlots}>
-          <h2 class="card__title">3. Meal times (${stepState("meals")})</h2>
-          <p class="field__hint">
-            Times are on this household's clock. Inactive meals stay in the schedule but are not
-            expected each day.
-          </p>
-          ${slots.map(
-            (slot, index) => html`
-              <fieldset class="slot" key=${slot.id}>
-                <legend class="slot__legend">Meal ${index + 1}</legend>
-                <div class="field">
-                  <label for=${`slot-label-${slot.id}`}>Name</label>
-                  <input
-                    id=${`slot-label-${slot.id}`}
-                    type="text"
-                    maxlength="40"
-                    value=${slot.label}
-                    onInput=${(event) => this.onSlotInput(index, "label", event.target.value)}
-                    disabled=${busy !== null}
-                  />
-                </div>
-                <div class="slot__row">
-                  <div class="field">
-                    <label for=${`slot-time-${slot.id}`}>Time</label>
-                    <input
-                      id=${`slot-time-${slot.id}`}
-                      type="time"
-                      value=${slot.timeLocal}
-                      onInput=${(event) => this.onSlotInput(index, "timeLocal", event.target.value)}
-                      disabled=${busy !== null}
-                    />
-                  </div>
-                  <div class="field">
-                    <label for=${`slot-portion-${slot.id}`}>Portion</label>
-                    <input
-                      id=${`slot-portion-${slot.id}`}
-                      type="text"
-                      maxlength="80"
-                      value=${slot.portion}
-                      onInput=${(event) => this.onSlotInput(index, "portion", event.target.value)}
-                      disabled=${busy !== null}
-                    />
-                  </div>
-                </div>
-                <div class="slot__actions">
-                  <label class="slot__active">
-                    <input
-                      type="checkbox"
-                      checked=${slot.active}
-                      onChange=${() => this.onSlotToggle(index)}
-                      disabled=${busy !== null}
-                    />
-                    Expected every day
-                  </label>
-                  <button
-                    class="button button--ghost"
-                    type="button"
-                    onClick=${() => this.removeSlot(index)}
-                    disabled=${busy !== null || slots.length <= 1}
-                  >
-                    Remove
-                  </button>
-                </div>
-              </fieldset>
-            `,
-          )}
-          <div class="form__actions">
-            <button class="button" type="submit" disabled=${busy !== null}>
-              ${busy === "slots" ? "Saving…" : "Save meal times"}
-            </button>
-            <button
-              class="button button--ghost"
-              type="button"
-              onClick=${this.addSlot}
-              disabled=${busy !== null || slots.length >= 12}
-            >
-              Add a meal
-            </button>
-          </div>
-        </form>
+        ${setup.complete
+          ? html`<p class="field__hint">Meal times are edited in the Meal times card above.</p>`
+          : html`<form class="card form" onSubmit=${this.saveSlots}>
+              <h2 class="card__title">3. Meal times (${stepState("meals")})</h2>
+              <p class="field__hint">${SLOT_HINT}</p>
+              <${MealSlots}
+                slots=${slots}
+                busy=${busy !== null}
+                onInput=${this.onSlotInput}
+                onToggle=${this.onSlotToggle}
+                onAdd=${this.addSlot}
+                onRemove=${this.removeSlot}
+              />
+              <div class="form__actions">
+                <button class="button" type="submit" disabled=${busy !== null}>
+                  ${busy === "slots" ? "Saving…" : "Save meal times"}
+                </button>
+              </div>
+            </form>`}
 
         ${setup.complete
           ? html`<p class="form__actions"><a class="button" href="#today">Go to Today</a></p>`

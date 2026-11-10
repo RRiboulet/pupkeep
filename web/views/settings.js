@@ -40,6 +40,7 @@ import {
 } from "../models.js";
 import { disablePush, enablePush, pushSupported } from "../push.js";
 import { Setup } from "./setup.js";
+import { MealTimes } from "./meal-times.js";
 import { Invite } from "./invite.js";
 
 const html = htm.bind(h);
@@ -688,6 +689,7 @@ export class Settings extends Component {
           full=${(household?.members.length ?? 0) >= 2}
         />
         ${this.renderNotifications()}
+        ${profile?.setup?.complete ? html`<${MealTimes} request=${this.request} />` : null}
         ${this.renderModels()}
         <p class="field__hint">Backup is on its way.</p>
         <${Setup} embedded=${true} />
