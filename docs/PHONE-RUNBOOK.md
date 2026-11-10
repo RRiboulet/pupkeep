@@ -409,6 +409,31 @@ refuses a version it does not, rather than resetting. The session documents'
 own migration is Pi Durable's, and a document that fails to load is a startup
 failure, not a fresh household.
 
+### A task that is parked (`restartLimit`)
+
+A task that crashes the server process is retried by the supervisor, and once it
+has been cut off five times Pi Durable **parks** it: it stays blocked, and a
+restart does not unblock it. `server.log` says so, once per boot:
+
+```
+a task was parked before this process started; retryTask() runs it again  taskId=… kind=app.reminder
+```
+
+The operator's way out is one explicit attempt, in the process that owns the
+database (never a second process: one writer, §3.2):
+
+```bash
+# stop the launcher first, then:
+npm start -- --access tailscale --data ~/.pupkeep --retry-parked
+```
+
+It retries every parked task once and logs each one. The flag applies to the
+**first** spawn only: if the task crashes the process again, the supervisor's
+restart does not retry it, because a task parked for crashing is exactly the
+crash loop the limit exists to stop. If it parks again, read the log lines
+before the park — it is a deterministic failure, not a transient one — and fix
+that rather than retrying in a loop.
+
 ## 12. Troubleshooting
 
 | Symptom | Cause and fix |
@@ -418,6 +443,7 @@ failure, not a fresh household.
 | `a server already owns ~/.pupkeep (pid …)` | The launcher lock is free but `server.pid` is held: the previous launcher was SIGKILLed and its detached server is still alive. Stop that pid (it is printed) and start again. |
 | The app is up but your partner cannot reach it | Check the tailnet address the launcher printed, that both devices are on the tailnet, and that Tailscale is connected on the host. |
 | `owner link` lost | `npm start -- --reissue-owner --access tailscale` from physical Termux, then read `~/.pupkeep/owner-link.txt`. |
+| `a task was parked before this process started` | A task crashed the process five times and the harness parked it; a restart does not clear it. Stop the launcher and start with `--retry-parked` for one attempt (§11). |
 | `termux-sshd: Tailscale is not connected` | Tailscale is down, so there is no address to bind. Open the Tailscale app and run `scripts/termux-sshd.sh` again — it re-resolves and never listens on all interfaces. |
 | Empty Today / wrong dates | The household timezone is wrong. First-run setup confirms it, and Settings shows the same three steps; fix the zone there and re-check the meal times. |
 | Push stopped after a tunnel restart | Expected: the origin changed. Reopen the new URL and re-subscribe. |

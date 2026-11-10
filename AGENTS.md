@@ -24,7 +24,10 @@ close/reopen, a cancelled one never firing, the dedupe key as the push tag) and
 **P4-11** (the Settings "Meal times" card, so the schedule can be edited after
 setup without reopening the wizard) are complete, so **Phase 4 is done and
 Gate G4's automated half is covered**; the
-next task is **P5-01** (the kill/restart matrix on the phone). The agent can only *propose* an appointment or meal-schedule change; a
+next task is **P5-01**, split into **P5-01a** (host: the kill matrix as
+`test/kill-matrix.test.ts` plus the `--retry-parked` operator path, complete) and
+**P5-01b** (the phone walk and its recorded observations, still open — `ssh phone`
+reaches the host phone from the devcontainer). The agent can only *propose* an appointment or meal-schedule change; a
 caregiver's confirmation route executes the stored action in one commit. The
 **Agent** screen is now the shared thread: it renders the transcript, collapsed
 tool cards, the **Waiting for your confirmation** proposal cards (Confirm /
