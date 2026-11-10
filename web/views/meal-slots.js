@@ -22,8 +22,16 @@ const html = htm.bind(h);
 /** The server's `MEAL_SLOTS_MAX`; the web cannot import `src/shared`, so the one cap lives here. */
 export const MEAL_SLOTS_MAX = 12;
 
-/** The one sentence a schedule conflict answers with, shared by both screens. */
-export const CONFLICT_MESSAGE =
+/** The domain's per-field caps, for the same reason: no build step, no shared import. */
+export const SLOT_LABEL_MAX = 40;
+export const SLOT_PORTION_MAX = 80;
+
+/**
+ * The meal-schedule conflict sentence, shared by the two screens that edit the
+ * schedule. It names the meal times, so only the meal sections use it: the
+ * wizard's timezone and puppy sections answer with a section-neutral sentence.
+ */
+export const MEAL_CONFLICT_MESSAGE =
   "Someone else changed the meal times while you were editing. Your values are kept below; saving again replaces their change.";
 
 /** The one hint above the editor, shared so the two screens cannot drift. */
@@ -131,7 +139,7 @@ export class MealSlots extends Component {
               <input
                 id=${`slot-label-${slot.id}`}
                 type="text"
-                maxlength="40"
+                maxlength=${SLOT_LABEL_MAX}
                 value=${slot.label}
                 onInput=${(event) => onInput(index, "label", event.target.value)}
                 disabled=${busy}
@@ -153,7 +161,7 @@ export class MealSlots extends Component {
                 <input
                   id=${`slot-portion-${slot.id}`}
                   type="text"
-                  maxlength="80"
+                  maxlength=${SLOT_PORTION_MAX}
                   value=${slot.portion}
                   onInput=${(event) => onInput(index, "portion", event.target.value)}
                   disabled=${busy}

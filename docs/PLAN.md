@@ -4618,9 +4618,12 @@ process kill; both clients see the same state; the partner notification
       (the wizard’s slot editor extracted verbatim — `MealSlots`, `slotId`,
       `suggestedSlots`, `slotDraftsOf`, `scheduleDrafts`, the pure
       `editSlot`/`toggleSlot`/`appendSlot`/`removeSlotAt`, `MEAL_SLOTS_MAX`,
-      `wireSlots`, and the shared `CONFLICT_MESSAGE`/`SLOT_HINT` — so the two
-      screens cannot accept different shapes or report the same refusal with
-      different sentences), `web/views/meal-times.js` (the Settings card:
+      `wireSlots`, and the shared `MEAL_CONFLICT_MESSAGE`/`SLOT_HINT` — so the
+      two screens cannot accept different shapes or report the same meal
+      refusal with different sentences; the wizard’s own timezone and puppy
+      sections keep a section-neutral `CONFLICT_MESSAGE`, so a partner’s puppy
+      edit is never blamed on the meal times), `web/views/meal-times.js` (the
+      Settings card:
       reads `/api/puppy`, subscribes to the `profile` frame, saves
       `PATCH /api/feeding/slots` with the `rev` it read plus a `pendingSave`
       key, and answers a stale 409 by keeping the draft and showing the current
@@ -4638,7 +4641,7 @@ process kill; both clients see the same state; the partner notification
       schedule write, and a direct tool would be a schedule-changing write with
       no confirmation. (3) The card reuses `pendingSave`/`isNewer`, so its
       idempotency and freshness rules are the wizard’s, not a second copy.
-      **Verified:** `npm run typecheck`; `npm test` 813/813 — 7 new tests in
+      **Verified:** `npm run typecheck`; `npm test` 818/818 — 7 new tests in
       `test/owner-ui.test.js` (a time edit round-trips through the real client
       and keeps the slot id; a partner’s reschedule is an explicit stale
       conflict with the draft kept; a live frame flags a dirty draft and
@@ -4646,16 +4649,31 @@ process kill; both clients see the same state; the partner notification
       is not a false conflict; a live-frame conflict advances the revision so
       one save is the knowing replacement; a lost save response keeps its key
       so the retry replays one revision; a duplicate time is refused with the
-      shared rule) and 5 in `test/client.test.js` (`wireSlots`/`slotDraftsOf`,
-      the wizard’s handoff, the card’s render, and Settings’ one-card gate).
+      shared rule), 7 in `test/client.test.js` (`wireSlots`/`slotDraftsOf`,
+      the wizard’s handoff, the card’s render, Settings’ one-card gate, the
+      section-specific conflict copy, the two-section frame, and the completing
+      frame that drops an unsavable draft) and 3 in `test/meal-copy.test.js`
+      (the editor’s slot cap, its two field caps and the refusal sentence all
+      equal the domain’s).
       **Review follow-ups:** the shared module also owns the pure slot edits,
-      the cap and the two copies, so the two screens cannot drift on a refusal
-      sentence or the Add button’s limit; the card’s success path now clears
-      `dirty` and re-adopts the saved slots, and its conflict frame advances the
-      revision — the two copy-induced bugs the review found. The Add button
-      moved into the shared component, so the wizard’s action row is now Add
-      then Save (two rows, not one); the plan records it here because the
-      extraction was otherwise verbatim.
+      the caps and the meal sentence, so the two screens cannot drift on a
+      refusal sentence or the Add button’s limit; the card’s success path now
+      clears `dirty` and re-adopts the saved slots, and its conflict frame
+      advances the revision — the two copy-induced bugs the first review found.
+      The Add button moved into the shared component, so the wizard’s action
+      row is now Add then Save (two rows, not one); the plan records it here
+      because the extraction was otherwise verbatim. A second review pass found
+      the copy still claiming too much: the meal sentence is used only when the
+      meals are the only dirty section a frame moved (a reconnect’s frame can
+      carry two revisions, and two dirty sections get the neutral sentence);
+      the frame that completes setup no longer promises a “saving again” button
+      the wizard has just removed — it adopts the committed schedule and says
+      the unsaved times were not kept; the neutral sentence moved beside the
+      form helpers and is shared with the Pup screen; and the editor’s
+      `maxlength` caps are exported and pinned to the domain alongside
+      `MEAL_SLOTS_MAX`. The wizard’s completed-state hint also stopped carrying
+      a `#settings` link that was a no-op in its only context (Settings is the
+      only place the completed wizard renders).
       **Not verified:** no browser or phone run — the card’s render is pinned
       by the client suite, not a real browser.
 

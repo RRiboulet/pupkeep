@@ -25,6 +25,15 @@ export function pendingSave(pending, body) {
   return { key: newIdempotencyKey(), signature };
 }
 
+/**
+ * The one sentence a care-section conflict answers with when the screen cannot
+ * name what changed: the wizard's timezone and puppy sections, and the Pup
+ * screen's profile. The meal schedule has its own sentence in
+ * `views/meal-slots.js`, because it can and should name the meal times.
+ */
+export const CONFLICT_MESSAGE =
+  "Someone else changed this while you were editing. Your values are kept below; saving again replaces their change.";
+
 /** The three document revisions one care view carries, in a stable order. */
 function revisionsOf(view) {
   return [view?.rev ?? 0, view?.household?.rev ?? 0, view?.meals?.rev ?? 0];

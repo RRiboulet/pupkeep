@@ -313,8 +313,72 @@ test("a frame for the caregiver's own in-flight save does not accuse someone els
 
   const theirs = wizard({});
   theirs.onStore({ profile: profileOf({ rev: 2, name: "Other pup" }) });
-  assert.match(String(theirs.state.conflict), /Someone else changed the meal times/);
+  assert.match(String(theirs.state.conflict), /Someone else changed this while you were editing/);
+  assert.doesNotMatch(String(theirs.state.conflict), /meal times/, "a puppy edit is not blamed on the meals");
   assert.equal(theirs.state.puppy.name, "Biscuit", "their typing is not replaced");
+
+  // The copy names the section that actually moved.
+  const meals = wizard({});
+  meals.state.puppyDirty = false;
+  meals.state.slotsDirty = true;
+  meals.state.slots = [{ id: "slot-a", label: "Breakfast", timeLocal: "06:30", portion: "", active: true }];
+  meals.onStore({ profile: profileOf({ rev: 2, mealsRev: 2 }) });
+  assert.match(String(meals.state.conflict), /Someone else changed the meal times/);
+  assert.equal(meals.state.slots[0].timeLocal, "06:30", "the meal draft is kept");
+});
+
+test("one frame that moves two dirty sections does not single out the meals", () => {
+  const before = profileOf();
+  const setup = new Setup({});
+  setup.state = {
+    profile: before,
+    zone: before.household.timezone,
+    zoneDirty: false,
+    puppy: draftOf(before),
+    puppyDirty: true,
+    slots: slotDraftsOf(before.meals.slots),
+    slotsDirty: true,
+    busy: null,
+    error: null,
+    message: null,
+    conflict: null,
+    pending: {},
+  };
+  setup.setState = (patch) => Object.assign(setup.state, patch);
+  // A reconnect re-reads one whole view, so a single frame can carry two bumps.
+  setup.onStore({ profile: profileOf({ rev: 2, mealsRev: 2, name: "Other pup" }) });
+  assert.match(String(setup.state.conflict), /Someone else changed this while you were editing/);
+  assert.doesNotMatch(String(setup.state.conflict), /meal times/, "two moved sections are not one");
+});
+
+test("a frame that completes setup drops the unsavable meal draft and says so", () => {
+  const before = { ...profileOf({ mealsRev: 1 }), setup: { complete: false, missing: ["meals"] } };
+  const setup = new Setup({});
+  setup.state = {
+    profile: before,
+    zone: before.household.timezone,
+    zoneDirty: false,
+    puppy: draftOf(before),
+    puppyDirty: false,
+    slots: [{ id: "slot-a", label: "Breakfast", timeLocal: "06:30", portion: "", active: true }],
+    slotsDirty: true,
+    busy: null,
+    error: null,
+    message: null,
+    conflict: null,
+    pending: {},
+  };
+  setup.setState = (patch) => Object.assign(setup.state, patch);
+  // The partner's save is the one that finishes setup: the wizard's meal form
+  // disappears with it, so "saving again" would name a button that is gone.
+  setup.onStore({ profile: profileOf({ mealsRev: 2 }) });
+
+  assert.equal(setup.state.conflict, null, "no banner promises a save the screen no longer offers");
+  assert.match(setup.state.message, /not kept/);
+  assert.match(setup.state.message, /Meal times card above/);
+  assert.equal(setup.state.slotsDirty, false);
+  assert.equal(setup.state.slots[0].timeLocal, "07:00", "the committed schedule replaces the unsavable draft");
+  assert.ok(!vnodeText(setup.render(), "Save meal times"), "no orphan save button after completion");
 });
 
 // --- the shared meal-slot editor (P1-14's wizard, reused by Settings) -------
@@ -336,7 +400,7 @@ test("slotDraftsOf fills an absent portion so the editor always has a string", (
   ]);
 });
 
-test("the wizard hides its meal section once setup is complete and points at Settings", () => {
+test("the wizard hides its meal section once setup is complete and says where it is edited", () => {
   const unfinishedProfile = { ...profileOf({ slots: [] }), setup: { complete: false, missing: ["meals"] } };
   const unfinished = new Setup({});
   unfinished.state = {
@@ -361,7 +425,7 @@ test("the wizard hides its meal section once setup is complete and points at Set
   done.state = { ...unfinished.state, profile: profileOf() };
   const settled = done.render();
   assert.ok(!findVnode(settled, "MealSlots"), "a finished household has no second editor in the wizard");
-  assert.ok(vnodeText(settled, "Meal times card"), "the wizard points at the Settings card");
+  assert.ok(vnodeText(settled, "Meal times card"), "the wizard says where the schedule is edited");
 });
 
 test("the Settings meal-times card renders the shared editor and its save action", () => {

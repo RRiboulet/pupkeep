@@ -27,13 +27,10 @@ import { NetworkError, requestJson } from "../client.js";
 import { chartGeometry, formatKg, measurementRows, windowLabel } from "../growth-chart.js";
 import { Milestones } from "./milestones.js";
 import { Showers } from "./showers.js";
-import { changedFields, draftOf, emptyDraft, isNewer, pendingSave, sameHousehold } from "../profile-form.js";
+import { changedFields, CONFLICT_MESSAGE, draftOf, emptyDraft, isNewer, pendingSave, sameHousehold } from "../profile-form.js";
 import { subscribe } from "../store.js";
 
 const html = htm.bind(h);
-
-const CONFLICT_MESSAGE =
-  "Someone else changed this profile. Your edits are kept below; saving again replaces their change.";
 
 const EMPTY_LOG = { weightKg: "", heightCm: "", note: "" };
 

@@ -25,7 +25,7 @@ import { NetworkError, requestJson } from "../client.js";
 import { getState, setState, subscribe } from "../store.js";
 import { isNewer, pendingSave } from "../profile-form.js";
 import {
-  CONFLICT_MESSAGE,
+  MEAL_CONFLICT_MESSAGE,
   MealSlots,
   SLOT_HINT,
   appendSlot,
@@ -120,7 +120,7 @@ export class MealTimes extends Component {
       // not. A real concurrent edit still answers 409 `stale`.
       // The revision moves forward either way, so the caregiver's next save is
       // the knowing replacement the banner promises — not a guaranteed stale.
-      if (this.state.pending === null) this.setState({ profile: incoming, conflict: CONFLICT_MESSAGE });
+      if (this.state.pending === null) this.setState({ profile: incoming, conflict: MEAL_CONFLICT_MESSAGE });
       return;
     }
     // A newer frame that did not touch the schedule (a puppy edit, a partner
@@ -174,7 +174,7 @@ export class MealTimes extends Component {
       if (result.status === 409 && result.body?.error === "stale") {
         // Keep the draft and show the current state; the next save is a knowing
         // replacement, and a new body gets a new key.
-        this.adopt(result.body.profile, { busy: false, conflict: CONFLICT_MESSAGE, pending: null });
+        this.adopt(result.body.profile, { busy: false, conflict: MEAL_CONFLICT_MESSAGE, pending: null });
         return;
       }
       if (!result.ok) {

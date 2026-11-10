@@ -20,10 +20,10 @@
 import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
 import { NetworkError, requestJson } from "../client.js";
-import { changedFields, draftOf, emptyDraft, isNewer, pendingSave } from "../profile-form.js";
+import { changedFields, CONFLICT_MESSAGE, draftOf, emptyDraft, isNewer, pendingSave } from "../profile-form.js";
 import { getState, setState, subscribe } from "../store.js";
 import {
-  CONFLICT_MESSAGE,
+  MEAL_CONFLICT_MESSAGE,
   MealSlots,
   SLOT_HINT,
   appendSlot,
@@ -36,6 +36,25 @@ import {
 } from "./meal-slots.js";
 
 const html = htm.bind(h);
+
+/**
+ * Shown when the other caregiver's save completes setup while this screen holds
+ * an unsaved meal draft. The wizard's meal form is gone from then on, so the
+ * conflict banner's "saving again" promise would be false.
+ */
+const COMPLETED_MEAL_MESSAGE =
+  "Setup is complete, so this screen no longer edits meal times. Your unsaved times were not kept; the schedule in the Meal times card above is the one stored.";
+
+/**
+ * The one sentence for the sections a frame moved, if any. It names the meals
+ * only when the meals are the only thing that moved: one frame can carry
+ * several revisions (a reconnect re-reads the whole view), and blaming the
+ * meals for a puppy edit is the misattribution this copy exists to avoid.
+ */
+function conflictFor(sections) {
+  if (sections.length === 0) return undefined;
+  return sections.length === 1 && sections[0] === "slots" ? MEAL_CONFLICT_MESSAGE : CONFLICT_MESSAGE;
+}
 
 /**
  * A short list for the datalist, not the whole IANA catalog: the field accepts
@@ -169,21 +188,40 @@ export class Setup extends Component {
     // else" is not. A real concurrent edit still answers 409 `stale`.
     const next = { profile: incoming };
     const mine = (section) => this.state.pending[section] !== undefined;
+    // Which dirty sections this frame moved; the banner's single sentence is
+    // chosen from the whole list, so a frame that moved two does not name one.
+    const moved = [];
+    const blame = (section) => {
+      if (!mine(section)) moved.push(section);
+    };
     if (incoming.household.rev !== current.household.rev) {
       if (!this.state.zoneDirty) next.zone = incoming.household.timezone;
-      else if (!mine("timezone")) next.conflict = CONFLICT_MESSAGE;
+      else blame("timezone");
     }
     if (incoming.rev !== current.rev) {
       if (!this.state.puppyDirty) next.puppy = draftOf(incoming);
-      else if (!mine("puppy")) next.conflict = CONFLICT_MESSAGE;
+      else blame("puppy");
     }
     if (incoming.meals.rev !== current.meals.rev) {
       if (!this.state.slotsDirty) {
         next.slots = scheduleDrafts(incoming.meals);
-      } else if (!mine("slots")) {
-        next.conflict = CONFLICT_MESSAGE;
+      } else {
+        blame("slots");
       }
     }
+    // The frame that completes setup takes the wizard's meal form away — the
+    // Settings card above owns the schedule from then on — so an unsaved meal
+    // draft has nowhere left to be saved. Replace it with the committed
+    // schedule and say so, rather than promising a save that has no button.
+    const completes = !current.setup.complete && incoming.setup.complete;
+    const droppedDraft = completes && this.state.slotsDirty && !mine("slots");
+    if (droppedDraft) {
+      next.slots = scheduleDrafts(incoming.meals);
+      next.slotsDirty = false;
+      next.message = COMPLETED_MEAL_MESSAGE;
+    }
+    const conflict = conflictFor(droppedDraft ? moved.filter((section) => section !== "slots") : moved);
+    if (conflict !== undefined) next.conflict = conflict;
     this.setState(next);
   }
 
@@ -207,7 +245,7 @@ export class Setup extends Component {
         // Keep the draft and show the current state; the next save is a knowing
         // replacement, and a new body gets a new key.
         const { [section]: _dropped, ...rest } = this.state.pending;
-        this.adopt(result.body.profile, { busy: null, conflict: CONFLICT_MESSAGE, pending: rest });
+        this.adopt(result.body.profile, { busy: null, conflict: conflictFor([section]), pending: rest });
         return;
       }
       if (!result.ok) {
@@ -478,9 +516,7 @@ export class Setup extends Component {
         </form>
 
         ${setup.complete
-          ? html`<p class="field__hint">
-              Meal times are edited in the <a href="#settings">Meal times card</a> above.
-            </p>`
+          ? html`<p class="field__hint">Meal times are edited in the Meal times card above.</p>`
           : html`<form class="card form" onSubmit=${this.saveSlots}>
               <h2 class="card__title">3. Meal times (${stepState("meals")})</h2>
               <p class="field__hint">${SLOT_HINT}</p>
