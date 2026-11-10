@@ -37,6 +37,14 @@ test("the tunnel always points at loopback, never the tailnet address", () => {
 });
 
 test("the quick tunnel URL is read from cloudflared's output", () => {
+  // Verbatim from the pinned binary (`cloudflared 2026.10.5`, arm64 release,
+  // checksum matched) against a loopback listener.
+  assert.equal(
+    parseTunnelUrl(
+      "2026-11-10T22:00:08Z INF |  https://territory-enlargement-plane-ripe.trycloudflare.com                                |",
+    ),
+    "https://territory-enlargement-plane-ripe.trycloudflare.com",
+  );
   assert.equal(
     parseTunnelUrl("2026-10-29T10:00:00Z INF |  https://washing-marble-band.trycloudflare.com  |"),
     "https://washing-marble-band.trycloudflare.com",
@@ -45,6 +53,45 @@ test("the quick tunnel URL is read from cloudflared's output", () => {
   assert.equal(parseTunnelUrl("https://example.com"), undefined);
   // Only the quick-tunnel hostname counts; a named tunnel is not this path.
   assert.equal(parseTunnelUrl("https://pupkeep.example.com"), undefined);
+});
+
+test("the API endpoint is not a tunnel: the real error line parses as nothing", () => {
+  // P5-01b cell 5, captured on the phone with a shim in place of the binary. The
+  // old rule announced `https://api.trycloudflare.com` as the tunnel and swallowed
+  // this line, so the operator saw neither the failure nor the reason.
+  const failure =
+    'failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": ' +
+    "dial tcp: lookup api.trycloudflare.com on [::1]:53: read udp [::1]:33747->[::1]:53: read: connection refused";
+  assert.equal(parseTunnelUrl(failure), undefined);
+  // Even boxed, the API host is not a tunnel hostname — and when it ends the URL
+  // (`…com":`), the hostname guard is the only thing that rejects it.
+  assert.equal(parseTunnelUrl("INF |  https://api.trycloudflare.com  |"), undefined);
+  assert.equal(parseTunnelUrl('failed to request quick Tunnel: Post "https://api.trycloudflare.com": 500'), undefined);
+});
+
+test("a URL outside cloudflared's box is still a URL, so a new banner layout is not silent", () => {
+  // P5-04 upgrades cloudflared. If its banner moves, the tunnel still works and the
+  // launcher must still announce it rather than parse nothing.
+  assert.equal(
+    parseTunnelUrl("INF Your quick Tunnel has been created! Visit it at https://a-b.trycloudflare.com (it may take some time)"),
+    "https://a-b.trycloudflare.com",
+  );
+  assert.equal(parseTunnelUrl("INF https://a-b-c.trycloudflare.com"), "https://a-b-c.trycloudflare.com");
+  // …but a host that is not the whole URL is not the tunnel's.
+  assert.equal(parseTunnelUrl("https://a-b-c.trycloudflare.com/extra"), undefined);
+});
+
+test("the rest of cloudflared's banner is not mistaken for the tunnel URL", () => {
+  for (const line of [
+    "2026-11-10T22:00:08Z INF +--------------------------------------------------------------------------------------------+",
+    "2026-11-10T22:00:08Z INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |",
+    "2026-11-10T22:00:08Z INF Requesting new quick Tunnel on trycloudflare.com...",
+    // A pre-check row inside a box: a hostname, but not the tunnel's.
+    "2026-11-10T22:00:14Z INF |  DNS Resolution    region1.v2.argotunnel.com  PASS    DNS Resolved successfully     |",
+    "2026-11-10T22:00:14Z INF |  Cloudflare API    api.cloudflare.com:443     PASS    API is reachable              |",
+  ]) {
+    assert.equal(parseTunnelUrl(line), undefined, line);
+  }
 });
 
 test("a restart with a new URL is reported as a new origin, not a recovery", () => {

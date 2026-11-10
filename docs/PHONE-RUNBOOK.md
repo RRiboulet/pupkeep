@@ -388,18 +388,23 @@ That line is not a secret and is safe in `server.log`; the owner link is not.
 
 Then:
 
-1. **Sign in on the tunnel origin as the owner.** The quick tunnel cannot mint its
-   own owner link: the token is minted before the tunnel exists, so on a
-   `cloudflare` start the launcher logs that the URL is not known yet and prints
-   nothing. Read the link from `~/.pupkeep/owner-link.txt` and open it on the
-   tunnel origin with the same path and token — `https://<random>.trycloudflare.com/login?token=…`
-   — on the host phone, then create a **separate test invite** there.
+1. **Sign in on the tunnel origin as the owner.** On a data directory with no
+   owner yet the launcher starts the tunnel first, waits for its URL, and mints the
+   owner link **on that origin** — the file and the printed link are already the
+   tunnel URL, so there is nothing to hand-edit. Open it on the host phone, then
+   create a **separate test invite** there. If the tunnel never names a URL the
+   launcher exits **6** with one sentence instead of starting a server that cannot
+   boot; fix the tunnel (the DNS failure below) and start again. An existing owner
+   keeps its link; `npm start -- --reissue-owner --access cloudflare` rotates it
+   onto the current tunnel origin.
 2. On the **test device**, open the tunnel URL and sign in with that test invite.
    Never use the daily tailnet invite on a test origin: sessions are per-origin.
 3. Install the PWA, allow notifications, subscribe to Web Push.
 4. **The URL changes every time the tunnel restarts**, and a push subscription is
    bound to the origin — after a restart, open the new URL and re-subscribe. That
-   is the whole reason a named tunnel (and a domain) is the upgrade path.
+   is the whole reason a named tunnel (and a domain) is the upgrade path. The
+   restart line names the cause: `tunnel exited (code null, signal SIGKILL);
+   restart 1 in 1000 ms`.
 
 Do not put ntfy behind the quick tunnel: the URL changes on restart and the
 partner's client would lose its server.
@@ -492,6 +497,7 @@ that rather than retrying in a loop.
 | `a server already owns ~/.pupkeep (pid …)` | The launcher lock is free but `server.pid` is held: the previous launcher was SIGKILLed and its detached server is still alive. Stop that pid (it is printed) and start again. |
 | The app is up but your partner cannot reach it | Check the tailnet address the launcher printed, that both devices are on the tailnet, and that Tailscale is connected on the host. |
 | `owner link` lost | `npm start -- --reissue-owner --access tailscale` from physical Termux, then read `~/.pupkeep/owner-link.txt`. |
+| `no owner link can be minted: the quick tunnel reported no URL within 30000 ms` (exit **6**) | A `cloudflare` start needs the tunnel's URL to mint an owner link (and `--reissue-owner` needs it to rotate one), and the tunnel never registered — the lines above it in `server.log` say why (the chroot DNS failure, cell 5 of [`kill-restart-matrix.md`](kill-restart-matrix.md)). Fix the tunnel, then start again. Without `--reissue-owner`, a data directory that already has an owner boots anyway and the tunnel starts after the server. |
 | `a task was parked before this process started` | A task crashed the process five times and the harness parked it; a restart does not clear it. Stop the launcher and start with `--retry-parked` for one attempt (§11). |
 | `termux-sshd: Tailscale is not connected` | Tailscale is down, so there is no address to bind. Open the Tailscale app and run `scripts/termux-sshd.sh` again — it re-resolves and never listens on all interfaces. |
 | `kex_exchange_identification: read: Connection reset by peer` | Something accepted on the remote port and then failed to reach the phone. Two causes, both cheap: sshd is not listening (`pgrep -a sshd`; run `scripts/termux-sshd.sh`), or the `RemoteForward` target is `localhost` (= `::1`) while sshd listens on `127.0.0.1`. Use the supervised tunnel (§6). |
