@@ -4713,11 +4713,19 @@ changes nothing until confirmed.
       accepting cloudflared's API endpoint and swallowing the error line, and a
       fresh `--access cloudflare` start that cannot mint an owner) plus the port
       collision with the operator's own `ssh` `LocalForward 8787`; those are
-      carried by the P5-01b follow-up. **Carried to P5-01b:** the Termux-kill and
-      reboot observations, the Node-major re-measurement (done: phone `v26.13.0`,
-      container `v24.22.1`), and the approve row of the commit-boundary test
-      (its double-confirm replay is already pinned by `test/approvals.test.ts`, and
-      the kill window is the same single commit).
+      carried by the P5-01b follow-up. **P5-01b's walk is complete** (2026-11-10,
+      `docs/kill-restart-matrix.md`): the server-kill, launcher-kill and
+      Termux-kill cells pass — nothing committed is lost, nothing restarts the app
+      by itself, and the next start clears its own dead locks — and the reboot
+      survives the data (documents, open walk, appointment, the three sleeping
+      tasks and the session all came back) but **the boot path does not start the
+      app**: `#!/usr/bin/env bash` does not exist on Termux and `PREFIX` is unbound
+      in a minimal environment, so Termux:Boot's exec dies before the boot line.
+      **P5-01's gate is therefore still open** — "phone reboot recovers" needs the
+      P5-04 boot fix and a re-run of that cell. Also observed: `am force-stop` is
+      denied from Termux and the Android Settings force stop did not take on this
+      phone (cell 3 used a UID-wide `SIGKILL` instead), and the operator's own
+      `ssh` config claims port 8787 while a session is open.
 - [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy;
       restore an interrupted generation; **rotate the passphrase** and confirm
       recovery without it stored beside the archive. The job, remote and
