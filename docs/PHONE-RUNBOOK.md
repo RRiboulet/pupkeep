@@ -180,7 +180,7 @@ anyway, and the boot path must never put the link in `server.log`.
 |---|---|
 | Server child crashes | The launcher restarts it with capped backoff |
 | Launcher crashes | Nothing restarts it — use the optional `sv` unit below |
-| Termux app killed (`am force-stop`) | Data survives; nothing restarts until you reopen Termux. `sshd` does **not** come back by itself. |
+| Termux app killed (Android **Settings → Apps → Termux → Force stop**) | Data survives; nothing restarts until you reopen Termux. `sshd` does **not** come back by itself. `am force-stop com.termux` from inside Termux is **denied** (`FORCE_STOP_PACKAGES`) and exits 0 anyway, so the UI is the only reliable way — see [`kill-restart-matrix.md`](kill-restart-matrix.md) Finding 7. |
 | Phone reboot | Termux:Boot starts the launcher again. Tailscale needs "Always-on VPN" or a manual start. |
 | Backoff gives up | The launcher exits non-zero, which is what lets `sv`/`runit` restart it |
 

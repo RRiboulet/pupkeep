@@ -33,7 +33,7 @@ for the Phase 0 measurements this repeats on the real install.
 | Termux user | `u0_a178` |
 | Runtime | Node `v26.13.0`, npm `12.2.2`, SQLite `3.54.1`, OpenSSH `10.6p2` |
 | Checkout | `~/pupkeep` at `e40f3c1` (`main`) |
-| Data directory | `~/.pupkeep` (0700), port **8791** |
+| Data directory | `~/.pupkeep` (0700), port **8791** for the matrix — the boot path uses the default 8787 |
 | Install | `scripts/termux-install.sh` run on 2026-11-10 12:03 +01:00, then `~/pupkeep-start.sh` |
 
 **Why 8791, not 8787.** The operator's own `~/.ssh/config` on this phone carries
@@ -68,8 +68,8 @@ Finding 3.
 |---|---|---|---|
 | 1 | **Server child** killed (`SIGKILL`) | **pass** | 2026-11-10 12:09:35 |
 | 2 | **Launcher** killed (`SIGKILL`) | **pass**, with the documented consequence | 2026-11-10 12:09:56 |
-| 3 | **Termux app** killed (`am force-stop`) | **to run** — needs the owner | — |
-| 4 | **Phone reboot** | **to run** — needs the owner, and Tailscale first | — |
+| 3 | **Termux app** killed (Android UI force stop) | **to run** — needs the owner | — |
+| 4 | **Phone reboot** | **to run** — needs the owner | Tailscale now up (`100.90.202.61`); sshd verified on the tailnet address |
 | 5 | **Tunnel restart** | **fail** — two defects | 2026-11-10 12:10–12:14 |
 | 6 | **Agent mid-turn** | **not observed** — no provider key on this host | — |
 
@@ -119,46 +119,57 @@ writer, and it says so in one sentence.
 
 ### 3. Termux app killed — to run
 
-`am force-stop com.termux` ends every Termux process, **including the reverse
-`ssh -R 8022` tunnel that gives the devcontainer its shell**, so this cell needs
-the owner at the phone. Expected (P0-06, to be confirmed): data survives, nothing
-restarts until Termux is reopened, `sshd` does not come back by itself.
+`am force-stop com.termux` from **inside** Termux does **not** work on this phone
+(Finding 7), so the app has to be stopped from Android. Expected (P0-06, to be
+confirmed): data survives, nothing restarts until Termux is reopened, `sshd` does
+not come back by itself.
 
 Run it, then reopen Termux and restore access before checking the data:
 
-```bash
-# on the phone, in a Termux session:
-am force-stop com.termux
+```text
+Android Settings → Apps → Termux → Force stop
 # …reopen Termux from the launcher…
 ~/start-voice.sh                      # sshd + the reverse tunnel back to the VPS
 ~/pupkeep-start.sh --access local --port 8791 --data ~/.pupkeep
 ```
 
+**Before** (2026-11-10 13:48): launcher `23299` and server `23313`, both from
+12:10, `healthz 200`, no `boot:` line in `server.log`, `boot_id` unchanged. That
+is the state the force stop has to end — and the first attempt did not end it:
+at 12:46:42 a start attempt logged `refusing to start: another instance already
+owns ~/.pupkeep (pid 23299)`, which is proof the old launcher was still alive.
+
 Record: the `boot_id` (must be unchanged — this is not a reboot), whether a boot
 line was appended (it must **not** be: Termux:Boot runs at reboot only), the new
 pids, and the state read above.
 
-### 4. Phone reboot — to run, and blocked on Tailscale
+### 4. Phone reboot — to run
 
-**This cell cannot pass on this host as it stands.** `scripts/termux-boot.sh`
-execs the launcher with `--access tailscale`, and Tailscale is **not installed on
-the phone** (`tailscale ip -4` → not installed, observed 2026-11-10 12:15). The
-launcher fails closed when it cannot resolve the tailnet address, so a reboot
-today is expected to end with the app **down** — which is the documented daily
-mode's precondition, not a bug in the boot script, but it does mean G5's "phone
-reboot recovers" is not met yet.
+**Update 2026-11-10 13:48:** Tailscale is now installed and signed in on the
+phone (`100.90.202.61`), so the boot path's precondition is met. `scripts/termux-sshd.sh`
+binds sshd on the tailnet address, verified from the phone itself
+(`connect 100.90.202.61:8022 → open`); the devcontainer **cannot** reach that
+address directly (`/dev/tcp/100.90.202.61/8022` from here times out — the host
+does not forward the tailnet into the container), so access after the reboot
+still comes from the owner re-running `~/start-voice.sh`.
 
-Two ways forward, both the owner's call:
+`scripts/termux-boot.sh` execs the launcher with `--access tailscale` and **no
+`--port`**, so the booted instance binds the tailnet address on the default
+**8787** — not the 8791 this matrix used, which is the port the operator's own
+`ssh` config claims while a session is open. Expect: `boot:` line with a **new**
+`boot_id`, wake lock, sshd, `listening url=http://100.90.202.61:8787`.
 
-- install the Tailscale Android app, sign in to the tailnet, enable Android
-  "Always-on VPN" (P0-06 measured that the client does not reconnect by itself),
-  then reboot; or
-- decide that the host's daily mode is `local`/`tailscale`-independent and change
-  `scripts/termux-boot.sh` accordingly (a plan change, not a test change).
+```text
+reboot the phone
+# after it comes back, from Termux (do NOT start Pupkeep by hand first —
+# whether it is already up is the thing under test):
+~/start-voice.sh
+```
 
-When it is run, record: `boot_id` **changed**, the boot line's timestamp, whether
-Termux:Boot ran the wrapper at all (the boot line proves it), the launcher's exit
-or its `listening` line, and the state read.
+Record: `boot_id` **changed**, the boot line's timestamp, whether Termux:Boot ran
+the wrapper at all (the boot line proves it), the launcher's exit or its
+`listening` line, whether a manual start afterwards is refused by the pid lock
+(it should be, if the boot worked), and the state read.
 
 ### 5. Tunnel restart — fail (two defects)
 
@@ -259,6 +270,14 @@ spinning. The turn must complete after the restart with one care write.
    `v26.13.0` today (P0-01 measured `v26.12.1`; `pkg update` moved it), devcontainer
    `v24.22.1`. `engines.node` is `>= 24`, so both are covered; the phone is a
    moving target, and this row is why the pin is a floor.
+7. **`am force-stop com.termux` is denied from inside Termux** (observed
+   2026-11-10 13:49): `java.lang.SecurityException: Permission Denial:
+   forceStopPackage() … requires android.permission.FORCE_STOP_PACKAGES`. It also
+   exits **0**, so a script cannot detect the failure, and P0-06's "user ran
+   `am force-stop com.termux`" is not reproducible this way on this build. The
+   Android UI (Settings → Apps → Termux → Force stop) is the path. The first
+   attempt left the app running: the 12:10 launcher was still alive at 13:48 and
+   a 12:46 start attempt was refused by its own pid lock.
 
 ## Where the result lands
 
