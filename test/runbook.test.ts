@@ -14,7 +14,12 @@ import { isTailscaleAddress } from "../src/launcher/access.ts";
 const ROOT = join(import.meta.dirname, "..");
 const read = (path: string): Promise<string> => readFile(join(ROOT, path), "utf8");
 
-const SCRIPTS = ["scripts/termux-install.sh", "scripts/termux-boot.sh", "scripts/termux-sshd.sh"];
+const SCRIPTS = [
+  "scripts/termux-install.sh",
+  "scripts/termux-boot.sh",
+  "scripts/termux-sshd.sh",
+  "scripts/termux-tunnel.sh",
+];
 
 test("the Termux scripts are executable bash and parse", async () => {
   for (const path of SCRIPTS) {
@@ -48,7 +53,9 @@ test("the boot script runs the launcher through --boot and logs into the data di
   assert.match(boot, /^ {2}--env-file-if-exists=\.env \\$/m);
   // Operator SSH is attempted but never fatal: a phone with no shell beats a
   // phone with no care app.
-  assert.match(boot, /if ! "\$REPO_ROOT\/scripts\/termux-sshd\.sh"/);
+  // The interpreter is explicit: Termux has no /usr/bin/env, so an exec of the
+  // tracked script relies on a shebang that cannot resolve there (P5-01b).
+  assert.match(boot, /if ! "\$\{BASH:-\$\{PREFIX\}\/bin\/bash\}" "\$REPO_ROOT\/scripts\/termux-sshd\.sh"/);
 });
 
 test("sshd is started on demand, re-resolves the tailnet address and never binds everything", async () => {

@@ -369,6 +369,7 @@ pupkeep/
 │   ├── termux-install.sh     # pkg + pinned cloudflared + npm ci + boot wrapper
 │   ├── termux-boot.sh       # Termux:Boot entry: wake lock, sshd, exec launcher
 │   ├── termux-sshd.sh       # on-demand sshd, tailnet address re-resolved
+│   ├── termux-tunnel.sh     # supervised operator tunnel (opt-in, not the product path)
 │   ├── backup.ts
 │   └── restore.ts
 ├── test/
@@ -4732,7 +4733,23 @@ changes nothing until confirmed.
       retention themselves are P1-07's; this task proves they work.
 - [ ] **P5-03** Two-client E2E: feed race, walk, appointment, shared thread,
       approvals, reconnect. The partner leg needs **P0-10** in addition to G4.
-- [ ] **P5-04** Termux install/boot scripts and PHONE-RUNBOOK polish.
+- [ ] **P5-04** Termux install/boot scripts and PHONE-RUNBOOK polish. **Partly
+      landed (2026-11-10, from P5-01b's findings):** the boot path is fixed — the
+      wrapper `termux-install.sh` writes now execs `"$PREFIX/bin/bash"
+      "<repo>/scripts/termux-boot.sh"` instead of relying on the tracked script's
+      `#!/usr/bin/env bash` shebang (Termux has no `/usr/bin/env`), and
+      `termux-boot.sh` establishes `PATH`, `PREFIX` and `HOME` itself, because
+      Termux:Boot starts it with none of them. `test/termux-scripts.test.ts` runs
+      both the boot script and the new tunnel script with `env` replaced entirely,
+      which is the only way that regression stays caught. The supervised operator
+      tunnel is new and opt-in (`scripts/termux-tunnel.sh`, wired by
+      `termux-install.sh --with-tunnel <host>` as a `termux-services` unit): it
+      checks the operator's `ssh -G` for a conflicting `RemoteForward` and starts
+      sshd before it binds, because a reverse tunnel to a dead loopback sshd
+      accepts and resets every connection. **Still open:** `pkg upgrade` before
+      `pkg install` (the index moved nodejs without libicu and left `node`
+      unlinkable), and a re-walk of the reboot cell now that the boot path is
+      fixed.
 - [ ] **P5-05** Daily-phone battery/heat/phantom-process notes and checks, plus
       the two Phase 0 deferrals: **`termux-wake-lock` effectiveness** (not
       observable from Termux, P0-06) and a **kill/restart re-test with the
