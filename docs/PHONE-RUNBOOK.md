@@ -173,7 +173,8 @@ execs `scripts/termux-boot.sh`, which:
 `--boot` is belt and braces: a non-TTY stdout never prints the owner token
 anyway, and the boot path must never put the link in `server.log`.
 
-**What survives what** (P0-06):
+**What survives what** (P0-06; re-measured on the real install in
+[`kill-restart-matrix.md`](kill-restart-matrix.md)):
 
 | Event | Result |
 |---|---|
@@ -440,6 +441,7 @@ that rather than retrying in a loop.
 |---|---|
 | `refusing to start: Tailscale is not connected` | No tailnet address. Open the Tailscale app (or set Always-on VPN) and retry. The launcher will not fall back to `0.0.0.0`. |
 | `another instance already owns ~/.pupkeep` | A launcher holds `~/.pupkeep/launcher.pid`. Stop that pid, or use the `sv` unit, then retry. |
+| `could not bind the HTTP listener … EADDRINUSE` on 8787 | Something else on the phone owns the port. The common cause here is the operator's own `ssh` config: `LocalForward 8787 127.0.0.1:8787` binds it while that session is open. Close the session or start with `--port <n>`. |
 | `a server already owns ~/.pupkeep (pid …)` | The launcher lock is free but `server.pid` is held: the previous launcher was SIGKILLed and its detached server is still alive. Stop that pid (it is printed) and start again. |
 | The app is up but your partner cannot reach it | Check the tailnet address the launcher printed, that both devices are on the tailnet, and that Tailscale is connected on the host. |
 | `owner link` lost | `npm start -- --reissue-owner --access tailscale` from physical Termux, then read `~/.pupkeep/owner-link.txt`. |
@@ -463,5 +465,7 @@ that rather than retrying in a loop.
   + iOS 16.4+; over Tailscale HTTP there is none. ntfy on iOS is documented as
   push-through-ntfy.sh, not measured here. Every iOS row in P0-08 is upstream
   documentation until **P0-10** observes it.
-- **Not walked end to end from this file yet** — P5-01 (kill/restart matrix) and
-  P5-04 (polish) are what turn this draft into a verified procedure.
+- **Not walked end to end from this file yet** — P5-04 (polish) is what turns
+  this draft into a verified procedure. The kill/restart matrix has its own
+  record: [`kill-restart-matrix.md`](kill-restart-matrix.md) (P5-01b), first
+  walked on the daily phone on 2026-11-10.

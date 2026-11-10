@@ -4703,8 +4703,19 @@ changes nothing until confirmed.
       first spawn only (a supervisor restart must not retry a task that was parked
       for crashing the process), parsed by `parseOptions`, carried to the server as
       `PUPKEEP_RETRY_PARKED`, and applied after `inspect()`; the runbook documents
-      the operator procedure. **Carried to P5-01b:** the phone observations, the
-      Node-major re-measurement, and the approve row of the commit-boundary test
+      the operator procedure. **P5-01b's first pass** (2026-11-10, the daily phone,
+      `docs/kill-restart-matrix.md`) passed the server-kill and launcher-kill cells
+      with the state read back each time, and found that **the reboot cell cannot
+      pass yet**: Tailscale is not installed on the phone and
+      `scripts/termux-boot.sh` execs the launcher with `--access tailscale`, which
+      fails closed — so G5's "phone reboot recovers" stays unmet until the owner
+      installs it. It also found two host-side tunnel defects (the URL parser
+      accepting cloudflared's API endpoint and swallowing the error line, and a
+      fresh `--access cloudflare` start that cannot mint an owner) plus the port
+      collision with the operator's own `ssh` `LocalForward 8787`; those are
+      carried by the P5-01b follow-up. **Carried to P5-01b:** the Termux-kill and
+      reboot observations, the Node-major re-measurement (done: phone `v26.13.0`,
+      container `v24.22.1`), and the approve row of the commit-boundary test
       (its double-confirm replay is already pinned by `test/approvals.test.ts`, and
       the kill window is the same single commit).
 - [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy;
