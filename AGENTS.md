@@ -26,8 +26,14 @@ setup without reopening the wizard) are complete, so **Phase 4 is done and
 Gate G4's automated half is covered**; the
 next task is **P5-01**, split into **P5-01a** (host: the kill matrix as
 `test/kill-matrix.test.ts` plus the `--retry-parked` operator path, complete) and
-**P5-01b** (the phone walk and its recorded observations, still open — `ssh phone`
-reaches the host phone from the devcontainer). The agent can only *propose* an appointment or meal-schedule change; a
+**P5-01b** (the phone walk and its recorded observations — `ssh phone` reaches the
+host phone from the devcontainer; the walk is recorded but its reboot and tunnel
+cells still need a re-run on the device, and its host-side follow-up — the tunnel
+URL parser, the tunnel restart line, minting the owner on the tunnel origin — is
+done). **P5-06** (the security review) is done too: `docs/security-review.md` and
+`test/security.test.ts`, including the agent-escape allowlist. The next host-side
+task is **P5-07**; what remains for Phase 5 otherwise needs the phone (P5-01b's
+re-walk, P5-02, P5-05) or the release and docs passes (P5-08, P5-09). The agent can only *propose* an appointment or meal-schedule change; a
 caregiver's confirmation route executes the stored action in one commit. The
 **Agent** screen is now the shared thread: it renders the transcript, collapsed
 tool cards, the **Waiting for your confirmation** proposal cards (Confirm /

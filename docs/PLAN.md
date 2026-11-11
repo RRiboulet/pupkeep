@@ -378,6 +378,8 @@ pupkeep/
 │   ├── PHONE-RUNBOOK.md       # the operator's copy (P1-13, P5-04)
 │   ├── access-and-notifications.md  # the caregivers' copy (P4-09)
 │   ├── partner-ios-checklist.md     # the P0-10 device check
+│   ├── security-review.md           # P5-06's record and findings
+│   ├── kill-restart-matrix.md       # P5-01b's phone walk
 │   └── TODO-GUIDE.md          # how to pick the next task
 ├── package.json
 ├── package-lock.json
@@ -1723,9 +1725,12 @@ Pi Pocket style, simplified for two caregivers:
   the owner only, `/invite` always creates a new member row, and there is no
   member re-auth or remove-member route. A partner whose cookie is lost (a
   cleared browser, a home-screen clip over HTTP with its own jar) needs the
-  operator to free the slot in `config.json` and re-invite them. Carried to the
-  security review (P5-06); the generated invite links are origin-agnostic, so a
-  member *link* can be added later without changing the storage shape.
+  operator to free the slot in `config.json` and re-invite them. **P5-06 decided
+  to keep it that way for v1:** the trust root is physical access to Termux, so
+  the runbook documents the edit and `test/security.test.ts` proves it ends the
+  lost session and frees the slot; a `--reset-member` CLI is the backlog
+  follow-up. The generated invite links are origin-agnostic, so a member *link*
+  can be added later without changing the storage shape.
 - No email or password in v1. The owner link is the key; keep it private.
 - **`config.json` owns auth identities and roles.** `app.household` owns display
   profiles only. Removing a member deletes their auth row **and** purges all
@@ -1754,10 +1759,11 @@ Pi Pocket style, simplified for two caregivers:
   custom request header (missing header is 403).
 - Mutations require JSON content type (415 otherwise); no CORS headers
   (default-deny).
-- `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-For` and
-  `CF-Connecting-IP` are trusted **only from a loopback peer** (cloudflared).
-  Rate limits key off `CF-Connecting-IP` behind the tunnel, not the tunnel’s
-  loopback address.
+- `X-Forwarded-Proto` and `CF-Connecting-IP` are the two headers the server
+  reads, and **only from a loopback peer** (cloudflared); `X-Forwarded-Host` and
+  `X-Forwarded-For` are not read at all. Rate limits key off `CF-Connecting-IP`
+  behind the tunnel, not the tunnel’s loopback address. (P5-06 found this section
+  promised four headers and the code honoured two.)
 - Login/invite attempts and SSE/long-poll connections are rate-limited; SSE and
   all API routes require auth. The static shell may be public. The P1-07
   scaffold's `/healthz` is an unauthenticated liveness endpoint returning only
@@ -1786,7 +1792,10 @@ Pi Pocket style, simplified for two caregivers:
 - The agent cannot read `secrets.json`, `config.json`, `push.json` or the
   database directly.
 - No tool output includes provider keys, session tokens, owner/invite links, or
-  cookies. Add a grep test.
+  cookies. Add a grep test. **P5-06 added it:** `test/security.test.ts` scans the
+  model-facing text (the system prompt and every tool description) for a sign-in
+  link, the data directory, `secrets.json`/`config.json`/`push.json`, a VAPID or
+  PEM key, a provider key and any opaque 40-character run.
 - **Log scrub:** server logs redact owner links, invite codes, cookies and
   provider keys; the boot script log is included in the scrub test.
 
@@ -4780,9 +4789,28 @@ changes nothing until confirmed.
       observable from Termux, P0-06) and a **kill/restart re-test with the
       force-stop timestamp captured** (P0-06 recorded a user-confirmed restart
       without one).
-- [ ] **P5-06** Security review: owner reissue, invites, hashed sessions, authz
+- [x] **P5-06** Security review: owner reissue, invites, hashed sessions, authz
       matrix, origin checks, log scrub, tunnel, secrets, no agent escape, backup
       encryption.
+      **Landed:** [`security-review.md`](security-review.md) is the record and
+      `test/security.test.ts` the executable half — thirteen adversarial attempts,
+      each naming the test that produced its evidence. The agent escape is checked
+      three ways: an exact allowlist of 20 app tools over 9 extensions, no tool
+      name/description/parameter naming a capability, and a **named-import
+      allowlist** over all 24 `agent/` and `reminders/` modules (no Node built-in,
+      no `config.ts`/`backup.ts`/`auth.ts`/`json-file.ts`/`lock.ts`, no dynamic
+      import, no evaluator, no `process.env`). Two prose claims became tests: the
+      tunnel origin is accepted only by the same-origin `Host` fallback (proven
+      both ways over real HTTP, on the care and the invite route), and the
+      documented hand edit for a partner who lost their session ends it and frees
+      the slot. **Fixed:** `bindOrigins`' docstring claimed the launcher adds the
+      tunnel origin — it does not and cannot, and a cleanup of the fallback would
+      have broken the tunnel path silently. **Decided:** member recovery stays an
+      operator procedure this release (§14.1) with a `--reset-member` CLI as the
+      backlog follow-up, and the tool schemas stay open (F7 in the review). **Open:**
+      the browser and device halves of the tunnel path, and the partner's iPhone,
+      are P0-10's; the chroot DNS failure stays P5-01b's. Suite 849/849, typecheck
+      clean.
 - [ ] **P5-07** Performance/data growth: commit latency on phone, doc sizes,
       checkpoint policy, retention.
 - [ ] **P5-08** Release: version, changelog, tag, deploy notes, VPS fallback.

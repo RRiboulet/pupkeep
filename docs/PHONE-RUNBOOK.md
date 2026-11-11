@@ -157,6 +157,44 @@ This rotates the owner token and prints a fresh link (and rewrites
 point. Restarting the app **without** `--reissue-owner` will not print an
 existing link — only the hash is stored.
 
+### A partner who loses their session
+
+v1 has no remove-member or re-invite screen, and there is no member recovery
+route: a partner whose cookie is gone (a cleared browser, a replaced phone) would
+be stuck at the sign-in screen. The operator's way out is a **hand edit while the
+server is stopped** — one writer, and `config.json` is the auth authority:
+
+```bash
+# 1. stop the launcher (Ctrl-C, or: sv down pupkeep), then prove the server is
+#    gone: a SIGKILLed launcher leaves its detached server alive, and editing
+#    config.json under a live writer loses the edit.
+pgrep -af 'bin/server.js' || echo "no server process"
+# 2. back up the auth authority, then edit it
+cd ~/.pupkeep
+cp config.json config.json.bak          # 0600; keep it until the partner is back
+# 3. in config.json: set "removedAt" on that member and empty their "sessions"
+#    (the member id is under members[].id; a JSON editor or jq)
+# 4. start again, then Settings → People → create a one-time invite
+cd ~/pupkeep
+npm start -- --access tailscale --data ~/.pupkeep
+```
+
+Setting `"removedAt"` is what ends the session: `authenticate` skips a removed
+member and every session row attached to one. On the next boot the household
+document drops their profile (the boot line reports `profilesRemoved=<n>`), and
+the household slot is free for the new invite. `test/security.test.ts` proves the
+edit itself: the lost token stops authenticating and the owner can invite a
+replacement.
+
+Their push subscription and ntfy topic stay in `push.json`, keyed by the old member
+id. Nothing plans a **new** notification for a member the config no longer lists,
+but an intent already committed for them before the edit — a `feed_overdue` owed
+the night before, say — can still be delivered on the next outbox drain. The app's
+own removal purges push first for exactly that reason. If that matters, let the
+outbox drain before editing, or delete their rows from `push.json` while the
+server is stopped and the file is backed up. The backlogged `--reset-member` CLI
+will do both in one step.
+
 ## 5. Boot, wake lock, supervision
 
 Termux:Boot runs every file in `~/.termux/boot/` at **reboot**. Ours is

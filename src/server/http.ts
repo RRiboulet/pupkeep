@@ -280,8 +280,11 @@ export interface HttpDeps {
 /**
  * The origins this bind address serves. A short list on purpose: the origin of
  * a tailnet device is not enumerable by the server, and the same-origin `Host`
- * check below carries those; the Cloudflare quick-tunnel origin is added by the
- * launcher's wiring (P1-10). A named tunnel waits for a domain (P4).
+ * check below carries those. The quick-tunnel origin is **not** added by anyone —
+ * the server is born before that hostname exists — so `sameOrigin` is the whole
+ * mechanism that makes the tunnel path work, and `test/security.test.ts` proves
+ * both halves of it (accepted when the hosts agree, refused when they do not).
+ * A named tunnel waits for a domain (P4).
  */
 export function bindOrigins(host: string, port: number): string[] {
   const origins = [`http://localhost:${port}`, `http://127.0.0.1:${port}`];
