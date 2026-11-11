@@ -359,6 +359,60 @@ test("a task parked before this process started is surfaced and retryable", asyn
   }
 });
 
+test("--retry-parked retries a task parked by an earlier process, and a re-park stays visible", async () => {
+  // P5-01: a park survives restarts and nothing in the product called
+  // `retryTask()`, so a reminder that crashed the process five times was dead
+  // until a code change. The flag is the operator's one attempt at it.
+  const dir = await tempDir();
+  const end = deferredEnd();
+  const retried: string[] = [];
+  const parked = { id: 7 as TaskId, kind: "app.reminder" };
+  let report: ((error: unknown, info: ReportInfo) => void) | undefined;
+  const harness: FakeHarness = {
+    closed: end.promise,
+    resume: () => undefined,
+    close: async () => undefined,
+    inspect: async () =>
+      ({
+        scheduling: "running",
+        tasks: [{ record: parked, state: { kind: "blocked", reason: "restart_limit" } }],
+        submissions: [],
+      }) as unknown as HarnessInspection,
+    retryTask: async (id: TaskId) => {
+      retried.push(String(id));
+      // The retry crashes again, which the harness reports as a fresh park.
+      report?.(new Error("parked again"), {
+        type: "task_parked",
+        task: { id, kind: "app.reminder", conversationId: 1 },
+      } as unknown as ReportInfo);
+    },
+  };
+  try {
+    const result = await startApp(
+      { dataDir: dir, host: "127.0.0.1", port: 0, retryParked: true },
+      quietDeps({
+        openHarness: async (options) => {
+          report = options.onReport;
+          return fakeOpened(harness);
+        },
+        thread: "scaffold",
+        ...noBootstrap,
+      }),
+    );
+    assert.ok(result.ok);
+    assert.deepEqual(retried, ["7"], "the boot retried the parked task");
+    assert.deepEqual(
+      result.app.parkedTasks().map((task: ParkedTask) => task.id),
+      [7],
+      "a retry that parks again must stay visible, not vanish with the old entry",
+    );
+    await result.app.close();
+  } finally {
+    end.resolve({ reason: "closed" });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 
 test("the entry point turns a failed open into a non-zero exit for the supervisor", async () => {
   const dir = await tempDir();
@@ -399,6 +453,23 @@ test("the server entry refuses to guess a bind address or data directory", () =>
   );
   assert.deepEqual(parsed, {
     ok: true,
-    environment: { host: "127.0.0.1", port: 8787, dataDir: "/home/owner/pupkeep" },
+    environment: { host: "127.0.0.1", port: 8787, dataDir: "/home/owner/pupkeep", retryParked: false },
   });
+
+  // `--retry-parked` crosses the process boundary as this variable; anything
+  // other than "1" is off, so a typo cannot silently retry a crash-looping task.
+  const retry = parseServerEnvironment({
+    PUPKEEP_BIND_HOST: "127.0.0.1",
+    PUPKEEP_PORT: "8787",
+    PUPKEEP_DATA_DIR: "/tmp/x",
+    PUPKEEP_RETRY_PARKED: "1",
+  });
+  assert.equal(retry.ok ? retry.environment.retryParked : undefined, true);
+  const notOne = parseServerEnvironment({
+    PUPKEEP_BIND_HOST: "127.0.0.1",
+    PUPKEEP_PORT: "8787",
+    PUPKEEP_DATA_DIR: "/tmp/x",
+    PUPKEEP_RETRY_PARKED: "yes",
+  });
+  assert.equal(notOne.ok ? notOne.environment.retryParked : undefined, false);
 });

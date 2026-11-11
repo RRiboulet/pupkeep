@@ -155,6 +155,42 @@ test("with a server program the child is spawned with the resolved bind address"
   await launcher.stop();
 });
 
+test("--retry-parked reaches the first spawn only, never a supervisor restart", async () => {
+  // A task parked for crashing the process must not be retried by every restart:
+  // that is the crash loop the harness's `restartLimit` exists to stop. The
+  // operator asks for one attempt, so the variable is set on the first child and
+  // then withdrawn.
+  const spawned: Array<Record<string, string>> = [];
+  const children: FakeChild[] = [];
+  const launcher = createLauncher(
+    options(["--access", "local", "--retry-parked"]),
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: (_command, _args, env) => {
+        spawned.push(env);
+        const child = new FakeChild();
+        children.push(child);
+        return child;
+      },
+    }),
+  );
+
+  const result = await launcher.start();
+  assert.equal(result.ok, true);
+  assert.equal(spawned[0]?.PUPKEEP_RETRY_PARKED, "1");
+
+  // A crash makes the supervisor spawn again; that child must not carry the flag.
+  // The first restart waits the supervisor's 1 s initial backoff.
+  children[0]?.emit("exit", 1, null);
+  const deadline = Date.now() + 5_000;
+  while (spawned.length < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(spawned.length, 2, "the supervisor restarted the child");
+  assert.equal(spawned[1]?.PUPKEEP_RETRY_PARKED, undefined);
+  await launcher.stop();
+});
+
 test("interactive mode prints the owner link; boot mode writes it and logs only the path", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pupkeep-link-"));
   const link = `http://127.0.0.1:8787/login?token=SECRET-OWNER-TOKEN`;

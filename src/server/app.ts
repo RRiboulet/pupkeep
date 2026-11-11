@@ -121,6 +121,14 @@ export interface AppOptions {
   setTimer?: OpenHarnessOptions["setTimer"];
   /** Additional report sink; the server's logging is always installed. */
   onReport?: (error: unknown, info: ReportInfo) => void;
+  /**
+   * `--retry-parked`: retry, once, the tasks a previous process parked at the
+   * restart limit. A parked task stays blocked across restarts and nothing else
+   * calls `harness.retryTask()`, so without this the only way out of a park is a
+   * code change (P5-01). Off by default: retrying blindly is what the restart
+   * limit exists to prevent.
+   */
+  retryParked?: boolean;
   context?: Context;
 }
 
@@ -148,8 +156,10 @@ export interface AppHandle {
   close(): Promise<AppEnd>;
   parkedTasks(): readonly ParkedTask[];
   /**
-   * Run a parked task again. P1-09/P4 expose this through the owner UI/API; it
-   * exists here so a park is never terminal with no way out.
+   * Run a parked task again. The operator reaches this through `--retry-parked`
+   * (P5-01), which retries on boot in the process that owns the database; there
+   * is deliberately no second-process CLI and no HTTP route, because only one
+   * process may open the harness (§3.2).
    */
   retryTask(id: TaskId): Promise<void>;
 }
@@ -640,6 +650,34 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     }
   } catch (error) {
     logger.error("could not inspect live tasks", { error });
+  }
+
+  // P5-01: the operator's way out of a park. Only the process that owns the
+  // harness may do this (§3.2), so it rides a start rather than a second
+  // command. Each task is deleted from `parked` *before* the retry: `retryTask`
+  // can park it again and `onReport` re-inserts it, and deleting afterwards would
+  // erase exactly that fresh report (the same rule as `AppHandle.retryTask`).
+  if (options.retryParked && !stopping) {
+    if (parked.size === 0) {
+      logger.info("--retry-parked: no task is parked");
+    }
+    for (const task of [...parked.values()]) {
+      parked.delete(String(task.id));
+      logger.warn("retrying a parked task on the operator's request", { taskId: task.id, kind: task.kind });
+      try {
+        await opened.harness.retryTask(task.id, context);
+      } catch (error) {
+        parked.set(String(task.id), task);
+        logger.error("the parked task could not be retried", { taskId: task.id, kind: task.kind, error });
+      }
+    }
+    // `retryTask` re-runs one task; the scheduler still has to be running for
+    // anything the retry queues behind it.
+    try {
+      opened.harness.resume();
+    } catch (error) {
+      logger.error("the harness could not resume after retrying a parked task", { error });
+    }
   }
 
   // If the storage failed while resuming or inspecting, do not open a port for

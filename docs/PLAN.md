@@ -4685,7 +4685,28 @@ changes nothing until confirmed.
 ### Phase 5 — Hardening and release
 
 - [ ] **P5-01** Kill/restart matrix on the phone: server, Termux, phone reboot,
-      tunnel restart, agent mid-turn.
+      tunnel restart, agent mid-turn. **Split (2026-11-10), owner decision:** the
+      host half is **P5-01a** and the phone half is **P5-01b**; the checkbox stays
+      open until the phone walk records its observations. **P5-01a landed:**
+      `test/kill-matrix.test.ts` with a real child process, a real SQLite file and
+      a real `SIGKILL` for the rows §15.2 had no test for — a kill **mid-turn**
+      (the probe tool in `src/server/testing/kill-probe.ts` commits a real care
+      write through `logFeed` on the tool task id, then hangs, so the process dies
+      with the result uncommitted; the reopen reruns it, answers `replayed`, and
+      the turn completes attributed to the caregiver who started it), and a kill
+      right after the ack of a feed, a walk start, a walk end and an appointment
+      create (exactly one effect, the same `Idempotency-Key` replays rather than
+      duplicating). **And the gap the plan had carried since §7.4 without a
+      caller:** `AppHandle.retryTask()` existed and nothing invoked it, so a task
+      parked at `restartLimit` was a log line with no way out — a restart does not
+      clear a park. `--retry-parked` now retries every parked task once, on the
+      first spawn only (a supervisor restart must not retry a task that was parked
+      for crashing the process), parsed by `parseOptions`, carried to the server as
+      `PUPKEEP_RETRY_PARKED`, and applied after `inspect()`; the runbook documents
+      the operator procedure. **Carried to P5-01b:** the phone observations, the
+      Node-major re-measurement, and the approve row of the commit-boundary test
+      (its double-confirm replay is already pinned by `test/approvals.test.ts`, and
+      the kill window is the same single commit).
 - [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy;
       restore an interrupted generation; **rotate the passphrase** and confirm
       recovery without it stored beside the archive. The job, remote and

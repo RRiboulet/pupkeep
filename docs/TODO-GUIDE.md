@@ -64,7 +64,12 @@ cancelled one never fires, the dedupe key is authoritative and is the push tag),
 and it found a real bug — the "At the start" reminder offset could never fire,
 which is now fixed with a five-minute grace. The device legs of G4 (Termux:API,
 Web Push over the tunnel, the partner's iPhone) stay P0-10/P4-09 checks. The next
-task is **P5-01** (the kill/restart matrix on the phone). The backlog request
+task is **P5-01**, split into **P5-01a** (the host half: the kill matrix as
+`test/kill-matrix.test.ts` — a real SIGKILL mid-turn and right after four write
+acks — plus `--retry-parked`, the operator's only way out of a task parked at the
+harness's restart limit; landed) and **P5-01b** (the phone walk:
+`docs/kill-restart-matrix.md` and its recorded observations, still open; the
+devcontainer reaches the host phone with `ssh phone`). The backlog request
 to edit meal times after setup landed as **P4-11** (the Settings “Meal times”
 card, reusing the wizard’s slot editor; the wizard hides its own meal section
 once setup is complete). P0-03/P0-08/P0-10

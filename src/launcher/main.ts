@@ -243,9 +243,19 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
       return { ok: false, code: EXIT_NO_SERVER, message, plan, dataDir: dataDir.path };
     }
 
+    // One `--retry-parked` attempt per launch, on the first spawn only.
+    let firstSpawn = true;
     server = new Supervisor({
       name: "server",
-      spawn: () => spawnChild(entry.command, entry.args, serverEnv(plan.bindHost, options.port, dataDir.path)),
+      spawn: () => {
+        // `--retry-parked` is the operator's request for one attempt, not a
+        // standing policy: a task that was parked for crashing the process would
+        // otherwise be retried on every supervisor restart, which is exactly the
+        // crash loop the harness's `restartLimit` exists to stop.
+        const env = serverEnv(plan.bindHost, options.port, dataDir.path, options.retryParked && firstSpawn);
+        firstSpawn = false;
+        return spawnChild(entry.command, entry.args, env);
+      },
       // Server stdout is what the boot script redirects into server.log, so it is
       // scrubbed like the launcher's own lines rather than passed through.
       onOutput: (line, stream) => (stream === "stderr" ? log(line) : out(`${scrub(line)}\n`)),
@@ -334,10 +344,17 @@ async function defaultMintOwnerLink(
   return { link, minted: true };
 }
 
-function serverEnv(bindHost: string, port: number, dataDir: string): Record<string, string> {
+function serverEnv(bindHost: string, port: number, dataDir: string, retryParked = false): Record<string, string> {
   // The server must own the same directory the launcher took the lock in; it
   // is passed rather than re-derived from a default that could drift.
-  return { PUPKEEP_BIND_HOST: bindHost, PUPKEEP_PORT: String(port), PUPKEEP_DATA_DIR: dataDir };
+  return {
+    PUPKEEP_BIND_HOST: bindHost,
+    PUPKEEP_PORT: String(port),
+    PUPKEEP_DATA_DIR: dataDir,
+    // Absent, not "0": the server's default is off, and an env var that says
+    // "off" would be one more thing to keep in step.
+    ...(retryParked ? { PUPKEEP_RETRY_PARKED: "1" } : {}),
+  };
 }
 
 function networkInterfacesList(): InterfaceAddress[] {
