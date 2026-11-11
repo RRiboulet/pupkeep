@@ -173,6 +173,12 @@ execs `scripts/termux-boot.sh`, which:
 `--boot` is belt and braces: a non-TTY stdout never prints the owner token
 anyway, and the boot path must never put the link in `server.log`.
 
+The wrapper Termux:Boot runs passes the interpreter explicitly
+(`exec "$PREFIX/bin/bash" "<repo>/scripts/termux-boot.sh"`) and the script sets
+`PATH`, `PREFIX` and `HOME` itself, because Termux:Boot starts it with none of
+them. Until P5-01b that was not true, and the result was a reboot with no boot
+line and no app — see [`kill-restart-matrix.md`](kill-restart-matrix.md) cell 4.
+
 **What survives what** (P0-06; re-measured on the real install in
 [`kill-restart-matrix.md`](kill-restart-matrix.md)):
 
@@ -256,6 +262,47 @@ ssh -p 8022 <user>@100.x.y.z
 If you inherited a phone from the Phase 0 spikes, there may be a leftover
 `$PREFIX/etc/ssh/sshd_config.p0-review.bak` that binds every interface. It must
 not be reinstated; delete it once this on-demand start is what you use.
+
+### The supervised tunnel (optional, for a workstation that cannot reach the tailnet)
+
+A devcontainer or a VPS that is not on the tailnet cannot open `ssh -p 8022
+<user>@100.x.y.z`. The phone can carry the tunnel itself, supervised, so a dead
+session cannot strand the port and a `pkill` of the app does not lock the
+operator out:
+
+```bash
+# once, on the phone, with the VPS as a ~/.ssh/config alias (`oracle` here):
+~/pupkeep/scripts/termux-install.sh --with-tunnel oracle
+```
+
+That writes `$PREFIX/var/service/pupkeep-tunnel/run`, which `termux-services`'
+`runsvdir` starts and restarts, running:
+
+```bash
+~/pupkeep/scripts/termux-tunnel.sh oracle
+```
+
+The script checks two things **before** it binds, because both failures are
+silent and both cost an hour on 2026-11-10:
+
+- **Your `~/.ssh/config` must not already forward the remote port.** A
+  `RemoteForward 0.0.0.0:8022 …` in the same Host block wins the bind, and then
+  that interactive session *is* the tunnel — with whatever target it was written
+  with. Delete that line; the supervised unit owns the port now.
+- **sshd must be listening.** A reverse tunnel to a loopback sshd that is down
+  accepts every connection and resets it, which reads as a network fault and is
+  not one (`kex_exchange_identification: read: Connection reset by peer`).
+
+Then, from the VPS (or anywhere that can reach it):
+
+```bash
+ssh -p 8022 <phone-user>@<vps-address>
+```
+
+`sv status pupkeep-tunnel` shows it; `sv down pupkeep-tunnel` stops it. The unit
+restarts the tunnel with a 10 s backoff (`PUPKEEP_TUNNEL_BACKOFF`) and the
+session carries keepalives, so an Android doze or a flaky link recovers by
+itself instead of leaving a half-dead forward.
 
 ## 7. Daily access: Tailscale
 
@@ -447,6 +494,9 @@ that rather than retrying in a loop.
 | `owner link` lost | `npm start -- --reissue-owner --access tailscale` from physical Termux, then read `~/.pupkeep/owner-link.txt`. |
 | `a task was parked before this process started` | A task crashed the process five times and the harness parked it; a restart does not clear it. Stop the launcher and start with `--retry-parked` for one attempt (§11). |
 | `termux-sshd: Tailscale is not connected` | Tailscale is down, so there is no address to bind. Open the Tailscale app and run `scripts/termux-sshd.sh` again — it re-resolves and never listens on all interfaces. |
+| `kex_exchange_identification: read: Connection reset by peer` | Something accepted on the remote port and then failed to reach the phone. Two causes, both cheap: sshd is not listening (`pgrep -a sshd`; run `scripts/termux-sshd.sh`), or the `RemoteForward` target is `localhost` (= `::1`) while sshd listens on `127.0.0.1`. Use the supervised tunnel (§6). |
+| `Warning: remote port forwarding failed for listen port 8022` | Another session already owns that remote port — usually an earlier tunnel whose phone side died, or your own `~/.ssh/config`. On the VPS: `sudo ss -ltnp | grep ':8022'` and kill that pid; on the phone, delete the `RemoteForward` line and use the supervised unit. |
+| After a reboot the app is not running and `server.log` has no `boot:` line | Termux:Boot did not get through. Check that the Termux:Boot app has been opened once, then run `~/.termux/boot/pupkeep.sh` by hand: it must append the boot line. If it prints `bad interpreter`, the wrapper is older than P5-01b — re-run `scripts/termux-install.sh`. |
 | Empty Today / wrong dates | The household timezone is wrong. First-run setup confirms it, and Settings shows the same three steps; fix the zone there and re-check the meal times. |
 | Push stopped after a tunnel restart | Expected: the origin changed. Reopen the new URL and re-subscribe. |
 | Notifications stopped arriving on the partner's phone | ntfy app backgrounded/killed, topic rotated, or the host is offline. The in-app centre is still authoritative. |

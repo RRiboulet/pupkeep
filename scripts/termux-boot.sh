@@ -15,6 +15,18 @@
 
 set -euo pipefail
 
+# Termux:Boot runs this with a minimal environment: no PATH, and on the daily
+# phone neither PREFIX nor HOME (P5-01b, 2026-11-10 — the boot line was never
+# written and the app stayed down after a reboot). Everything below uses all
+# three, so establish them before the first use instead of dying with "unbound
+# variable". PREFIX is Termux's compile-time prefix for the `com.termux`
+# package, not a guess; a fork with another package id passes it in.
+: "${PREFIX:=/data/data/com.termux/files/usr}"
+: "${HOME:=/data/data/com.termux/files/home}"
+export PREFIX HOME
+PATH="${PREFIX}/bin:/system/bin:/system/xbin"
+export PATH
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_DIR="${PUPKEEP_DATA_DIR:-$HOME/.pupkeep}"
 LOG="${DATA_DIR}/server.log"
@@ -40,7 +52,12 @@ fi
 # Operator SSH is not the product path. It needs Tailscale, which does not
 # reconnect by itself after a reboot, so a failure here is logged and the app
 # still starts — a phone with no operator shell beats a phone with no care app.
-if ! "$REPO_ROOT/scripts/termux-sshd.sh" >>"$LOG" 2>&1; then
+#
+# The interpreter is passed explicitly: the repo scripts keep a portable
+# `#!/usr/bin/env bash` shebang for the devcontainer, and Termux has no
+# `/usr/bin/env`, so `exec script` (or running the path directly) fails with
+# "bad interpreter: No such file or directory" under a minimal environment.
+if ! "${BASH:-${PREFIX}/bin/bash}" "$REPO_ROOT/scripts/termux-sshd.sh" >>"$LOG" 2>&1; then
   printf 'boot: sshd not started; run scripts/termux-sshd.sh once Tailscale is connected\n' >>"$LOG"
 fi
 
