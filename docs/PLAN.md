@@ -4703,10 +4703,29 @@ changes nothing until confirmed.
       first spawn only (a supervisor restart must not retry a task that was parked
       for crashing the process), parsed by `parseOptions`, carried to the server as
       `PUPKEEP_RETRY_PARKED`, and applied after `inspect()`; the runbook documents
-      the operator procedure. **Carried to P5-01b:** the phone observations, the
-      Node-major re-measurement, and the approve row of the commit-boundary test
-      (its double-confirm replay is already pinned by `test/approvals.test.ts`, and
-      the kill window is the same single commit).
+      the operator procedure. **P5-01b's first pass** (2026-11-10, the daily phone,
+      `docs/kill-restart-matrix.md`) passed the server-kill and launcher-kill cells
+      with the state read back each time, and found that **the reboot cell cannot
+      pass yet**: Tailscale is not installed on the phone and
+      `scripts/termux-boot.sh` execs the launcher with `--access tailscale`, which
+      fails closed — so G5's "phone reboot recovers" stays unmet until the owner
+      installs it. It also found two host-side tunnel defects (the URL parser
+      accepting cloudflared's API endpoint and swallowing the error line, and a
+      fresh `--access cloudflare` start that cannot mint an owner) plus the port
+      collision with the operator's own `ssh` `LocalForward 8787`; those are
+      carried by the P5-01b follow-up. **P5-01b's walk is complete** (2026-11-10,
+      `docs/kill-restart-matrix.md`): the server-kill, launcher-kill and
+      Termux-kill cells pass — nothing committed is lost, nothing restarts the app
+      by itself, and the next start clears its own dead locks — and the reboot
+      survives the data (documents, open walk, appointment, the three sleeping
+      tasks and the session all came back) but **the boot path does not start the
+      app**: `#!/usr/bin/env bash` does not exist on Termux and `PREFIX` is unbound
+      in a minimal environment, so Termux:Boot's exec dies before the boot line.
+      **P5-01's gate is therefore still open** — "phone reboot recovers" needs the
+      P5-04 boot fix and a re-run of that cell. Also observed: `am force-stop` is
+      denied from Termux and the Android Settings force stop did not take on this
+      phone (cell 3 used a UID-wide `SIGKILL` instead), and the operator's own
+      `ssh` config claims port 8787 while a session is open.
 - [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy;
       restore an interrupted generation; **rotate the passphrase** and confirm
       recovery without it stored beside the archive. The job, remote and
