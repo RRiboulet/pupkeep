@@ -89,6 +89,16 @@ fi
 # No build step: node strips the TypeScript directly. `npm ci` is the same
 # command the README gives a human, so a broken lock file fails at create time.
 npm ci
+
+# The render checks (test/browser-render.test.ts) need a real Chromium. It is a
+# dev dependency's browser in the container cache, not the image, so a rebuild
+# does not carry it; `install` is a no-op once it is there. A create that cannot
+# download it must still finish: the suite skips those checks rather than
+# failing, so this is a warning, not an exit.
+if ! npx playwright install --with-deps chromium; then
+  echo "warning: no Playwright Chromium installed; the browser render checks will skip" >&2
+fi
+
 npm run typecheck
 npm test
 

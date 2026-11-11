@@ -80,7 +80,15 @@ remain device-gated partner checks and do not block the host-side work. **P5-06*
 records thirteen adversarial attempts and [`../test/security.test.ts`](../test/security.test.ts)
 is their executable half, including the load-bearing agent-escape allowlist. The
 next host-side task is **P5-07** (performance and data growth); P5-09 and P5-08
-follow it.
+follow it. **P5-10** (real-browser render checks) is landed too:
+`test/browser-render.test.ts` lays the real app out in a pinned Chromium at
+320/360/390/430 px, and its first run found the bottom nav 459 px wide inside
+every phone viewport, so the sixth tab was unreachable. The notification tab now
+shows "Alerts" with the full word kept in its accessible name ("Alerts,
+notifications, N unread"), at a `0.75rem` tab font with a shrinkable label, so a
+scaled font ellipsises instead of pushing a tab off-screen. `playwright` is a
+pinned dev dependency; the suite skips where no browser is installed, fails
+instead on CI, and CI plus the devcontainer install one.
 
 The owner's browser path now has its own suite: `test/owner-ui.test.js` drives
 the real views through the real `requestJson` against a real app over HTTP (only
@@ -266,6 +274,7 @@ Next: <task IDs>
 | `P5-07` | Performance and data growth | G4 | phase-5, runtime, durability |
 | `P5-08` | Release | G5 | phase-5, release, docs |
 | `P5-09` | Final docs and limitations | P5-08 | phase-5, docs |
+| `P5-10` | Real-browser render checks at phone widths (Playwright) | P1-10 | phase-5, tests, web |
 
 ## 9. Stop rules
 

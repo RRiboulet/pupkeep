@@ -35,14 +35,30 @@ const VIEWS = new Map([
   ["settings", Settings],
 ]);
 
+// `label` is the screen's own title; `short` is what the narrow tab shows.
+// Six tabs in a 320 px viewport leave about 52 px of text each, which
+// "Notifications" cannot use: it needs 115 px, so the sixth tab was pushed off
+// the screen entirely (P5-10). The shorthand is display-only — the accessible
+// name keeps the full word (see `navLabel`).
 const NAV_ITEMS = [
   { id: "today", label: "Today" },
   { id: "calendar", label: "Calendar" },
   { id: "pup", label: "Pup" },
   { id: "agent", label: "Agent" },
-  { id: "notifications", label: "Notifications" },
+  { id: "notifications", label: "Notifications", short: "Alerts" },
   { id: "settings", label: "Settings" },
 ];
+
+/**
+ * The tab's accessible name. WCAG 2.5.3 (Label in Name) wants the visible text
+ * inside the name, so the shorthand leads and the full word follows it: a
+ * speech-input user can say "Alerts", and someone listening hears that this is
+ * the notification centre.
+ */
+function navLabel(item, unread, badge) {
+  const name = item.short === undefined ? item.label : `${item.short}, ${item.label.toLowerCase()}`;
+  return item.id === "notifications" && badge !== "" ? `${name}, ${unread} unread` : name;
+}
 
 function Nav({ route }) {
   const unread = Number(getState().unreadNotifications ?? 0);
@@ -56,9 +72,9 @@ function Nav({ route }) {
             href="#${item.id}"
             class=${`bottom-nav__item${route === item.id ? " is-current" : ""}`}
             aria-current=${route === item.id ? "page" : "false"}
-            aria-label=${item.id === "notifications" && badge !== "" ? `Notifications, ${unread} unread` : item.label}
+            aria-label=${navLabel(item, unread, badge)}
           >
-            ${item.label}${item.id === "notifications" && badge !== ""
+            <span class="bottom-nav__label">${item.short ?? item.label}</span>${item.id === "notifications" && badge !== ""
               ? html`<span class="badge badge--nav">${badge}</span>`
               : null}
           </a>

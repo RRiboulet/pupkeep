@@ -33,7 +33,19 @@ URL parser, the tunnel restart line, minting the owner on the tunnel origin — 
 done). **P5-06** (the security review) is done too: `docs/security-review.md` and
 `test/security.test.ts`, including the agent-escape allowlist. The next host-side
 task is **P5-07**; what remains for Phase 5 otherwise needs the phone (P5-01b's
-re-walk, P5-02, P5-05) or the release and docs passes (P5-08, P5-09). The agent can only *propose* an appointment or meal-schedule change; a
+re-walk, P5-02, P5-05) or the release and docs passes (P5-08, P5-09).
+
+**P5-10** (real-browser render checks) landed beside them and needs no device:
+`test/browser-render.test.ts` lays the real app out in a pinned Chromium at
+320/360/390/430 px. Its first run found the bottom nav 459 px wide inside every
+phone viewport, so the sixth tab could never be reached; the notification tab now
+shows as "Alerts" (accessible name "Alerts, notifications, N unread", so WCAG
+Label-in-Name still holds) and the row shrinks with a scaled font instead of
+pushing a tab off the edge. `playwright` is a devDependency only, never part of
+the phone runtime; the suite skips where no browser is installed and fails
+instead on CI, which plus `postCreate.sh` installs one (PLAN §15.5).
+
+The agent can only *propose* an appointment or meal-schedule change; a
 caregiver's confirmation route executes the stored action in one commit. The
 **Agent** screen is now the shared thread: it renders the transcript, collapsed
 tool cards, the **Waiting for your confirmation** proposal cards (Confirm /
@@ -112,6 +124,9 @@ from `main`.
 npm ci
 npm run typecheck      # tsc --noEmit; only erasable syntax, so node strips it
 npm test               # node --test runs the TypeScript directly
+npx playwright install --with-deps chromium
+                       # once per container: the browser-render checks skip
+                       # without it (CI and postCreate install it themselves)
 npm start              # launcher -> server; the HTTP routes arrive with P1-09/P1-10
 npm run backup -- ...  # encrypted SQLite + config + push archive (P1-07)
 npm run restore -- ... # restore one archive; the server must be stopped
