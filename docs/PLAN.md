@@ -670,6 +670,13 @@ PWA installation and Web Push need a secure context. Daily notifications use:
 3. Open the printed `https://<random>.trycloudflare.com` URL on a test device
    with a separate test invite.
 4. Test PWA install, service worker, Web Push, iPhone Add to Home Screen.
+5. **Owner minting follows the origin.** On a data directory with no owner the
+   launcher starts the tunnel *before* the server (the tunnel only forwards to
+   loopback, so it does not need the server yet), waits up to 30 s for the URL, and
+   mints the owner link on that origin — the server refuses to boot ownerless, so
+   there is no later chance. No URL within that window is exit **6** with one
+   sentence, not an ownerless server crash-looping. An existing owner keeps its
+   link; `--reissue-owner` rotates onto the current tunnel origin.
 
 **The URL changes when the tunnel restarts.** PWA push subscriptions are bound
 to the origin, so after a restart the test device must re-subscribe. This is why
@@ -2584,14 +2591,15 @@ that the partner is reached out-of-app is gated on P0-10.
       kill/restart matrix and P5-04's polish are where that happens. The
       `sv` unit, the Termux:Boot companion app, the tunnel wrapper in anger and
       the ntfy onboarding all rest on the Phase 0 spikes.
-      **Carried out:** the quick tunnel has no owner link of its own — the
-      launcher mints before the tunnel prints its URL, so a `cloudflare` start
-      reports `no-origin`, and nothing re-mints when `onTunnelUrl` fires. (The
-      launcher now *prints* that URL from `bin/pupkeep.js`; it previously
-      swallowed the line, so §9's "open the tunnel URL" had no way to learn it.) The
-      runbook documents the route that works today (sign in on the tunnel origin
-      with the token from `owner-link.txt`); minting on the tunnel URL belongs to
-      the Web Push task, **P4-05**, which is the first thing that needs it.
+      **Carried out (closed by the P5-01b follow-up):** the quick tunnel had no
+      owner link of its own — the launcher minted before the tunnel printed its URL,
+      so a `cloudflare` start reported `no-origin`, and nothing re-minted when
+      `onTunnelUrl` fired. (The launcher now *prints* that URL from
+      `bin/pupkeep.js`; it previously swallowed the line, so §9's "open the tunnel
+      URL" had no way to learn it.) The runbook documented the route that worked
+      then (sign in on the tunnel origin with the token from `owner-link.txt`);
+      minting on the tunnel URL belongs to the Web Push task, **P4-05**, and is now
+      done — see P5-01's entry.
 - [x] **P1-14** First-run setup: puppy profile and meal-slot wizard before both
       caregivers land on Today. Confirm or change the household timezone captured
       at bootstrap; a wrong zone corrupts every future `localDate`.
@@ -4727,6 +4735,23 @@ changes nothing until confirmed.
       denied from Termux and the Android Settings force stop did not take on this
       phone (cell 3 used a UID-wide `SIGKILL` instead), and the operator's own
       `ssh` config claims port 8787 while a session is open.
+      **The P5-01b follow-up landed (2026-11-10, host-side, no device):**
+      `parseTunnelUrl` now reads only the URL inside cloudflared's banner box, so
+      `api.trycloudflare.com` is no longer announced as the tunnel and the failure
+      line reaches `server.log`; the tunnel's restart line carries its exit code and
+      signal exactly as the server's does; and a fresh `--access cloudflare` start
+      starts the tunnel, waits (30 s) for the URL and mints the owner link **on that
+      origin**, refusing with exit 6 rather than booting an ownerless server that
+      would crash-loop. Verified against the pinned `cloudflared 2026.10.5` arm64
+      release (checksum matched) in the devcontainer, not merely in a fake: a fresh
+      data dir minted `owner-link.txt` on the tunnel origin and the server booted
+      (`session bootstrap created=true`, `listening`); an existing owner still
+      started the server first and left the link untouched; killing the tunnel child
+      logged `tunnel exited (code null, signal SIGKILL); restart 1 in 1000 ms` and
+      announced the new URL. What it does **not** explain is the phone's chroot DNS
+      failure (the child exits ~5 ms after `Requesting new quick Tunnel`) — that is
+      recorded in the matrix and still needs the operator's eyes, and cell 5 is
+      re-walked with the P5-04 boot fix.
 - [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy;
       restore an interrupted generation; **rotate the passphrase** and confirm
       recovery without it stored beside the archive. The job, remote and

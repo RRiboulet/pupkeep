@@ -69,7 +69,9 @@ task is **P5-01**, split into **P5-01a** (the host half: the kill matrix as
 acks — plus `--retry-parked`, the operator's only way out of a task parked at the
 harness's restart limit; landed) and **P5-01b** (the phone walk:
 `docs/kill-restart-matrix.md` and its recorded observations, still open; the
-devcontainer reaches the host phone with `ssh phone`). The backlog request
+devcontainer reaches the host phone with `ssh phone`; its host-side follow-up —
+the quick-tunnel URL parser, the tunnel restart line, minting the owner on the
+tunnel origin — is done). The backlog request
 to edit meal times after setup landed as **P4-11** (the Settings “Meal times”
 card, reusing the wizard’s slot editor; the wizard hides its own meal section
 once setup is complete). P0-03/P0-08/P0-10

@@ -70,7 +70,7 @@ Finding 3.
 | 2 | **Launcher** killed (`SIGKILL`) | **pass**, with the documented consequence | 2026-11-10 12:09:56 |
 | 3 | **Termux app** killed (every process of the UID) | **pass** | 2026-11-10 13:53 |
 | 4 | **Phone reboot** | **fail as shipped** — the data and the session survive, the boot path does not start the app | 2026-11-10 ~15:0x reboot, `boot_id` `3e85e392-…` |
-| 5 | **Tunnel restart** | **fail** — two defects | 2026-11-10 12:10–12:14 |
+| 5 | **Tunnel restart** | **fail** — two defects, both fixed host-side 2026-11-10; the cell needs a re-walk (the chroot DNS failure is still unexplained) | 2026-11-10 12:10–12:14 |
 | 6 | **Agent mid-turn** | **not observed** — no provider key on this host | — |
 
 ---
@@ -198,13 +198,21 @@ the wrapper dying at the `exec` and the app never being armed both leave exactly
 this evidence (no boot line). The fix makes that distinction visible — a working
 wrapper always writes the boot line.
 
-### 5. Tunnel restart — fail (two defects)
+### 5. Tunnel restart — fail (two defects, both fixed host-side)
 
 Run as a throwaway second instance on port 8793 so the household was untouched.
 
 ```bash
 node bin/pupkeep.js --access cloudflare --port 8793 --data ~/.pupkeep-tunnel
 ```
+
+**Both defects below are fixed** (2026-11-10, host-side, from the follow-up task:
+`src/launcher/tunnel.ts`, `src/launcher/main.ts`, `test/tunnel.test.ts`,
+`test/launcher.test.ts`). The record of what was seen stays as it was observed;
+the fix notes say what changed and how it was verified. **The cell still needs a
+re-walk on the phone**, because the third failure below (DNS inside the chroot) is
+not a code defect and only the phone can show whether the tunnel now registers
+there.
 
 **Defect A — a fresh `cloudflare` start can never come up.** The launcher mints
 the owner link only once it knows the origin, and in `cloudflare` mode the origin
@@ -220,6 +228,14 @@ mint the owner before starting the server
 Minting once in `local` mode and switching to `cloudflare` is the workaround.
 PLAN §6.7 says minting on the tunnel URL belongs to P4-05, which has landed and
 still does not do it.
+
+> **Fixed:** when the mint comes back `no-origin` in `cloudflare` mode the
+> launcher starts the tunnel first (it only forwards to loopback, so it does not
+> need the server yet), waits up to 30 s for the URL, and mints on that origin —
+> the same path `--reissue-owner` needs. If no URL arrives it refuses with exit 6
+> and one sentence instead of starting a server that will refuse to boot and be
+> restarted ten times. The runbook's `local`-mode workaround is no longer part of
+> the procedure.
 
 **Defect B — the tunnel never registers, and the launcher announces a URL that is
 not a tunnel.** With an owner present, the server starts, but every cloudflared
@@ -257,8 +273,22 @@ from `~` and from `~/pupkeep`, so the bind itself is fine when run from an
 interactive shell. The launcher's spawn (`detached: true`, `stdio: pipe`) is the
 remaining difference; the working hypothesis is that the chroot's mount namespace
 is not the one cloudflared ends up in, but it is **unproven** and recorded as
-open. The restart line does not help: `tunnel restart 5 in 16000 ms` omits the
+open. The restart line did not help: `tunnel restart 5 in 16000 ms` omitted the
 exit code and signal that the server's restart line carries.
+
+> **Fixed (the reporting half only):** `parseTunnelUrl` now reads a URL only from
+> inside cloudflared's banner box (`INF |  https://<random-words>.trycloudflare.com  |`),
+> so the `Post "https://api.trycloudflare.com/tunnel"` line parses as nothing and
+> reaches the log instead of being swallowed. The tunnel's restart line now mirrors
+> the server's: `tunnel exited (code null, signal SIGKILL); restart 1 in 1000 ms`.
+> **The DNS failure itself is not fixed and not explained** — the phone's cloudflared
+> still exits for a reason this repository cannot see.
+>
+> Verified in the devcontainer against the pinned binary, not a fake:
+> `cloudflared 2026.10.5` arm64 (the runbook's checksum matched) served a real
+> quick tunnel, the launcher minted `owner-link.txt` on that origin and the server
+> booted behind it, and `kill -9` of the tunnel child produced the new restart line
+> and a new URL announcement.
 
 ### 6. Agent mid-turn — not observed on this host
 
@@ -289,8 +319,10 @@ spinning. The turn must complete after the restart with one care write.
    open (`LocalForward 8787`). The launcher's message is accurate but the cause is
    not obvious from it; the runbook should name this collision, because on this
    phone the default port is unusable during normal operator work.
-4. **The quick tunnel does not work from the launcher on this phone** — defects A
-   and B above. Both are host-side and testable without a phone.
+4. **The quick tunnel did not work from the launcher on this phone** — defects A
+   and B above. Both are host-side and testable without a phone, and both are
+   **fixed** (2026-11-10); the residual DNS failure inside the chroot is still
+   open (cell 5). Re-walk this cell on the phone.
 5. **`/tmp` is not writable in Termux.** A probe that wrote `/tmp/second.out`
    failed with `Permission denied`; scratch files belong in `$HOME`.
 6. **Node major divergence re-measured** (P1-03's carry-over): phone
@@ -331,7 +363,9 @@ spinning. The turn must complete after the restart with one care write.
 ## Where the result lands
 
 - The two defects and the install findings go to P5-01b's follow-up (host-side
-  fixes with tests) and P5-04 (the install script).
+  fixes with tests) and P5-04 (the install script). **The tunnel defects are fixed**
+  (2026-11-10): A and B as above, and the chroot DNS failure is recorded as open
+  with the evidence the phone produced.
 - The reboot row stays open until Tailscale is installed and the owner reboots the
   phone; G5's "phone reboot recovers" is **not** met until then.
 - P5-05 owns the day-long battery/heat and the wake-lock effect; this file does
