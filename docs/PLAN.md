@@ -369,6 +369,7 @@ pupkeep/
 │   ├── termux-install.sh     # pkg + pinned cloudflared + npm ci + boot wrapper
 │   ├── termux-boot.sh       # Termux:Boot entry: wake lock, sshd, exec launcher
 │   ├── termux-sshd.sh       # on-demand sshd, tailnet address re-resolved
+│   ├── termux-tunnel.sh     # supervised operator tunnel (opt-in, not the product path)
 │   ├── backup.ts
 │   └── restore.ts
 ├── test/
@@ -377,6 +378,8 @@ pupkeep/
 │   ├── PHONE-RUNBOOK.md       # the operator's copy (P1-13, P5-04)
 │   ├── access-and-notifications.md  # the caregivers' copy (P4-09)
 │   ├── partner-ios-checklist.md     # the P0-10 device check
+│   ├── security-review.md           # P5-06's record and findings
+│   ├── kill-restart-matrix.md       # P5-01b's phone walk
 │   └── TODO-GUIDE.md          # how to pick the next task
 ├── package.json
 ├── package-lock.json
@@ -669,6 +672,13 @@ PWA installation and Web Push need a secure context. Daily notifications use:
 3. Open the printed `https://<random>.trycloudflare.com` URL on a test device
    with a separate test invite.
 4. Test PWA install, service worker, Web Push, iPhone Add to Home Screen.
+5. **Owner minting follows the origin.** On a data directory with no owner the
+   launcher starts the tunnel *before* the server (the tunnel only forwards to
+   loopback, so it does not need the server yet), waits up to 30 s for the URL, and
+   mints the owner link on that origin — the server refuses to boot ownerless, so
+   there is no later chance. No URL within that window is exit **6** with one
+   sentence, not an ownerless server crash-looping. An existing owner keeps its
+   link; `--reissue-owner` rotates onto the current tunnel origin.
 
 **The URL changes when the tunnel restarts.** PWA push subscriptions are bound
 to the origin, so after a restart the test device must re-subscribe. This is why
@@ -1718,9 +1728,12 @@ Pi Pocket style, simplified for two caregivers:
   the owner only, `/invite` always creates a new member row, and there is no
   member re-auth or remove-member route. A partner whose cookie is lost (a
   cleared browser, a home-screen clip over HTTP with its own jar) needs the
-  operator to free the slot in `config.json` and re-invite them. Carried to the
-  security review (P5-06); the generated invite links are origin-agnostic, so a
-  member *link* can be added later without changing the storage shape.
+  operator to free the slot in `config.json` and re-invite them. **P5-06 decided
+  to keep it that way for v1:** the trust root is physical access to Termux, so
+  the runbook documents the edit and `test/security.test.ts` proves it ends the
+  lost session and frees the slot; a `--reset-member` CLI is the backlog
+  follow-up. The generated invite links are origin-agnostic, so a member *link*
+  can be added later without changing the storage shape.
 - No email or password in v1. The owner link is the key; keep it private.
 - **`config.json` owns auth identities and roles.** `app.household` owns display
   profiles only. Removing a member deletes their auth row **and** purges all
@@ -1749,10 +1762,11 @@ Pi Pocket style, simplified for two caregivers:
   custom request header (missing header is 403).
 - Mutations require JSON content type (415 otherwise); no CORS headers
   (default-deny).
-- `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-For` and
-  `CF-Connecting-IP` are trusted **only from a loopback peer** (cloudflared).
-  Rate limits key off `CF-Connecting-IP` behind the tunnel, not the tunnel’s
-  loopback address.
+- `X-Forwarded-Proto` and `CF-Connecting-IP` are the two headers the server
+  reads, and **only from a loopback peer** (cloudflared); `X-Forwarded-Host` and
+  `X-Forwarded-For` are not read at all. Rate limits key off `CF-Connecting-IP`
+  behind the tunnel, not the tunnel’s loopback address. (P5-06 found this section
+  promised four headers and the code honoured two.)
 - Login/invite attempts and SSE/long-poll connections are rate-limited; SSE and
   all API routes require auth. The static shell may be public. The P1-07
   scaffold's `/healthz` is an unauthenticated liveness endpoint returning only
@@ -1781,7 +1795,10 @@ Pi Pocket style, simplified for two caregivers:
 - The agent cannot read `secrets.json`, `config.json`, `push.json` or the
   database directly.
 - No tool output includes provider keys, session tokens, owner/invite links, or
-  cookies. Add a grep test.
+  cookies. Add a grep test. **P5-06 added it:** `test/security.test.ts` scans the
+  model-facing text (the system prompt and every tool description) for a sign-in
+  link, the data directory, `secrets.json`/`config.json`/`push.json`, a VAPID or
+  PEM key, a provider key and any opaque 40-character run.
 - **Log scrub:** server logs redact owner links, invite codes, cookies and
   provider keys; the boot script log is included in the scrub test.
 
@@ -2627,14 +2644,15 @@ that the partner is reached out-of-app is gated on P0-10.
       kill/restart matrix and P5-04's polish are where that happens. The
       `sv` unit, the Termux:Boot companion app, the tunnel wrapper in anger and
       the ntfy onboarding all rest on the Phase 0 spikes.
-      **Carried out:** the quick tunnel has no owner link of its own — the
-      launcher mints before the tunnel prints its URL, so a `cloudflare` start
-      reports `no-origin`, and nothing re-mints when `onTunnelUrl` fires. (The
-      launcher now *prints* that URL from `bin/pupkeep.js`; it previously
-      swallowed the line, so §9's "open the tunnel URL" had no way to learn it.) The
-      runbook documents the route that works today (sign in on the tunnel origin
-      with the token from `owner-link.txt`); minting on the tunnel URL belongs to
-      the Web Push task, **P4-05**, which is the first thing that needs it.
+      **Carried out (closed by the P5-01b follow-up):** the quick tunnel had no
+      owner link of its own — the launcher minted before the tunnel printed its URL,
+      so a `cloudflare` start reported `no-origin`, and nothing re-minted when
+      `onTunnelUrl` fired. (The launcher now *prints* that URL from
+      `bin/pupkeep.js`; it previously swallowed the line, so §9's "open the tunnel
+      URL" had no way to learn it.) The runbook documented the route that worked
+      then (sign in on the tunnel origin with the token from `owner-link.txt`);
+      minting on the tunnel URL belongs to the Web Push task, **P4-05**, and is now
+      done — see P5-01's entry.
 - [x] **P1-14** First-run setup: puppy profile and meal-slot wizard before both
       caregivers land on Today. Confirm or change the household timezone captured
       at bootstrap; a wrong zone corrupts every future `localDate`.
@@ -4729,22 +4747,114 @@ changes nothing until confirmed.
 ### Phase 5 — Hardening and release
 
 - [ ] **P5-01** Kill/restart matrix on the phone: server, Termux, phone reboot,
-      tunnel restart, agent mid-turn.
+      tunnel restart, agent mid-turn. **Split (2026-11-10), owner decision:** the
+      host half is **P5-01a** and the phone half is **P5-01b**; the checkbox stays
+      open until the phone walk records its observations. **P5-01a landed:**
+      `test/kill-matrix.test.ts` with a real child process, a real SQLite file and
+      a real `SIGKILL` for the rows §15.2 had no test for — a kill **mid-turn**
+      (the probe tool in `src/server/testing/kill-probe.ts` commits a real care
+      write through `logFeed` on the tool task id, then hangs, so the process dies
+      with the result uncommitted; the reopen reruns it, answers `replayed`, and
+      the turn completes attributed to the caregiver who started it), and a kill
+      right after the ack of a feed, a walk start, a walk end and an appointment
+      create (exactly one effect, the same `Idempotency-Key` replays rather than
+      duplicating). **And the gap the plan had carried since §7.4 without a
+      caller:** `AppHandle.retryTask()` existed and nothing invoked it, so a task
+      parked at `restartLimit` was a log line with no way out — a restart does not
+      clear a park. `--retry-parked` now retries every parked task once, on the
+      first spawn only (a supervisor restart must not retry a task that was parked
+      for crashing the process), parsed by `parseOptions`, carried to the server as
+      `PUPKEEP_RETRY_PARKED`, and applied after `inspect()`; the runbook documents
+      the operator procedure. **P5-01b's first pass** (2026-11-10, the daily phone,
+      `docs/kill-restart-matrix.md`) passed the server-kill and launcher-kill cells
+      with the state read back each time, and found that **the reboot cell cannot
+      pass yet**: Tailscale is not installed on the phone and
+      `scripts/termux-boot.sh` execs the launcher with `--access tailscale`, which
+      fails closed — so G5's "phone reboot recovers" stays unmet until the owner
+      installs it. It also found two host-side tunnel defects (the URL parser
+      accepting cloudflared's API endpoint and swallowing the error line, and a
+      fresh `--access cloudflare` start that cannot mint an owner) plus the port
+      collision with the operator's own `ssh` `LocalForward 8787`; those are
+      carried by the P5-01b follow-up. **P5-01b's walk is complete** (2026-11-10,
+      `docs/kill-restart-matrix.md`): the server-kill, launcher-kill and
+      Termux-kill cells pass — nothing committed is lost, nothing restarts the app
+      by itself, and the next start clears its own dead locks — and the reboot
+      survives the data (documents, open walk, appointment, the three sleeping
+      tasks and the session all came back) but **the boot path does not start the
+      app**: `#!/usr/bin/env bash` does not exist on Termux and `PREFIX` is unbound
+      in a minimal environment, so Termux:Boot's exec dies before the boot line.
+      **P5-01's gate is therefore still open** — "phone reboot recovers" needs the
+      P5-04 boot fix and a re-run of that cell. Also observed: `am force-stop` is
+      denied from Termux and the Android Settings force stop did not take on this
+      phone (cell 3 used a UID-wide `SIGKILL` instead), and the operator's own
+      `ssh` config claims port 8787 while a session is open.
+      **The P5-01b follow-up landed (2026-11-10, host-side, no device):**
+      `parseTunnelUrl` now reads only the URL inside cloudflared's banner box, so
+      `api.trycloudflare.com` is no longer announced as the tunnel and the failure
+      line reaches `server.log`; the tunnel's restart line carries its exit code and
+      signal exactly as the server's does; and a fresh `--access cloudflare` start
+      starts the tunnel, waits (30 s) for the URL and mints the owner link **on that
+      origin**, refusing with exit 6 rather than booting an ownerless server that
+      would crash-loop. Verified against the pinned `cloudflared 2026.10.5` arm64
+      release (checksum matched) in the devcontainer, not merely in a fake: a fresh
+      data dir minted `owner-link.txt` on the tunnel origin and the server booted
+      (`session bootstrap created=true`, `listening`); an existing owner still
+      started the server first and left the link untouched; killing the tunnel child
+      logged `tunnel exited (code null, signal SIGKILL); restart 1 in 1000 ms` and
+      announced the new URL. What it does **not** explain is the phone's chroot DNS
+      failure (the child exits ~5 ms after `Requesting new quick Tunnel`) — that is
+      recorded in the matrix and still needs the operator's eyes, and cell 5 is
+      re-walked with the P5-04 boot fix.
 - [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy;
       restore an interrupted generation; **rotate the passphrase** and confirm
       recovery without it stored beside the archive. The job, remote and
       retention themselves are P1-07's; this task proves they work.
 - [ ] **P5-03** Two-client E2E: feed race, walk, appointment, shared thread,
       approvals, reconnect. The partner leg needs **P0-10** in addition to G4.
-- [ ] **P5-04** Termux install/boot scripts and PHONE-RUNBOOK polish.
+- [ ] **P5-04** Termux install/boot scripts and PHONE-RUNBOOK polish. **Partly
+      landed (2026-11-10, from P5-01b's findings):** the boot path is fixed — the
+      wrapper `termux-install.sh` writes now execs `"$PREFIX/bin/bash"
+      "<repo>/scripts/termux-boot.sh"` instead of relying on the tracked script's
+      `#!/usr/bin/env bash` shebang (Termux has no `/usr/bin/env`), and
+      `termux-boot.sh` establishes `PATH`, `PREFIX` and `HOME` itself, because
+      Termux:Boot starts it with none of them. `test/termux-scripts.test.ts` runs
+      both the boot script and the new tunnel script with `env` replaced entirely,
+      which is the only way that regression stays caught. The supervised operator
+      tunnel is new and opt-in (`scripts/termux-tunnel.sh`, wired by
+      `termux-install.sh --with-tunnel <host>` as a `termux-services` unit): it
+      checks the operator's `ssh -G` for a conflicting `RemoteForward` and starts
+      sshd before it binds, because a reverse tunnel to a dead loopback sshd
+      accepts and resets every connection. **Still open:** `pkg upgrade` before
+      `pkg install` (the index moved nodejs without libicu and left `node`
+      unlinkable), and a re-walk of the reboot cell now that the boot path is
+      fixed.
 - [ ] **P5-05** Daily-phone battery/heat/phantom-process notes and checks, plus
       the two Phase 0 deferrals: **`termux-wake-lock` effectiveness** (not
       observable from Termux, P0-06) and a **kill/restart re-test with the
       force-stop timestamp captured** (P0-06 recorded a user-confirmed restart
       without one).
-- [ ] **P5-06** Security review: owner reissue, invites, hashed sessions, authz
+- [x] **P5-06** Security review: owner reissue, invites, hashed sessions, authz
       matrix, origin checks, log scrub, tunnel, secrets, no agent escape, backup
       encryption.
+      **Landed:** [`security-review.md`](security-review.md) is the record and
+      `test/security.test.ts` the executable half — thirteen adversarial attempts,
+      each naming the test that produced its evidence. The agent escape is checked
+      three ways: an exact allowlist of 20 app tools over 9 extensions, no tool
+      name/description/parameter naming a capability, and a **named-import
+      allowlist** over all 24 `agent/` and `reminders/` modules (no Node built-in,
+      no `config.ts`/`backup.ts`/`auth.ts`/`json-file.ts`/`lock.ts`, no dynamic
+      import, no evaluator, no `process.env`). Two prose claims became tests: the
+      tunnel origin is accepted only by the same-origin `Host` fallback (proven
+      both ways over real HTTP, on the care and the invite route), and the
+      documented hand edit for a partner who lost their session ends it and frees
+      the slot. **Fixed:** `bindOrigins`' docstring claimed the launcher adds the
+      tunnel origin — it does not and cannot, and a cleanup of the fallback would
+      have broken the tunnel path silently. **Decided:** member recovery stays an
+      operator procedure this release (§14.1) with a `--reset-member` CLI as the
+      backlog follow-up, and the tool schemas stay open (F7 in the review). **Open:**
+      the browser and device halves of the tunnel path, and the partner's iPhone,
+      are P0-10's; the chroot DNS failure stays P5-01b's. Suite 849/849, typecheck
+      clean.
 - [ ] **P5-07** Performance/data growth: commit latency on phone, doc sizes,
       checkpoint policy, retention.
 - [ ] **P5-08** Release: version, changelog, tag, deploy notes, VPS fallback.

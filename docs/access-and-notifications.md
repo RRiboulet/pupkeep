@@ -171,12 +171,14 @@ in the phone runbook, §9); the rest is the device steps below.
    `--access cloudflare`; it prints `pupkeep: quick tunnel at
    https://<random>.trycloudflare.com`. That URL is not a secret, but it is
    **test only**.
-2. **Sign in on that URL.** The owner link is minted before the tunnel exists, so
-   it cannot be printed for a tunnel origin. Do **not** reissue it: a reissue
-   rotates the token, signs the owner out on the daily address and voids any
-   invite still outstanding. Instead, take the existing link from
+2. **Sign in on that URL.** Your daily owner link was minted on the tailnet
+   address, so it is not the tunnel origin's link. Do **not** reissue it: a
+   reissue rotates the token, signs the owner out on the daily address and voids
+   any invite still outstanding. Instead, take the existing link from
    `~/.pupkeep/owner-link.txt` and open it on the tunnel origin — the same path
    and token with the tunnel's host — on the host phone (phone runbook §9).
+   (On a data directory with **no** owner yet the launcher mints the link on the
+   tunnel origin itself, so there is nothing to hand-edit.)
    Sessions are per origin, so your daily sign-in does not carry over; the token
    is not origin-bound, which is why the same link signs you in here.
 3. **The test device signs in with that same owner link.** There is no separate

@@ -24,9 +24,18 @@ close/reopen, a cancelled one never firing, the dedupe key as the push tag) and
 **P4-11** (the Settings "Meal times" card, so the schedule can be edited after
 setup without reopening the wizard) are complete, so **Phase 4 is done and
 Gate G4's automated half is covered**; the
-next task is **P5-01** (the kill/restart matrix on the phone).
+next task is **P5-01**, split into **P5-01a** (host: the kill matrix as
+`test/kill-matrix.test.ts` plus the `--retry-parked` operator path, complete) and
+**P5-01b** (the phone walk and its recorded observations — `ssh phone` reaches the
+host phone from the devcontainer; the walk is recorded but its reboot and tunnel
+cells still need a re-run on the device, and its host-side follow-up — the tunnel
+URL parser, the tunnel restart line, minting the owner on the tunnel origin — is
+done). **P5-06** (the security review) is done too: `docs/security-review.md` and
+`test/security.test.ts`, including the agent-escape allowlist. The next host-side
+task is **P5-07**; what remains for Phase 5 otherwise needs the phone (P5-01b's
+re-walk, P5-02, P5-05) or the release and docs passes (P5-08, P5-09).
 
-**P5-10** (real-browser render checks) landed beside it and needs no device:
+**P5-10** (real-browser render checks) landed beside them and needs no device:
 `test/browser-render.test.ts` lays the real app out in a pinned Chromium at
 320/360/390/430 px. Its first run found the bottom nav 459 px wide inside every
 phone viewport, so the sixth tab could never be reached; the notification tab now

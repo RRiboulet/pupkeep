@@ -157,6 +157,44 @@ This rotates the owner token and prints a fresh link (and rewrites
 point. Restarting the app **without** `--reissue-owner` will not print an
 existing link — only the hash is stored.
 
+### A partner who loses their session
+
+v1 has no remove-member or re-invite screen, and there is no member recovery
+route: a partner whose cookie is gone (a cleared browser, a replaced phone) would
+be stuck at the sign-in screen. The operator's way out is a **hand edit while the
+server is stopped** — one writer, and `config.json` is the auth authority:
+
+```bash
+# 1. stop the launcher (Ctrl-C, or: sv down pupkeep), then prove the server is
+#    gone: a SIGKILLed launcher leaves its detached server alive, and editing
+#    config.json under a live writer loses the edit.
+pgrep -af 'bin/server.js' || echo "no server process"
+# 2. back up the auth authority, then edit it
+cd ~/.pupkeep
+cp config.json config.json.bak          # 0600; keep it until the partner is back
+# 3. in config.json: set "removedAt" on that member and empty their "sessions"
+#    (the member id is under members[].id; a JSON editor or jq)
+# 4. start again, then Settings → People → create a one-time invite
+cd ~/pupkeep
+npm start -- --access tailscale --data ~/.pupkeep
+```
+
+Setting `"removedAt"` is what ends the session: `authenticate` skips a removed
+member and every session row attached to one. On the next boot the household
+document drops their profile (the boot line reports `profilesRemoved=<n>`), and
+the household slot is free for the new invite. `test/security.test.ts` proves the
+edit itself: the lost token stops authenticating and the owner can invite a
+replacement.
+
+Their push subscription and ntfy topic stay in `push.json`, keyed by the old member
+id. Nothing plans a **new** notification for a member the config no longer lists,
+but an intent already committed for them before the edit — a `feed_overdue` owed
+the night before, say — can still be delivered on the next outbox drain. The app's
+own removal purges push first for exactly that reason. If that matters, let the
+outbox drain before editing, or delete their rows from `push.json` while the
+server is stopped and the file is backed up. The backlogged `--reset-member` CLI
+will do both in one step.
+
 ## 5. Boot, wake lock, supervision
 
 Termux:Boot runs every file in `~/.termux/boot/` at **reboot**. Ours is
@@ -173,13 +211,20 @@ execs `scripts/termux-boot.sh`, which:
 `--boot` is belt and braces: a non-TTY stdout never prints the owner token
 anyway, and the boot path must never put the link in `server.log`.
 
-**What survives what** (P0-06):
+The wrapper Termux:Boot runs passes the interpreter explicitly
+(`exec "$PREFIX/bin/bash" "<repo>/scripts/termux-boot.sh"`) and the script sets
+`PATH`, `PREFIX` and `HOME` itself, because Termux:Boot starts it with none of
+them. Until P5-01b that was not true, and the result was a reboot with no boot
+line and no app — see [`kill-restart-matrix.md`](kill-restart-matrix.md) cell 4.
+
+**What survives what** (P0-06; re-measured on the real install in
+[`kill-restart-matrix.md`](kill-restart-matrix.md)):
 
 | Event | Result |
 |---|---|
 | Server child crashes | The launcher restarts it with capped backoff |
 | Launcher crashes | Nothing restarts it — use the optional `sv` unit below |
-| Termux app killed (`am force-stop`) | Data survives; nothing restarts until you reopen Termux. `sshd` does **not** come back by itself. |
+| Termux app killed (Android **Settings → Apps → Termux → Force stop**) | Data survives; nothing restarts until you reopen Termux. `sshd` does **not** come back by itself. `am force-stop com.termux` from inside Termux is **denied** (`FORCE_STOP_PACKAGES`) and exits 0 anyway, so the UI is the only reliable way — see [`kill-restart-matrix.md`](kill-restart-matrix.md) Finding 7. |
 | Phone reboot | Termux:Boot starts the launcher again. Tailscale needs "Always-on VPN" or a manual start. |
 | Backoff gives up | The launcher exits non-zero, which is what lets `sv`/`runit` restart it |
 
@@ -255,6 +300,47 @@ ssh -p 8022 <user>@100.x.y.z
 If you inherited a phone from the Phase 0 spikes, there may be a leftover
 `$PREFIX/etc/ssh/sshd_config.p0-review.bak` that binds every interface. It must
 not be reinstated; delete it once this on-demand start is what you use.
+
+### The supervised tunnel (optional, for a workstation that cannot reach the tailnet)
+
+A devcontainer or a VPS that is not on the tailnet cannot open `ssh -p 8022
+<user>@100.x.y.z`. The phone can carry the tunnel itself, supervised, so a dead
+session cannot strand the port and a `pkill` of the app does not lock the
+operator out:
+
+```bash
+# once, on the phone, with the VPS as a ~/.ssh/config alias (`oracle` here):
+~/pupkeep/scripts/termux-install.sh --with-tunnel oracle
+```
+
+That writes `$PREFIX/var/service/pupkeep-tunnel/run`, which `termux-services`'
+`runsvdir` starts and restarts, running:
+
+```bash
+~/pupkeep/scripts/termux-tunnel.sh oracle
+```
+
+The script checks two things **before** it binds, because both failures are
+silent and both cost an hour on 2026-11-10:
+
+- **Your `~/.ssh/config` must not already forward the remote port.** A
+  `RemoteForward 0.0.0.0:8022 …` in the same Host block wins the bind, and then
+  that interactive session *is* the tunnel — with whatever target it was written
+  with. Delete that line; the supervised unit owns the port now.
+- **sshd must be listening.** A reverse tunnel to a loopback sshd that is down
+  accepts every connection and resets it, which reads as a network fault and is
+  not one (`kex_exchange_identification: read: Connection reset by peer`).
+
+Then, from the VPS (or anywhere that can reach it):
+
+```bash
+ssh -p 8022 <phone-user>@<vps-address>
+```
+
+`sv status pupkeep-tunnel` shows it; `sv down pupkeep-tunnel` stops it. The unit
+restarts the tunnel with a 10 s backoff (`PUPKEEP_TUNNEL_BACKOFF`) and the
+session carries keepalives, so an Android doze or a flaky link recovers by
+itself instead of leaving a half-dead forward.
 
 ## 7. Daily access: Tailscale
 
@@ -340,18 +426,23 @@ That line is not a secret and is safe in `server.log`; the owner link is not.
 
 Then:
 
-1. **Sign in on the tunnel origin as the owner.** The quick tunnel cannot mint its
-   own owner link: the token is minted before the tunnel exists, so on a
-   `cloudflare` start the launcher logs that the URL is not known yet and prints
-   nothing. Read the link from `~/.pupkeep/owner-link.txt` and open it on the
-   tunnel origin with the same path and token — `https://<random>.trycloudflare.com/login?token=…`
-   — on the host phone, then create a **separate test invite** there.
+1. **Sign in on the tunnel origin as the owner.** On a data directory with no
+   owner yet the launcher starts the tunnel first, waits for its URL, and mints the
+   owner link **on that origin** — the file and the printed link are already the
+   tunnel URL, so there is nothing to hand-edit. Open it on the host phone, then
+   create a **separate test invite** there. If the tunnel never names a URL the
+   launcher exits **6** with one sentence instead of starting a server that cannot
+   boot; fix the tunnel (the DNS failure below) and start again. An existing owner
+   keeps its link; `npm start -- --reissue-owner --access cloudflare` rotates it
+   onto the current tunnel origin.
 2. On the **test device**, open the tunnel URL and sign in with that test invite.
    Never use the daily tailnet invite on a test origin: sessions are per-origin.
 3. Install the PWA, allow notifications, subscribe to Web Push.
 4. **The URL changes every time the tunnel restarts**, and a push subscription is
    bound to the origin — after a restart, open the new URL and re-subscribe. That
-   is the whole reason a named tunnel (and a domain) is the upgrade path.
+   is the whole reason a named tunnel (and a domain) is the upgrade path. The
+   restart line names the cause: `tunnel exited (code null, signal SIGKILL);
+   restart 1 in 1000 ms`.
 
 Do not put ntfy behind the quick tunnel: the URL changes on restart and the
 partner's client would lose its server.
@@ -409,16 +500,47 @@ refuses a version it does not, rather than resetting. The session documents'
 own migration is Pi Durable's, and a document that fails to load is a startup
 failure, not a fresh household.
 
+### A task that is parked (`restartLimit`)
+
+A task that crashes the server process is retried by the supervisor, and once it
+has been cut off five times Pi Durable **parks** it: it stays blocked, and a
+restart does not unblock it. `server.log` says so, once per boot:
+
+```
+a task was parked before this process started; retryTask() runs it again  taskId=… kind=app.reminder
+```
+
+The operator's way out is one explicit attempt, in the process that owns the
+database (never a second process: one writer, §3.2):
+
+```bash
+# stop the launcher first, then:
+npm start -- --access tailscale --data ~/.pupkeep --retry-parked
+```
+
+It retries every parked task once and logs each one. The flag applies to the
+**first** spawn only: if the task crashes the process again, the supervisor's
+restart does not retry it, because a task parked for crashing is exactly the
+crash loop the limit exists to stop. If it parks again, read the log lines
+before the park — it is a deterministic failure, not a transient one — and fix
+that rather than retrying in a loop.
+
 ## 12. Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
 | `refusing to start: Tailscale is not connected` | No tailnet address. Open the Tailscale app (or set Always-on VPN) and retry. The launcher will not fall back to `0.0.0.0`. |
 | `another instance already owns ~/.pupkeep` | A launcher holds `~/.pupkeep/launcher.pid`. Stop that pid, or use the `sv` unit, then retry. |
+| `could not bind the HTTP listener … EADDRINUSE` on 8787 | Something else on the phone owns the port. The common cause here is the operator's own `ssh` config: `LocalForward 8787 127.0.0.1:8787` binds it while that session is open. Close the session or start with `--port <n>`. |
 | `a server already owns ~/.pupkeep (pid …)` | The launcher lock is free but `server.pid` is held: the previous launcher was SIGKILLed and its detached server is still alive. Stop that pid (it is printed) and start again. |
 | The app is up but your partner cannot reach it | Check the tailnet address the launcher printed, that both devices are on the tailnet, and that Tailscale is connected on the host. |
 | `owner link` lost | `npm start -- --reissue-owner --access tailscale` from physical Termux, then read `~/.pupkeep/owner-link.txt`. |
+| `no owner link can be minted: the quick tunnel reported no URL within 30000 ms` (exit **6**) | A `cloudflare` start needs the tunnel's URL to mint an owner link (and `--reissue-owner` needs it to rotate one), and the tunnel never registered — the lines above it in `server.log` say why (the chroot DNS failure, cell 5 of [`kill-restart-matrix.md`](kill-restart-matrix.md)). Fix the tunnel, then start again. Without `--reissue-owner`, a data directory that already has an owner boots anyway and the tunnel starts after the server. |
+| `a task was parked before this process started` | A task crashed the process five times and the harness parked it; a restart does not clear it. Stop the launcher and start with `--retry-parked` for one attempt (§11). |
 | `termux-sshd: Tailscale is not connected` | Tailscale is down, so there is no address to bind. Open the Tailscale app and run `scripts/termux-sshd.sh` again — it re-resolves and never listens on all interfaces. |
+| `kex_exchange_identification: read: Connection reset by peer` | Something accepted on the remote port and then failed to reach the phone. Two causes, both cheap: sshd is not listening (`pgrep -a sshd`; run `scripts/termux-sshd.sh`), or the `RemoteForward` target is `localhost` (= `::1`) while sshd listens on `127.0.0.1`. Use the supervised tunnel (§6). |
+| `Warning: remote port forwarding failed for listen port 8022` | Another session already owns that remote port — usually an earlier tunnel whose phone side died, or your own `~/.ssh/config`. On the VPS: `sudo ss -ltnp | grep ':8022'` and kill that pid; on the phone, delete the `RemoteForward` line and use the supervised unit. |
+| After a reboot the app is not running and `server.log` has no `boot:` line | Termux:Boot did not get through. Check that the Termux:Boot app has been opened once, then run `~/.termux/boot/pupkeep.sh` by hand: it must append the boot line. If it prints `bad interpreter`, the wrapper is older than P5-01b — re-run `scripts/termux-install.sh`. |
 | Empty Today / wrong dates | The household timezone is wrong. First-run setup confirms it, and Settings shows the same three steps; fix the zone there and re-check the meal times. |
 | Push stopped after a tunnel restart | Expected: the origin changed. Reopen the new URL and re-subscribe. |
 | Notifications stopped arriving on the partner's phone | ntfy app backgrounded/killed, topic rotated, or the host is offline. The in-app centre is still authoritative. |
@@ -437,5 +559,7 @@ failure, not a fresh household.
   + iOS 16.4+; over Tailscale HTTP there is none. ntfy on iOS is documented as
   push-through-ntfy.sh, not measured here. Every iOS row in P0-08 is upstream
   documentation until **P0-10** observes it.
-- **Not walked end to end from this file yet** — P5-01 (kill/restart matrix) and
-  P5-04 (polish) are what turn this draft into a verified procedure.
+- **Not walked end to end from this file yet** — P5-04 (polish) is what turns
+  this draft into a verified procedure. The kill/restart matrix has its own
+  record: [`kill-restart-matrix.md`](kill-restart-matrix.md) (P5-01b), first
+  walked on the daily phone on 2026-11-10.

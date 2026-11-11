@@ -15,6 +15,13 @@ export interface ServerEnvironment {
   dataDir: string;
   host: string;
   port: number;
+  /**
+   * `--retry-parked` reached this process: retry the tasks a previous process
+   * parked at the restart limit, once, after `resume()`. The launcher sends it
+   * on the first spawn only (src/launcher/main.ts), because a task parked for
+   * crashing the process must not be retried by every supervisor restart.
+   */
+  retryParked: boolean;
 }
 
 export type ParseServerEnvironment =
@@ -54,6 +61,7 @@ export function parseServerEnvironment(
       host,
       port,
       dataDir: isAbsolute(expanded) ? resolve(expanded) : resolve(home, expanded),
+      retryParked: env.PUPKEEP_RETRY_PARKED === "1",
     },
   };
 }

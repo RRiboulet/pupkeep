@@ -73,7 +73,17 @@ export function tunnelCommand(options: TunnelOptions): TunnelCommand {
   };
 }
 
-const QUICK_TUNNEL_URL = /https:\/\/([a-z0-9][a-z0-9-]*)\.trycloudflare\.com\b/;
+// The defect this replaces was `\b` after `.com`: it matched inside
+// `Post "https://api.trycloudflare.com/tunnel"`, so the quick-tunnel *failure* line
+// was announced as the tunnel and then swallowed (the launcher only passes an
+// unparsed stderr line through to the log — P5-01b, Finding 4).
+//
+// A host that does not end the URL ('/tunnel') or the line ('…com') is not the
+// tunnel, and the API endpoint is never one whatever the punctuation. Requiring
+// cloudflared's 2026.10.5 banner box instead would also work, but it couples the
+// parser to a log layout P5-04 upgrades: a reformatted banner would leave the
+// tunnel up and the launcher silent.
+const QUICK_TUNNEL_URL = /https:\/\/([a-z0-9][a-z0-9-]*)\.trycloudflare\.com(?=[\s|]|$)/;
 
 /**
  * Pull the public URL out of cloudflared's log. It prints a banner with the URL
@@ -81,7 +91,12 @@ const QUICK_TUNNEL_URL = /https:\/\/([a-z0-9][a-z0-9-]*)\.trycloudflare\.com\b/;
  */
 export function parseTunnelUrl(line: string): string | undefined {
   const match = QUICK_TUNNEL_URL.exec(line);
-  return match ? `https://${match[1]}.trycloudflare.com` : undefined;
+  if (!match) return undefined;
+  const host = match[1]!;
+  // Load-bearing: `…Post "https://api.trycloudflare.com":` ends a URL and is still
+  // the API endpoint, not a tunnel.
+  if (host === "api") return undefined;
+  return `https://${host}.trycloudflare.com`;
 }
 
 /**

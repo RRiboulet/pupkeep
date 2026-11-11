@@ -64,20 +64,31 @@ cancelled one never fires, the dedupe key is authoritative and is the push tag),
 and it found a real bug — the "At the start" reminder offset could never fire,
 which is now fixed with a five-minute grace. The device legs of G4 (Termux:API,
 Web Push over the tunnel, the partner's iPhone) stay P0-10/P4-09 checks. The next
-task is **P5-01** (the kill/restart matrix on the phone). The backlog request
+task is **P5-01**, split into **P5-01a** (the host half: the kill matrix as
+`test/kill-matrix.test.ts` — a real SIGKILL mid-turn and right after four write
+acks — plus `--retry-parked`, the operator's only way out of a task parked at the
+harness's restart limit; landed) and **P5-01b** (the phone walk:
+`docs/kill-restart-matrix.md` and its recorded observations, still open; the
+devcontainer reaches the host phone with `ssh phone`; its host-side follow-up —
+the quick-tunnel URL parser, the tunnel restart line, minting the owner on the
+tunnel origin — is done). The backlog request
 to edit meal times after setup landed as **P4-11** (the Settings “Meal times”
 card, reusing the wizard’s slot editor; the wizard hides its own meal section
 once setup is complete). P0-03/P0-08/P0-10
-remain device-gated partner checks and do not block the host-side work. **P5-10**
-(real-browser render checks) is landed: `test/browser-render.test.ts` lays the
-real app out in a pinned Chromium at 320/360/390/430 px, and its first run found
-that the bottom nav was 459 px wide inside every phone viewport, so the sixth tab
-was unreachable. The notification tab now shows "Alerts" with the full word kept
-in its accessible name ("Alerts, notifications, N unread"), at a `0.75rem` tab
-font with a shrinkable label, so a scaled font ellipsises instead of pushing a
-tab off-screen. `playwright` is a pinned dev dependency; the suite skips where no
-browser is installed, fails instead on CI, and CI plus the devcontainer install
-one.
+remain device-gated partner checks and do not block the host-side work. **P5-06**
+(the security review) is complete: [`security-review.md`](security-review.md)
+records thirteen adversarial attempts and [`../test/security.test.ts`](../test/security.test.ts)
+is their executable half, including the load-bearing agent-escape allowlist. The
+next host-side task is **P5-07** (performance and data growth); P5-09 and P5-08
+follow it. **P5-10** (real-browser render checks) is landed too:
+`test/browser-render.test.ts` lays the real app out in a pinned Chromium at
+320/360/390/430 px, and its first run found the bottom nav 459 px wide inside
+every phone viewport, so the sixth tab was unreachable. The notification tab now
+shows "Alerts" with the full word kept in its accessible name ("Alerts,
+notifications, N unread"), at a `0.75rem` tab font with a shrinkable label, so a
+scaled font ellipsises instead of pushing a tab off-screen. `playwright` is a
+pinned dev dependency; the suite skips where no browser is installed, fails
+instead on CI, and CI plus the devcontainer install one.
 
 The owner's browser path now has its own suite: `test/owner-ui.test.js` drives
 the real views through the real `requestJson` against a real app over HTTP (only

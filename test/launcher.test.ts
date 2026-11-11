@@ -18,6 +18,22 @@ class FakeChild extends EventEmitter implements ChildLike {
   stderr = new EventEmitter();
 }
 
+/**
+ * A child that actually exits when killed, so `stop()` does not wait out the
+ * supervisor's 3 s escalation on every test that has a running child.
+ */
+class StoppableChild extends EventEmitter implements ChildLike {
+  readonly pid = 7000;
+  kills = 0;
+  kill(): boolean {
+    this.kills += 1;
+    setImmediate(() => this.emit("exit", 0, "SIGTERM"));
+    return true;
+  }
+  stdout = new EventEmitter();
+  stderr = new EventEmitter();
+}
+
 const HOME = "/home/owner";
 
 function options(argv: string[] = ["--access", "local"], isTTY = false) {
@@ -155,6 +171,42 @@ test("with a server program the child is spawned with the resolved bind address"
   await launcher.stop();
 });
 
+test("--retry-parked reaches the first spawn only, never a supervisor restart", async () => {
+  // A task parked for crashing the process must not be retried by every restart:
+  // that is the crash loop the harness's `restartLimit` exists to stop. The
+  // operator asks for one attempt, so the variable is set on the first child and
+  // then withdrawn.
+  const spawned: Array<Record<string, string>> = [];
+  const children: FakeChild[] = [];
+  const launcher = createLauncher(
+    options(["--access", "local", "--retry-parked"]),
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: (_command, _args, env) => {
+        spawned.push(env);
+        const child = new FakeChild();
+        children.push(child);
+        return child;
+      },
+    }),
+  );
+
+  const result = await launcher.start();
+  assert.equal(result.ok, true);
+  assert.equal(spawned[0]?.PUPKEEP_RETRY_PARKED, "1");
+
+  // A crash makes the supervisor spawn again; that child must not carry the flag.
+  // The first restart waits the supervisor's 1 s initial backoff.
+  children[0]?.emit("exit", 1, null);
+  const deadline = Date.now() + 5_000;
+  while (spawned.length < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(spawned.length, 2, "the supervisor restarted the child");
+  assert.equal(spawned[1]?.PUPKEEP_RETRY_PARKED, undefined);
+  await launcher.stop();
+});
+
 test("interactive mode prints the owner link; boot mode writes it and logs only the path", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pupkeep-link-"));
   const link = `http://127.0.0.1:8787/login?token=SECRET-OWNER-TOKEN`;
@@ -276,6 +328,169 @@ test("the tunnel URL is announced and becomes the display URL", async () => {
   await launcher.stop();
 });
 
+test("cloudflared's failure line reaches the log and is never announced as the tunnel", async () => {
+  // The composition that was broken: the swallow rule (`if (stderr && !url)`) only
+  // works if the parser refuses the API endpoint. Both halves are asserted here
+  // through the launcher, not only through `parseTunnelUrl`.
+  const urls: string[] = [];
+  class StreamChild extends EventEmitter implements ChildLike {
+    readonly pid = 7008;
+    kill(): boolean {
+      setImmediate(() => this.emit("exit", 0, "SIGTERM"));
+      return true;
+    }
+    stdout = new EventEmitter();
+    stderr = new EventEmitter();
+  }
+  const children: StreamChild[] = [];
+  const d = deps({
+    serverEntry: { command: "node", args: ["server.ts"] },
+    spawnChild: () => {
+      const child = new StreamChild();
+      children.push(child);
+      return child;
+    },
+    onTunnelUrl: (url: string) => urls.push(url),
+    cloudflaredBinary: "/x/cloudflared",
+  });
+  const launcher = createLauncher(options(["--access", "cloudflare"]), d);
+  await launcher.start();
+
+  // What the phone actually emitted when the chroot's DNS failed (cell 5).
+  const failure =
+    'failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": ' +
+    "dial tcp: lookup api.trycloudflare.com on [::1]:53: read udp [::1]:33747->[::1]:53: read: connection refused";
+  children[1]!.stderr.emit("data", `${failure}\n`);
+
+  assert.deepEqual(urls, [], "cloudflared's API endpoint is not a tunnel origin");
+  assert.match(d.logs.join("\n"), /failed to request quick Tunnel/);
+  assert.deepEqual(launcher.urls(), {}, "nothing to announce before a real URL");
+
+  // The good direction: a real banner line is consumed, not logged.
+  children[1]!.stderr.emit("data", "2026-10-29T10:00:00Z INF |  https://a-b-c.trycloudflare.com  |\n");
+  assert.deepEqual(urls, ["https://a-b-c.trycloudflare.com"]);
+  assert.doesNotMatch(d.logs.join("\n"), /a-b-c\.trycloudflare\.com/);
+  await launcher.stop();
+});
+
+test("the tunnel's restart line carries the exit code and signal, as the server's does", async () => {
+  class ExitChild extends EventEmitter implements ChildLike {
+    readonly pid = 7005;
+    kill(): boolean {
+      setImmediate(() => this.emit("exit", 0, "SIGTERM"));
+      return true;
+    }
+    stdout = new EventEmitter();
+    stderr = new EventEmitter();
+  }
+
+  const children: ExitChild[] = [];
+  const d = deps({
+    serverEntry: { command: "node", args: ["server.ts"] },
+    spawnChild: () => {
+      const child = new ExitChild();
+      children.push(child);
+      return child;
+    },
+    cloudflaredBinary: "/x/cloudflared",
+  });
+  const launcher = createLauncher(options(["--access", "cloudflare"]), d);
+
+  await launcher.start();
+  // children[0] is the server, children[1] the tunnel.
+  children[1]!.emit("exit", null, "SIGKILL");
+  // P5-01b cell 5: `tunnel restart 3 in 4000 ms` alone left the operator without
+  // the cause the server's own line names (code + signal).
+  assert.match(d.logs.join("\n"), /tunnel exited \(code null, signal SIGKILL\); restart 1 in 1000 ms/);
+  await launcher.stop();
+});
+
+test("an existing owner's cloudflare start does not wait for the tunnel", async () => {
+  // The opposite mistake to the mint fix: gating every boot on the tunnel would put
+  // up to 30 s in front of a household that already has an owner.
+  const envs: Array<Record<string, string>> = [];
+  const d = deps({
+    serverEntry: { command: "node", args: ["server.ts"] },
+    spawnChild: (_command, _args, env) => {
+      envs.push(env);
+      return new StoppableChild();
+    },
+    cloudflaredBinary: "/x/cloudflared",
+  });
+  const launcher = createLauncher(options(["--access", "cloudflare"]), d);
+
+  const result = await launcher.start();
+  assert.equal(result.ok, true);
+  assert.doesNotMatch(d.logs.join("\n"), /waiting up to/);
+  // children[0] is the server (it gets the bind env), children[1] the tunnel.
+  assert.equal(envs[0]?.PUPKEEP_BIND_HOST, "127.0.0.1");
+  assert.deepEqual(envs[1], {}, "the tunnel started after the server");
+  await launcher.stop();
+});
+
+test("the real mint refuses a loopback origin and waits for the tunnel's own", async () => {
+  // Every other cloudflare test fakes the minter, so this is the one that pins
+  // `defaultMintOwnerLink`'s early return: no token may be minted for an origin that
+  // does not exist yet, and a token must be minted once the tunnel names one.
+  const { mkdtemp, readFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "pupkeep-real-mint-"));
+  const banner = "2026-11-10T22:00:08Z INF |  https://a-b-c.trycloudflare.com  |\n";
+
+  const children: StoppableChild[] = [];
+  const launcher = createLauncher(
+    options(["--access", "cloudflare", "--data", dir]),
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: () => {
+        const child = new StoppableChild();
+        children.push(child);
+        if (children.length === 1) setImmediate(() => child.stdout.emit("data", banner));
+        return child;
+      },
+      mintOwnerLink: undefined,
+      cloudflaredBinary: "/x/cloudflared",
+      tunnelUrlTimeoutMs: 5_000,
+    }),
+  );
+
+  const result = await launcher.start();
+  assert.equal(result.ok, true);
+  const link = await readFile(join(dir, "owner-link.txt"), "utf8");
+  assert.match(link, /^https:\/\/a-b-c\.trycloudflare\.com\/login\?token=[A-Za-z0-9_-]+$/m);
+  const config = JSON.parse(await readFile(join(dir, "config.json"), "utf8")) as {
+    ownerTokenHash?: string | null;
+  };
+  assert.equal(typeof config.ownerTokenHash, "string", "one owner token, minted on the tunnel origin");
+  await launcher.stop();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("a stop during the owner wait is reported as a stop, not a tunnel defect", async () => {
+  // Ctrl-C in the first seconds of a fresh `cloudflare` boot used to be diagnosed
+  // as "the tunnel reported no URL": a clean operator stop must not look like a bug.
+  const d = deps({
+    serverEntry: { command: "node", args: ["server.ts"] },
+    spawnChild: () => new StoppableChild(),
+    mintOwnerLink: async () => "no-origin",
+    cloudflaredBinary: "/x/cloudflared",
+    tunnelUrlTimeoutMs: 60_000,
+  });
+  const launcher = createLauncher(options(["--access", "cloudflare"]), d);
+
+  const started = launcher.start();
+  // Wait until the launcher is parked on the tunnel's URL, then stop it.
+  for (let i = 0; i < 500 && !d.logs.some((line) => line.includes("waiting up to")); i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await launcher.stop();
+
+  const result = await started;
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? "", /stopped while waiting/);
+  assert.doesNotMatch(d.logs.join("\n"), /fatal:/);
+});
+
 test("the owner link is minted for the origin the owner will actually open", async () => {
   const origins: Array<string | undefined> = [];
   const launcher = createLauncher(
@@ -315,18 +530,121 @@ test("first boot mints and stores the link; a later boot does not print it again
   await second.stop();
 });
 
-test("cloudflare with no tunnel yet mints nothing rather than a loopback link", async () => {
-  const { mkdtemp } = await import("node:fs/promises");
+test("a fresh cloudflare start mints the owner on the tunnel's origin, never loopback", async () => {
+  const { mkdtemp, readFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const dir = await mkdtemp(join(tmpdir(), "pupkeep-mint-"));
-  const d = deps({
-    serverEntry: { command: "node", args: ["server.ts"] },
-    mintOwnerLink: async (_dir, origin) => (origin ? { link: `${origin}/login?token=x`, minted: true } : "no-origin"),
-  });
-  const launcher = createLauncher(options(["--access", "cloudflare", "--data", dir]), d);
+  // Verbatim from the pinned binary (P5-01b Finding 4's fix has to read the real
+  // banner, not a hand-written guess).
+  const banner =
+    "2026-11-10T22:00:08Z INF |  https://territory-enlargement-plane-ripe.trycloudflare.com                                |\n";
+
+  const children: StoppableChild[] = [];
+  const origins: Array<string | undefined> = [];
+  const launcher = createLauncher(
+    options(["--access", "cloudflare", "--data", dir]),
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: () => {
+        const child = new StoppableChild();
+        children.push(child);
+        // The tunnel announces its URL on its own schedule, after the spawn.
+        if (children.length === 1) setImmediate(() => child.stdout.emit("data", banner));
+        return child;
+      },
+      mintOwnerLink: async (_dir, origin) => {
+        origins.push(origin);
+        return origin ? { link: `${origin}/login?token=x`, minted: true } : "no-origin";
+      },
+      cloudflaredBinary: "/x/cloudflared",
+      tunnelUrlTimeoutMs: 5_000,
+    }),
+  );
+
   const result = await launcher.start();
   assert.equal(result.ok, true);
-  assert.equal(result.ownerLink, undefined);
-  assert.match(d.logs.join("\n"), /tunnel URL is not known yet/);
+  assert.deepEqual(origins, [undefined, "https://territory-enlargement-plane-ripe.trycloudflare.com"]);
+  assert.equal(children.length, 2, "the tunnel first (to learn the origin), then the server");
+  // The stored credential is for the origin the owner will actually open.
+  const stored = await readFile(join(dir, "owner-link.txt"), "utf8");
+  assert.match(stored, /^https:\/\/territory-enlargement-plane-ripe\.trycloudflare\.com\/login\?token=x$/m);
   await launcher.stop();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("a fresh cloudflare start with no tunnel URL refuses instead of booting ownerless", async () => {
+  const spawned: StoppableChild[] = [];
+  const origins: Array<string | undefined> = [];
+  let released = false;
+  const launcher = createLauncher(
+    options(["--access", "cloudflare"]),
+    deps({
+      acquireLock: async () => ({
+        ok: true as const,
+        lock: { path: "/tmp/lock", pid: 1, release: async () => void (released = true) },
+      }),
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: () => {
+        const child = new StoppableChild();
+        spawned.push(child);
+        return child;
+      },
+      mintOwnerLink: async (_dir, origin) => {
+        origins.push(origin);
+        return "no-origin";
+      },
+      cloudflaredBinary: "/x/cloudflared",
+      tunnelUrlTimeoutMs: 20,
+    }),
+  );
+
+  const result = await launcher.start();
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 6);
+  assert.match(result.message ?? "", /reported no URL within 20 ms/);
+  // A loopback link is a credential nobody can use, so it is never minted — and
+  // with no URL there is not even a second mint attempt to make.
+  assert.deepEqual(origins, [undefined]);
+  assert.equal(spawned.length, 1, "the tunnel only: an ownerless server would crash-loop");
+  // The refusal is a clean stop, not a leak: the tunnel child and the lock are gone.
+  assert.ok(spawned[0]!.kills > 0, "the tunnel was stopped");
+  assert.equal(released, true, "the data-directory lock was released");
+});
+
+test("--reissue-owner in cloudflare mode rotates onto the tunnel origin", async () => {
+  // The runbook's "rotate onto the current tunnel origin" only works if the
+  // reissue also waits for the tunnel: with no origin the mint refuses.
+  const { mkdtemp } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "pupkeep-reissue-"));
+  const children: StoppableChild[] = [];
+  const origins: Array<string | undefined> = [];
+  const launcher = createLauncher(
+    options(["--access", "cloudflare", "--data", dir, "--reissue-owner"]),
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: () => {
+        const child = new StoppableChild();
+        children.push(child);
+        if (children.length === 1) {
+          setImmediate(() =>
+            child.stdout.emit("data", "INF |  https://d-e-f.trycloudflare.com  |\n"),
+          );
+        }
+        return child;
+      },
+      mintOwnerLink: async (_dir, origin) => {
+        origins.push(origin);
+        return origin ? { link: `${origin}/login?token=x`, minted: true } : "no-origin";
+      },
+      cloudflaredBinary: "/x/cloudflared",
+      tunnelUrlTimeoutMs: 5_000,
+    }),
+  );
+
+  const result = await launcher.start();
+  assert.equal(result.ok, true);
+  assert.deepEqual(origins, [undefined, "https://d-e-f.trycloudflare.com"]);
+  await launcher.stop();
+  await rm(dir, { recursive: true, force: true });
 });

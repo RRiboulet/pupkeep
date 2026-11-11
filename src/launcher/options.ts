@@ -15,6 +15,13 @@ export interface LauncherOptions {
   boot: boolean;
   /** Rotate the owner token and print a fresh link. */
   reissueOwner: boolean;
+  /**
+   * Retry the tasks a previous process parked at the harness's restart limit,
+   * once, on this start. The operator's only way out of a park: a parked task
+   * stays blocked across restarts, and nothing else in the product calls
+   * `harness.retryTask()` (P5-01).
+   */
+  retryParked: boolean;
   /** `--help` was asked for; the caller prints usage and exits 0. */
   help: boolean;
   /**
@@ -40,6 +47,7 @@ Usage: npm start -- [options]
   --data <dir>        data directory                         (default: ~/.pupkeep)
   --boot              non-interactive: write the owner link, never print it
   --reissue-owner     rotate the owner token and print a fresh link
+  --retry-parked      retry tasks parked at the restart limit, once, on this start
   -h, --help          show this help
 
 Environment (development only): PUPKEEP_ACCESS, PUPKEEP_PORT, PUPKEEP_DATA_DIR.
@@ -88,6 +96,7 @@ export function parseOptions(
   let dataDir = env.PUPKEEP_DATA_DIR && env.PUPKEEP_DATA_DIR !== "" ? env.PUPKEEP_DATA_DIR : "~/.pupkeep";
   let boot = false;
   let reissueOwner = false;
+  let retryParked = false;
   let help = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -143,6 +152,12 @@ export function parseOptions(
         reissueOwner = true;
         break;
       }
+      case "--retry-parked": {
+        const bad = rejectValue("--retry-parked");
+        if (bad) return bad;
+        retryParked = true;
+        break;
+      }
       case "--help":
       case "-h":
         help = true;
@@ -164,6 +179,7 @@ export function parseOptions(
       port,
       boot,
       reissueOwner,
+      retryParked,
       help,
       interactive: !boot && isTTY,
       dataDir: isAbsolute(expanded) ? resolve(expanded) : resolve(home, expanded),

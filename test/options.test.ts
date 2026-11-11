@@ -13,6 +13,7 @@ test("defaults: local access, port 8787, ~/.pupkeep", () => {
     dataDir: "/home/owner/.pupkeep",
     boot: false,
     reissueOwner: false,
+    retryParked: false,
     help: false,
     // No TTY in a test runner: never print a token by default.
     interactive: false,
@@ -37,6 +38,19 @@ test("--boot and --reissue-owner are switches", () => {
   assert.ok(parsed.ok);
   assert.equal(parsed.options.boot, true);
   assert.equal(parsed.options.reissueOwner, true);
+});
+
+test("--retry-parked is a switch and refuses a value", () => {
+  const parsed = parseOptions(["--retry-parked"], {}, HOME);
+  assert.ok(parsed.ok);
+  assert.equal(parsed.options.retryParked, true);
+  assert.equal(parsed.options.boot, false, "the operator's own start, not a boot path");
+
+  // A value would read as a task id to whoever typed it, and this flag retries
+  // every parked task. Refuse it rather than silently ignore the value.
+  const bad = parseOptions(["--retry-parked=1"], {}, HOME);
+  assert.equal(bad.ok, false);
+  assert.match(bad.ok ? "" : bad.error, /does not take a value/);
 });
 
 test("environment fills the defaults, and flags win over it", () => {
