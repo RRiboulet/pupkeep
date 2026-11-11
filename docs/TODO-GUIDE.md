@@ -68,7 +68,14 @@ task is **P5-01** (the kill/restart matrix on the phone). The backlog request
 to edit meal times after setup landed as **P4-11** (the Settings “Meal times”
 card, reusing the wizard’s slot editor; the wizard hides its own meal section
 once setup is complete). P0-03/P0-08/P0-10
-remain device-gated partner checks and do not block the host-side work.
+remain device-gated partner checks and do not block the host-side work. **P5-10**
+(real-browser render checks) is landed: `test/browser-render.test.ts` lays the
+real app out in a pinned Chromium at 320/360/390/430 px, and its first run found
+that the bottom nav was 459 px wide inside every phone viewport, so the sixth tab
+was unreachable; the Notifications tab is now "Alerts" (its `aria-label`
+unchanged) at a `0.75rem` tab font. `playwright` is a pinned dev dependency and
+the suite skips where no browser is installed — CI and the devcontainer install
+it.
 
 The owner's browser path now has its own suite: `test/owner-ui.test.js` drives
 the real views through the real `requestJson` against a real app over HTTP (only
@@ -254,6 +261,7 @@ Next: <task IDs>
 | `P5-07` | Performance and data growth | G4 | phase-5, runtime, durability |
 | `P5-08` | Release | G5 | phase-5, release, docs |
 | `P5-09` | Final docs and limitations | P5-08 | phase-5, docs |
+| `P5-10` | Real-browser render checks at phone widths (Playwright) | P1-10 | phase-5, tests, web |
 
 ## 9. Stop rules
 

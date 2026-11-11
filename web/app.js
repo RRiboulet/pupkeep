@@ -35,12 +35,16 @@ const VIEWS = new Map([
   ["settings", Settings],
 ]);
 
+// `label` is the tab's accessible name and the screen's own title; `short` is
+// what the narrow tab shows. Six tabs in a 320 px viewport leave about 45 px of
+// text each, which "Notifications" cannot use: at the nav's font size it needs
+// 115 px, so the sixth tab was pushed off the screen entirely (P5-10).
 const NAV_ITEMS = [
   { id: "today", label: "Today" },
   { id: "calendar", label: "Calendar" },
   { id: "pup", label: "Pup" },
   { id: "agent", label: "Agent" },
-  { id: "notifications", label: "Notifications" },
+  { id: "notifications", label: "Notifications", short: "Alerts" },
   { id: "settings", label: "Settings" },
 ];
 
@@ -58,7 +62,7 @@ function Nav({ route }) {
             aria-current=${route === item.id ? "page" : "false"}
             aria-label=${item.id === "notifications" && badge !== "" ? `Notifications, ${unread} unread` : item.label}
           >
-            ${item.label}${item.id === "notifications" && badge !== ""
+            ${item.short ?? item.label}${item.id === "notifications" && badge !== ""
               ? html`<span class="badge badge--nav">${badge}</span>`
               : null}
           </a>

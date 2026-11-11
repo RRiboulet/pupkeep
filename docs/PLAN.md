@@ -1908,7 +1908,34 @@ Pi Pocket style, simplified for two caregivers:
 - Battery/heat over a day; no wake-lock leak.
 - Backup over mobile data/Wi-Fi; restore.
 
-### 15.5 Acceptance gates
+### 15.5 Browser render tests
+
+A real browser, because none of the three Node-level seams can see a layout. The
+view suites use a fake `request`, `test/owner-ui.test.js` bridges the real
+`requestJson` over HTTP, and the route suites hand-build requests — all three are
+green while a phone shows a screen the product does not have. CSS is in none of
+them.
+
+`test/browser-render.test.ts` boots the real app on a real port, opens it in a
+pinned Chromium at the phone widths in §15.4 (320, 360, 390 and 430 px), signs in
+with the owner's session cookie, and asserts:
+
+- the bottom nav fits its viewport and no tab leaves the screen — the P5-10
+  regression, where the nav was 459 px wide on every phone;
+- no tab clips its own label inside its box, and the Notifications tab keeps its
+  full accessible name under the "Alerts" shorthand;
+- an unread badge does not widen the nav — it renders the app's own store state
+  with the count at 3 and re-checks the row;
+- every screen paints its heading, and no screen logs a console error;
+- nothing makes the page scroll sideways.
+
+The browser is a dev dependency (`playwright`, pinned exact), never a runtime one
+— the phone does not run it. `npm ci` does not download it, so with no browser
+present the suite skips with that reason instead of failing; CI
+(`.github/workflows/ci.yml`) and the devcontainer
+(`.devcontainer/postCreate.sh`) install it, which is where the gate holds.
+
+### 15.6 Acceptance gates
 
 | Gate | Must pass |
 |---|---|
@@ -4705,6 +4732,34 @@ changes nothing until confirmed.
       checkpoint policy, retention.
 - [ ] **P5-08** Release: version, changelog, tag, deploy notes, VPS fallback.
 - [ ] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
+- [ ] **P5-10** Real-browser render checks: a suite that lays the app out in a
+      real browser at phone widths, so a CSS regression is caught before a phone
+      shows it. **Landed (2026-11-11, host-side, no device):**
+      `test/browser-render.test.ts` boots the real app on a port, signs in with
+      the owner's session cookie, and asserts at 320/360/390/430 px that the
+      bottom nav fits, that no tab leaves the viewport or clips its label, that
+      the Notifications tab keeps its full accessible name under the "Alerts"
+      shorthand, that every screen paints its heading, and that no screen logs a
+      console error. **It found a real defect on its first run:**
+      `.bottom-nav__item` was `flex: 1` with the default `min-width: auto`, so the
+      row grew to its labels — 459 px inside a 320–430 px viewport — and the sixth
+      tab sat outside the screen with no way to reach it, because the nav is
+      `position: fixed` and the page therefore never grows a scrollbar. No suite
+      had ever laid the app out, which is why 818 green tests and a phone-width
+      product shipped a five-tab nav. Fixed by showing the Notifications tab as
+      "Alerts" (its `aria-label` still reads "Notifications, N unread") and
+      pinning the tab font to `0.75rem`: 310 px of label in a 320 px row, 68 px
+      inside the next-narrowest. **The badge was the other half of it:** drawn
+      beside the label it added 26 px, so the row came back to 332 px in a
+      320 px viewport exactly when a notification was unread — the state the tab
+      exists for. It is now positioned in the tab's corner, where it costs the
+      row nothing, and a fourth test renders the real store's unread state to
+      hold that. `playwright` is a pinned dev dependency; `npm ci`
+      never downloads a browser, so the suite skips where one is absent and CI
+      plus the devcontainer install it (PLAN §15.5). **Not verified:** nothing
+      interactive was rendered — no form submit, no approval card, no dialog —
+      no service worker or Web Push, no PWA install, no WebKit/Safari leg, and no
+      real phone (P5-01b's re-walk and P5-03's partner leg stay open).
 
 **Gate G5:** restore works on a clean host; phone reboot recovers; two-client
 E2E passes; no agent tool can escape app state.

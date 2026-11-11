@@ -42,6 +42,14 @@ jobs:
       - name: Install exact dependencies
         run: npm ci
 
+      # The render checks (test/browser-render.test.ts) skip when no browser is
+      # present, so this step is what makes the layout gate real on a pull
+      # request. The browser version comes from the locked `playwright` dev
+      # dependency, so a run is reproducible; the apt libraries are the
+      # runner's.
+      - name: Install the Chromium the render checks drive
+        run: npx playwright install --with-deps chromium
+
       - name: Typecheck (erasable syntax only)
         run: npm run typecheck
 

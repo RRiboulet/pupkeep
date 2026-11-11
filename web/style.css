@@ -82,7 +82,13 @@ body {
   z-index: 1;
 }
 
+/* Six tabs, and the row has to hold them on a 320 px screen. `flex: 1` alone
+   lets each tab grow to its own label instead of shrinking, so the row was
+   459 px wide on every phone and the sixth tab sat outside the viewport
+   (P5-10). The label size is what makes them fit; the tab keeps its accessible
+   name in `aria-label`, which is where the full word lives. */
 .bottom-nav__item {
+  position: relative;
   flex: 1;
   display: flex;
   align-items: center;
@@ -91,6 +97,7 @@ body {
   color: var(--muted);
   text-decoration: none;
   font-weight: 600;
+  font-size: 0.75rem;
   transition: color 120ms ease;
 }
 
@@ -903,9 +910,20 @@ a.button {
   text-align: center;
 }
 
+/* The unread count is drawn in the tab's corner instead of beside its label:
+   in the flow it widened the tab by 26 px, which put the sixth one off-screen
+   again on a 320 px phone — exactly when there was something to read (P5-10).
+   Absolute, it costs the row nothing, and the tab's own height leaves room
+   above the centred label. */
 .badge--nav {
-  margin-left: 0.15rem;
-  vertical-align: super;
+  position: absolute;
+  top: 0.15rem;
+  right: 0.2rem;
+  margin-left: 0;
+  min-width: 1rem;
+  padding: 0 0.25rem;
+  font-size: 0.6rem;
+  line-height: 1rem;
 }
 
 .notification-list {
