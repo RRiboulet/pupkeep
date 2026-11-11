@@ -27,7 +27,7 @@
 // Web Push event handlers (push, notificationclick) are P4-05's; the payload is
 // validated and carries the category title only.
 
-const VERSION = "pupkeep-shell-v15";
+const VERSION = "pupkeep-shell-v16";
 const CACHE = `pupkeep-static-${VERSION}`;
 
 // Relative to the worker's scope. Only minimum shell assets: the document,

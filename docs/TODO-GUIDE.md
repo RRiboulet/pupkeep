@@ -72,10 +72,12 @@ remain device-gated partner checks and do not block the host-side work. **P5-10*
 (real-browser render checks) is landed: `test/browser-render.test.ts` lays the
 real app out in a pinned Chromium at 320/360/390/430 px, and its first run found
 that the bottom nav was 459 px wide inside every phone viewport, so the sixth tab
-was unreachable; the Notifications tab is now "Alerts" (its `aria-label`
-unchanged) at a `0.75rem` tab font. `playwright` is a pinned dev dependency and
-the suite skips where no browser is installed — CI and the devcontainer install
-it.
+was unreachable. The notification tab now shows "Alerts" with the full word kept
+in its accessible name ("Alerts, notifications, N unread"), at a `0.75rem` tab
+font with a shrinkable label, so a scaled font ellipsises instead of pushing a
+tab off-screen. `playwright` is a pinned dev dependency; the suite skips where no
+browser is installed, fails instead on CI, and CI plus the devcontainer install
+one.
 
 The owner's browser path now has its own suite: `test/owner-ui.test.js` drives
 the real views through the real `requestJson` against a real app over HTTP (only

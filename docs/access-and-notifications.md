@@ -102,8 +102,8 @@ There are three paths. Only the first is authoritative.
 
 ### 4.1 The in-app notification centre (both caregivers)
 
-The **Notifications** tab (with an unread count on it) opens the centre: every
-item for *you*, newest first, with a reading state. It is the record — a
+The **Alerts** tab — the notification centre, with the unread count on it — opens
+every item for *you*, newest first, with a reading state. It is the record — a
 notification a phone never showed is still here. Settings → Notifications lets
 each of you choose which categories you get and sends a test.
 

@@ -1658,7 +1658,10 @@ displayed but not pushed in v1.
 ### 13.2 Shape
 
 - Mobile-first, thumb-reachable bottom navigation: Today, Calendar, Pup, Agent,
-  Settings.
+  Alerts (the notification centre, badge included), Settings. Six text tabs do
+  not fit a 320 px screen at full size, so the notification tab's visible label
+  is the shorthand "Alerts" while its accessible name still says
+  "Alerts, notifications, N unread" (P5-10).
 - Desktop: sidebar + wider layout.
 - PWA manifest + home-screen icons on the host/localhost and the HTTPS test
   origin; the partner’s daily Tailscale origin is a browser app.
@@ -1893,6 +1896,11 @@ Pi Pocket style, simplified for two caregivers:
 
 ### 15.4 Phone tests
 
+- Viewport widths that must work: **320, 360, 390 and 430 CSS px** — an iPhone SE
+  (1st gen) at the floor, Android phones around 360–412, and the larger iPhones
+  at the top. The browser render checks (§15.5) use exactly these, and the footer
+  nav has 10 px of headroom at 320 px, so a longer tab label or a bigger badge
+  breaks the floor first.
 - Termux install on the daily phone.
 - `termux-wake-lock`, Termux:Boot, `sv`/tmux, battery settings.
 - Phone reboot → launcher starts → `harness.resume()`.
@@ -1922,18 +1930,27 @@ with the owner's session cookie, and asserts:
 
 - the bottom nav fits its viewport and no tab leaves the screen — the P5-10
   regression, where the nav was 459 px wide on every phone;
-- no tab clips its own label inside its box, and the Notifications tab keeps its
-  full accessible name under the "Alerts" shorthand;
-- an unread badge does not widen the nav — it renders the app's own store state
-  with the count at 3 and re-checks the row;
+- no tab clips its own label inside its box;
+- the short tab's visible text ("Alerts") is contained in its accessible name,
+  which still says which screen it is — WCAG 2.5.3 (Label in Name), because a
+  speech-input user says the word they can see;
+- an unread badge does not widen the nav: the fixture serves `GET
+  /api/notifications/unread` so the count arrives through the app's own code,
+  and the badge must also clear the label it sits above;
+- an 18 px and a 20 px root font (Android's text scale, WCAG 1.4.4's 200%) still
+  leaves every tab inside a 320 px viewport — the labels may ellipsise, but no
+  tab may become unreachable;
 - every screen paints its heading, and no screen logs a console error;
 - nothing makes the page scroll sideways.
 
 The browser is a dev dependency (`playwright`, pinned exact), never a runtime one
-— the phone does not run it. `npm ci` does not download it, so with no browser
-present the suite skips with that reason instead of failing; CI
-(`.github/workflows/ci.yml`) and the devcontainer
-(`.devcontainer/postCreate.sh`) install it, which is where the gate holds.
+— the phone does not run it — and `npm ci` downloads no browser. With none
+present the suite **skips with that reason** so a fresh container still runs the
+rest, **except on CI, where a missing browser fails the run**: a green suite that
+measured nothing is the silent failure this gate exists to prevent.
+`test/ci.test.ts` asserts that the workflow installs Chromium before `npm test`,
+so the workflow cannot lose the step, and `.devcontainer/postCreate.sh` installs
+it too.
 
 ### 15.6 Acceptance gates
 
@@ -4738,28 +4755,47 @@ changes nothing until confirmed.
       `test/browser-render.test.ts` boots the real app on a port, signs in with
       the owner's session cookie, and asserts at 320/360/390/430 px that the
       bottom nav fits, that no tab leaves the viewport or clips its label, that
-      the Notifications tab keeps its full accessible name under the "Alerts"
-      shorthand, that every screen paints its heading, and that no screen logs a
-      console error. **It found a real defect on its first run:**
-      `.bottom-nav__item` was `flex: 1` with the default `min-width: auto`, so the
-      row grew to its labels — 459 px inside a 320–430 px viewport — and the sixth
-      tab sat outside the screen with no way to reach it, because the nav is
+      every screen paints its heading and logs no console error, that the short
+      notification tab's visible text is contained in its accessible name, that
+      an unread badge does not widen the row, and that an 18 px or 20 px root
+      font (Android's text scale, WCAG 1.4.4's 200%) still leaves every tab on
+      screen. **It found a real defect on its first run:** `.bottom-nav__item`
+      was `flex: 1` with the default `min-width: auto`, so the row grew to its
+      labels — 459 px inside a 320–430 px viewport — and the sixth tab sat
+      outside the screen with no way to reach it, because the nav is
       `position: fixed` and the page therefore never grows a scrollbar. No suite
       had ever laid the app out, which is why 818 green tests and a phone-width
-      product shipped a five-tab nav. Fixed by showing the Notifications tab as
-      "Alerts" (its `aria-label` still reads "Notifications, N unread") and
-      pinning the tab font to `0.75rem`: 310 px of label in a 320 px row, 68 px
-      inside the next-narrowest. **The badge was the other half of it:** drawn
-      beside the label it added 26 px, so the row came back to 332 px in a
-      320 px viewport exactly when a notification was unread — the state the tab
-      exists for. It is now positioned in the tab's corner, where it costs the
-      row nothing, and a fourth test renders the real store's unread state to
-      hold that. `playwright` is a pinned dev dependency; `npm ci`
-      never downloads a browser, so the suite skips where one is absent and CI
-      plus the devcontainer install it (PLAN §15.5). **Not verified:** nothing
-      interactive was rendered — no form submit, no approval card, no dialog —
-      no service worker or Web Push, no PWA install, no WebKit/Safari leg, and no
-      real phone (P5-01b's re-walk and P5-03's partner leg stay open).
+      product shipped a five-tab nav. **The fix is a content budget, and it took
+      three parts:** the Notifications tab shows "Alerts" (115 px of label the
+      row could not afford) with the full word kept in its accessible name —
+      `"Alerts, notifications, N unread"`, visible text first per WCAG 2.5.3
+      (Label in Name), because a speech-input user says what they can see; the
+      tab font is pinned to `0.75rem`; and the items are `flex: 1 1 auto` with
+      `min-width: 0` and an ellipsising label, which is what keeps the row inside
+      the viewport when a caregiver scales text up rather than letting a tab walk
+      off the edge again. Measured headroom: **10 px at 320 px** (310 px of label
+      in a 320 px row), 50 px at 360, 80 at 390, 120 at 430 — thin at the floor
+      by design, which is why the text-scale leg exists. **The badge was the
+      other half of it:** drawn beside the label it added 26 px, so the row came
+      back to 332 px in a 320 px viewport exactly when a notification was unread
+      — the state the tab exists for. It is now positioned in the tab's corner,
+      where it costs the row nothing, and its test serves `GET
+      /api/notifications/unread` so the count arrives through the product's own
+      code rather than a store poke that the SSE-triggered refresh would wipe.
+      `playwright` is a pinned dev dependency and never reaches the phone
+      runtime; `npm ci` downloads no browser, so the suite skips where one is
+      absent **except on CI, where a missing browser is a failure** and
+      `test/ci.test.ts` asserts the workflow's install step, so the gate cannot
+      go quietly vacuous (PLAN §15.5). **Not verified:** nothing interactive was
+      rendered — no form submit, no approval card, no dialog — no service worker
+      or Web Push, no PWA install, no WebKit/Safari leg, and no real phone
+      (P5-01b's re-walk and P5-03's partner leg stay open). CI's Linux font
+      metrics are not Android's, so the 10 px floor is corroborated on a desktop
+      Chromium and still needs the phone, and at 320 px the labels begin to
+      ellipsise just above the default text scale — every tab stays reachable and
+      its accessible name intact, but whether "To…/Cale…/Setti…" reads acceptably
+      on an Android "Large" setting is exactly the sort of thing only the phone
+      can answer.
 
 **Gate G5:** restore works on a clean host; phone reboot recovers; two-client
 E2E passes; no agent tool can escape app state.

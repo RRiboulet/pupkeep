@@ -24,6 +24,23 @@ test("application CI typechecks and runs the test suite on every pull request", 
   assert.match(workflow, /^\s+permissions:\n\s+contents: read$/m);
 });
 
+test("CI installs the browser the render checks drive, so they cannot silently skip", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+  // `test/browser-render.test.ts` skips when no Chromium is present, which keeps
+  // a fresh container green. That makes this step the only thing standing
+  // between the layout gate and a permanently skipped suite (P5-10), so the
+  // workflow may not lose it.
+  assert.match(
+    workflow,
+    /^\s+- name: .*\n\s+run: npx playwright install --with-deps chromium$/m,
+    "the render checks need CI to install the browser before `npm test`",
+  );
+  // …and it has to run before the suite, or it installs a browser nobody uses.
+  const install = workflow.indexOf("npx playwright install");
+  const suite = workflow.indexOf("run: npm test");
+  assert.ok(install !== -1 && suite !== -1 && install < suite, "the install must precede the test step");
+});
+
 test("npm test is the Node test runner over the suite files, so CI runs the same suite as local work", async () => {
   const manifest = JSON.parse(await readFile(packagePath, "utf8")) as {
     scripts: Record<string, string>;

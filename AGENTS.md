@@ -24,14 +24,19 @@ close/reopen, a cancelled one never firing, the dedupe key as the push tag) and
 **P4-11** (the Settings "Meal times" card, so the schedule can be edited after
 setup without reopening the wizard) are complete, so **Phase 4 is done and
 Gate G4's automated half is covered**; the
-next task is **P5-01** (the kill/restart matrix on the phone). **P5-10**
-(real-browser render checks) landed beside it and needs no device:
+next task is **P5-01** (the kill/restart matrix on the phone).
+
+**P5-10** (real-browser render checks) landed beside it and needs no device:
 `test/browser-render.test.ts` lays the real app out in a pinned Chromium at
-320/360/390/430 px, and its first run found that the bottom nav was 459 px wide
-on every phone, so the sixth tab could never be reached; the Notifications tab
-now shows as "Alerts" with its `aria-label` unchanged. `playwright` is a
-devDependency only — the suite skips where no browser is installed, and CI plus
-`postCreate.sh` install one (PLAN §15.5). The agent can only *propose* an appointment or meal-schedule change; a
+320/360/390/430 px. Its first run found the bottom nav 459 px wide inside every
+phone viewport, so the sixth tab could never be reached; the notification tab now
+shows as "Alerts" (accessible name "Alerts, notifications, N unread", so WCAG
+Label-in-Name still holds) and the row shrinks with a scaled font instead of
+pushing a tab off the edge. `playwright` is a devDependency only, never part of
+the phone runtime; the suite skips where no browser is installed and fails
+instead on CI, which plus `postCreate.sh` installs one (PLAN §15.5).
+
+The agent can only *propose* an appointment or meal-schedule change; a
 caregiver's confirmation route executes the stored action in one commit. The
 **Agent** screen is now the shared thread: it renders the transcript, collapsed
 tool cards, the **Waiting for your confirmation** proposal cards (Confirm /

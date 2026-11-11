@@ -118,8 +118,9 @@ single major that would make one of the two environments non-conforming.
 `mcr.microsoft.com/devcontainers/javascript-node:24-bookworm` and installs Node
 24, pi coding agent `1.5.0`, sqlite3, cloudflared, rclone, tmux, gh, jq, age,
 expect and the rest of the host tooling. Open the repo with the Dev Containers
-extension; `postCreate.sh` runs `npm ci`, `npm run typecheck` and `npm test`, and
-seeds `.env` only when it is absent.
+extension; `postCreate.sh` runs `npm ci`, installs the Chromium the render checks
+drive, then `npm run typecheck` and `npm test`, and seeds `.env` only when it is
+absent.
 
 On a host with no editor — the phone-hosted or headless case — use `devc` from
 `my-agent-setup` instead, which is the same `devcontainer up` plus an interactive
@@ -169,6 +170,8 @@ from a phone reaches the dev server without opening a port to the internet.
 npm ci                 # installs the pinned runtime deps (no native modules)
 npm run typecheck      # tsc --noEmit; erasable-only syntax, so node can strip it
 npm test               # node --test, TypeScript directly, no build step
+npx playwright install --with-deps chromium
+                       # once per container: the render checks skip without it
 npm start              # launcher -> server
 npm run backup -- --data ~/.pupkeep --remote <rclone:path>
 npm run restore -- --data ~/.pupkeep --archive <file.age> --force

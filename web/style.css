@@ -82,15 +82,20 @@ body {
   z-index: 1;
 }
 
-/* Six tabs, and the row has to hold them on a 320 px screen. `flex: 1` alone
-   lets each tab grow to its own label instead of shrinking, so the row was
-   459 px wide on every phone and the sixth tab sat outside the viewport
-   (P5-10). The label size is what makes them fit; the tab keeps its accessible
-   name in `aria-label`, which is where the full word lives. */
+/* Six tabs, and the row has to hold them on a 320 px screen.
+   `flex: 1` alone sets a zero basis and no floor, so each tab grew to its own
+   label instead of shrinking: the row was 459 px wide on every phone and the
+   sixth tab sat outside the viewport with no scrollbar to reach it (P5-10).
+   `1 1 auto` starts each tab at its label's width and grows into the leftover,
+   so the ordinary case fills the row exactly; `min-width: 0` is what lets a
+   user who scales text up (Android font size, browser default) shrink the tabs
+   instead of pushing one off the screen, and the label ellipsises rather than
+   spilling. */
 .bottom-nav__item {
   position: relative;
-  flex: 1;
   display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
   align-items: center;
   justify-content: center;
   padding: 0.25rem;
@@ -99,6 +104,12 @@ body {
   font-weight: 600;
   font-size: 0.75rem;
   transition: color 120ms ease;
+}
+
+.bottom-nav__label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .bottom-nav__item.is-current {
