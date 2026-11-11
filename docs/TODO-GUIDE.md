@@ -75,7 +75,12 @@ tunnel origin — is done). The backlog request
 to edit meal times after setup landed as **P4-11** (the Settings “Meal times”
 card, reusing the wizard’s slot editor; the wizard hides its own meal section
 once setup is complete). P0-03/P0-08/P0-10
-remain device-gated partner checks and do not block the host-side work.
+remain device-gated partner checks and do not block the host-side work. **P5-06**
+(the security review) is complete: [`security-review.md`](security-review.md)
+records thirteen adversarial attempts and [`../test/security.test.ts`](../test/security.test.ts)
+is their executable half, including the load-bearing agent-escape allowlist. The
+next host-side task is **P5-07** (performance and data growth); P5-09 and P5-08
+follow it.
 
 The owner's browser path now has its own suite: `test/owner-ui.test.js` drives
 the real views through the real `requestJson` against a real app over HTTP (only
