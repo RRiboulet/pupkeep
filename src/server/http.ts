@@ -200,7 +200,12 @@ export const CLIENT_ID_LIMIT = 100;
 /** Fixed custom header every mutation must carry (§14.2); P1-10 sends it. */
 export const REQUEST_HEADER = "x-pupkeep-request";
 export const REQUEST_HEADER_VALUE = "1";
-/** SSE keep-alive; short enough to survive phone TCP idle timeouts. */
+/**
+ * SSE keep-alive; short enough to survive phone TCP idle timeouts. The client's
+ * `SILENCE_MS` (`web/live.js`) is derived from this interval: silence longer
+ * than it turns the stream into the polling fallback, so raising this without
+ * raising that would make a healthy stream look buffered.
+ */
 export const KEEPALIVE_MS = 15_000;
 
 const BUSY_MESSAGE =

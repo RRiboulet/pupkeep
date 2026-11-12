@@ -21,8 +21,9 @@
 //     is dropped, because arrival order is not freshness order;
 //   * one stream. The shell already owns the single `/api/agent/events`
 //     EventSource (live.js); this view subscribes to it and opens a poll only
-//     when the browser has no EventSource at all. Two connections from one tab
-//     would spend two of the per-member slots for no gain;
+//     when the browser has no EventSource at all or when the shell reports that
+//     the stream has gone silent and fallen back to polling. Two connections
+//     from one tab would spend two of the per-member slots for no gain;
 //   * busy is global. One caregiver's submission disables the other's composer
 //     and says who is being answered; v1 rejects input while a run owns the
 //     thread, so a 409 keeps the draft and the key for a safe retry;
@@ -32,7 +33,12 @@
 //     list and shows the server's sentence;
 //   * text is rendered as text. Entries come from caregivers and the model, so
 //     no `innerHTML`, no inline style, no inline handler anywhere (CSP
-//     `default-src 'self'`).
+//     `default-src 'self'`). A model reply's bold, inline code and bullet lists
+//     are the one exception to "one text node": `markdown.js` parses a tiny
+//     subset into plain records and `markdown-view.js` maps them to vnodes, so
+//     the caregiver reads `Breakfast` instead of `**Breakfast**` and the model's
+//     characters still never become markup. A caregiver's own typing is shown
+//     literally, as typed.
 //
 // The class, not a hook: the shell serves no import map and the vendored hooks
 // module imports a bare `preact` specifier (PLAN §13.2).
@@ -40,11 +46,12 @@
 import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
 import { NetworkError, newIdempotencyKey, requestJson } from "../client.js";
-import { subscribeThread } from "../live.js";
+import { isPolling, subscribeThread } from "../live.js";
 import { pendingSave } from "../profile-form.js";
 import { getState } from "../store.js";
 import { dateText, localDate, localTimeText } from "../clock.js";
 import { budgetPercent, budgetStateText, spendText } from "../models.js";
+import { MarkdownText } from "../markdown-view.js";
 
 const html = htm.bind(h);
 
@@ -232,7 +239,7 @@ export class Agent extends Component {
     void this.loadStatus();
     void this.loadSession();
 
-    if (typeof EventSource !== "function") this.startPolling();
+    if (typeof EventSource !== "function" || isPolling()) this.startPolling();
 
     this.expiryTimer = setInterval(() => {
       if (this.unmounted) return;
@@ -256,7 +263,7 @@ export class Agent extends Component {
     this.unmounted = true;
     this.unsubscribeThread?.();
     if (this.refreshTimer !== undefined) clearTimeout(this.refreshTimer);
-    if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
+    this.stopPolling();
     if (this.expiryTimer !== undefined) clearInterval(this.expiryTimer);
     if (this.busyTimer !== undefined) clearInterval(this.busyTimer);
     if (this.sendWatchdog !== undefined) clearTimeout(this.sendWatchdog);
@@ -306,6 +313,9 @@ export class Agent extends Component {
         // A reconnect is a catch-up point: the stream does not replay commits
         // that landed while it was down, and approvals have no frame of their
         // own. The snapshot is authoritative, so one read of each is enough.
+        // Polling itself may need to stop first (a stream that was silent and
+        // has recovered): a leftover poll timer would fight the live frames.
+        this.stopPolling();
         // `seq` is a per-process counter and restarts at 0 with the server, so
         // the ordering baseline must not survive a reattach: a fresh counter
         // would otherwise look older than every snapshot and freeze the thread.
@@ -315,6 +325,11 @@ export class Agent extends Component {
         void this.loadThread();
         void this.loadApprovals();
         void this.loadStatus();
+        return;
+      case "poll":
+        // The shell's stream connected but stayed silent (a buffering
+        // tunnel), so the care state is now polled and this screen follows.
+        this.startPolling();
         return;
       case "reconnect":
       case "error":
@@ -484,18 +499,23 @@ export class Agent extends Component {
   }
 
   /**
-   * The no-EventSource fallback. The long-poll route always answers a full
+   * The no-EventSource fallback, also used when the stream connects but stays
+   * silent (a buffering tunnel). The long-poll route always answers a full
    * snapshot, so the same `applySnapshot` order guard applies; approvals have
    * no long-poll frame, so they are read on the same cadence.
    */
   startPolling() {
+    if (this.pollTimer !== undefined) return;
+    // A tick that was awaiting a read when the stream recovered must not
+    // schedule another poll after `stopPolling` cleared the timer.
+    const token = (this.pollToken = (this.pollToken ?? 0) + 1);
     this.setState({ connection: "polling" });
     const tick = async () => {
-      if (this.unmounted) return;
+      if (this.unmounted || this.pollToken !== token) return;
       const applied = await this.loadThread(
         `/api/agent/events/poll?since=${Math.max(0, this.seqFloor ?? 0)}&ms=${POLL_INTERVAL_MS}`,
       );
-      if (this.unmounted) return;
+      if (this.unmounted || this.pollToken !== token) return;
       void this.loadApprovals();
       // The model/usage read is the expensive one; polling needs it for the
       // composer's budget state, not on every thread tick.
@@ -506,6 +526,13 @@ export class Agent extends Component {
       this.pollTimer = setTimeout(tick, applied ? 250 : POLL_INTERVAL_MS);
     };
     this.pollTimer = setTimeout(tick, 0);
+  }
+
+  /** Stop the fallback loop, if it is running; safe to call repeatedly. */
+  stopPolling() {
+    this.pollToken = (this.pollToken ?? 0) + 1;
+    if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
+    this.pollTimer = undefined;
   }
 
   // --- reads ---------------------------------------------------------------
@@ -1022,10 +1049,14 @@ export class Agent extends Component {
     }
 
     if (entry?.kind === "assistant") {
+      // The reply's bubble owns real blocks now, and it is written on one line
+      // with no whitespace around the child: the bubble is `pre-wrap`, so a
+      // text node left by the template's indentation would print as a blank
+      // line before the first paragraph.
       return html`
         <li key=${`assistant-${entry.entryId}`} class="thread__entry thread__entry--agent">
           <p class="thread__meta">Assistant${meta ? html` · ${meta}` : null}</p>
-          <p class="thread__bubble thread__bubble--agent">${entry.text}</p>
+          <div class="thread__bubble thread__bubble--agent"><${MarkdownText} text=${entry.text} /></div>
         </li>
       `;
     }

@@ -68,6 +68,23 @@ function deviceToday() {
   return new Date().toISOString().slice(0, 10);
 }
 
+/**
+ * The detail card's When line: "13 Nov 2026, 10:30–11:00 · 30 min".
+ *
+ * The separator is part of the string rather than markup whitespace: htm strips
+ * the whitespace around a newline between two expressions, so a template that
+ * put the range and the duration on separate lines rendered them glued
+ * together ("10:30–11:0030 min"). `durationText()` is "" for a missing or
+ * non-positive duration, so the separator is added only when there is a
+ * duration to separate — an empty one leaves no trailing " · ".
+ */
+function whenText(appointment, zoneMismatch) {
+  const range = `${dateText(appointment.localDate)}, ${timeRangeText(appointment)}`;
+  const duration = durationText(appointment.durationMin);
+  const zone = zoneMismatch ? ` (${appointment.timezone})` : "";
+  return duration ? `${range} · ${duration}${zone}` : `${range}${zone}`;
+}
+
 export class Calendar extends Component {
   state = {
     /** The month the grid shows; corrected to the server's today on first load. */
@@ -502,10 +519,7 @@ export class Calendar extends Component {
         <h2 id="calendar-detail" class="card__title">${appointment.title}</h2>
         <dl class="calendar__facts">
           <dt>When</dt>
-          <dd>
-            ${dateText(appointment.localDate)}, ${timeRangeText(appointment)}
-            ${durationText(appointment.durationMin)}${zoneMismatch ? ` (${appointment.timezone})` : ""}
-          </dd>
+          <dd>${whenText(appointment, zoneMismatch)}</dd>
           ${appointment.location ? html`<dt>Where</dt><dd>${appointment.location}</dd>` : null}
           ${appointment.vetName ? html`<dt>Vet</dt><dd>${appointment.vetName}</dd>` : null}
           ${appointment.notes ? html`<dt>Notes</dt><dd>${appointment.notes}</dd>` : null}
