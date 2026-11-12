@@ -27,7 +27,7 @@ import { NetworkError, requestJson } from "../client.js";
 import { pendingSave } from "../profile-form.js";
 import { getState, subscribe } from "../store.js";
 import { feedTimeText, localDate, mealClock, mealRows } from "../meals.js";
-import { correctedNow, timerText, walkMinutes, walkSeconds, walkStale, walkTimeText } from "../walks.js";
+import { correctedNow, startedText, timerText, walkMinutes, walkSeconds, walkStale, walkTimeText } from "../walks.js";
 import { nextAppointmentText } from "../calendar.js";
 import { Setup } from "./setup.js";
 
@@ -598,7 +598,6 @@ export class Today extends Component {
     const nowMs = this.walkNow();
     const stale = open ? walkStale(open.startedAt, nowMs, data?.staleAfterMs) : false;
     const todayDate = localDate(new Date(nowMs), timezone);
-    const startDate = open ? localDate(new Date(open.startedAt), timezone) : null;
     const busy = this.state.walkBusy !== null;
     const draft = this.state.walkDraft;
     const field = (name, label, extra = {}) => html`
@@ -644,10 +643,7 @@ export class Today extends Component {
                   <p class="walk__who">
                     ${open.startedByLabel} is walking — <span role="timer" aria-label=${`Walk started at ${walkTimeText(open.startedAt, timezone)}`}>${stale ? `${timerText((data?.staleAfterMs ?? 0) / 1000)}+` : timerText(walkSeconds(open.startedAt, nowMs))}</span>
                   </p>
-                  <p class="field__hint">
-                    Started ${startDate === todayDate ? "at" : `on ${startDate} at`}
-                    ${walkTimeText(open.startedAt, timezone)}${timezone ? ` (${timezone})` : ""}
-                  </p>
+                  <p class="field__hint">${startedText(open.startedAt, timezone, todayDate)}</p>
                   ${
                     stale
                       ? html`<p class="notice notice--warn">
