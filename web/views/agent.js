@@ -33,7 +33,12 @@
 //     list and shows the server's sentence;
 //   * text is rendered as text. Entries come from caregivers and the model, so
 //     no `innerHTML`, no inline style, no inline handler anywhere (CSP
-//     `default-src 'self'`).
+//     `default-src 'self'`). A model reply's bold, inline code and bullet lists
+//     are the one exception to "one text node": `markdown.js` parses a tiny
+//     subset into plain records and `markdown-view.js` maps them to vnodes, so
+//     the caregiver reads `Breakfast` instead of `**Breakfast**` and the model's
+//     characters still never become markup. A caregiver's own typing is shown
+//     literally, as typed.
 //
 // The class, not a hook: the shell serves no import map and the vendored hooks
 // module imports a bare `preact` specifier (PLAN §13.2).
@@ -46,6 +51,7 @@ import { pendingSave } from "../profile-form.js";
 import { getState } from "../store.js";
 import { dateText, localDate, localTimeText } from "../clock.js";
 import { budgetPercent, budgetStateText, spendText } from "../models.js";
+import { MarkdownText } from "../markdown-view.js";
 
 const html = htm.bind(h);
 
@@ -1043,10 +1049,14 @@ export class Agent extends Component {
     }
 
     if (entry?.kind === "assistant") {
+      // The reply's bubble owns real blocks now, and it is written on one line
+      // with no whitespace around the child: the bubble is `pre-wrap`, so a
+      // text node left by the template's indentation would print as a blank
+      // line before the first paragraph.
       return html`
         <li key=${`assistant-${entry.entryId}`} class="thread__entry thread__entry--agent">
           <p class="thread__meta">Assistant${meta ? html` · ${meta}` : null}</p>
-          <p class="thread__bubble thread__bubble--agent">${entry.text}</p>
+          <div class="thread__bubble thread__bubble--agent"><${MarkdownText} text=${entry.text} /></div>
         </li>
       `;
     }

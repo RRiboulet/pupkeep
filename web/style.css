@@ -1116,6 +1116,34 @@ a.button {
   background: #f0e9fd;
 }
 
+/* A reply's bubble holds real blocks (web/markdown-view.js), not one text node.
+   Without these three rules the browser's own `<p>`/`<ul>` margins would add a
+   blank line around every paragraph and the bullets would hang outside the
+   bubble's padding. Nothing else is restyled: `strong` is bold by default and
+   prose keeps the bubble's typography. */
+.thread__bubble--agent p,
+.thread__bubble--agent ul {
+  margin: 0;
+}
+
+.thread__bubble--agent ul {
+  padding-left: 1.1rem;
+}
+
+/* `> * + *` rather than a bottom margin, so the last block never adds space
+   below the bubble's own padding. */
+.thread__bubble--agent > * + * {
+  margin-top: 0.4rem;
+}
+
+.thread__bubble--agent code {
+  padding: 0 0.2rem;
+  background: #ffffff;
+  border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.92em;
+}
+
 .thread__end {
   height: 0;
   /* Keep the newest bubble clear of the sticky composer and the bottom nav. */
