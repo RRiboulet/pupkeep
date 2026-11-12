@@ -18,7 +18,11 @@ import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
 
-import { isPolling, startLive, subscribeThread, type LiveDeps } from "../web/live.js";
+// `web/` is plain JS the browser loads directly and tsc does not type, so the
+// specifier is not a literal here: the import yields `any` instead of demanding
+// a declaration, the same seam the other web tests use (`test/client.test.js`).
+const LIVE = "../web/live.js";
+const { isPolling, startLive, subscribeThread } = await import(LIVE);
 
 type Listener = (event?: unknown) => void;
 
@@ -70,7 +74,7 @@ const TIMING = { firstFrameMs: 100, silenceMs: 400, pollMs: 25, retryMs: 500 };
  * enough away in the default timing that a test which does not want one never
  * sees it; the recovery tests override the timings.
  */
-function harness(overrides: LiveDeps = {}) {
+function harness(overrides: Record<string, unknown> = {}) {
   const sources: FakeSource[] = [];
   const counts = { refresh: 0, badge: 0 };
   const live = startLive({
@@ -94,7 +98,7 @@ function harness(overrides: LiveDeps = {}) {
 test("a stream that opens and then stays silent falls back to polling", async () => {
   const { live, sources, counts } = harness();
   const events: Array<{ type: string }> = [];
-  const stop = subscribeThread((event) => events.push(event as { type: string }));
+  const stop = subscribeThread((event: unknown) => events.push(event as { type: string }));
 
   sources[0]!.fire("open");
   assert.equal(counts.refresh, 1, "the open frame reads the care state once");
@@ -119,7 +123,7 @@ test("a stream that opens and then stays silent falls back to polling", async ()
 test("a healthy stream never polls and reads the care state only on open", async () => {
   const { live, sources, counts } = harness();
   const events: Array<{ type: string }> = [];
-  const stop = subscribeThread((event) => events.push(event as { type: string }));
+  const stop = subscribeThread((event: unknown) => events.push(event as { type: string }));
 
   sources[0]!.fire("open");
   sources[0]!.fire("snapshot", snapshotFrame(1));
@@ -174,7 +178,7 @@ test("a retry source that delivers its snapshot switches back to the live stream
     pollMs: 20,
   });
   const events: Array<{ type: string }> = [];
-  const stop = subscribeThread((event) => events.push(event as { type: string }));
+  const stop = subscribeThread((event: unknown) => events.push(event as { type: string }));
 
   sources[0]!.fire("open");
   assert.ok(await waitFor(() => isPolling()));
@@ -256,4 +260,74 @@ test("close stops every timer, including the poll and retry loops", async () => 
     true,
     "no source is left open",
   );
+});
+
+test("an outage that keeps emitting errors still falls back to polling", async () => {
+  // EventSource retries every few seconds. An `error` is not a frame: if it
+  // re-armed the silence clock, a connect-failure loop (origin down, a 502 from
+  // the tunnel) would keep the watchdog away and the fallback would never run.
+  const { live, sources } = harness({ firstFrameMs: 120, silenceMs: 200, pollMs: 20, retryMs: 1000 });
+  const events: Array<{ type: string }> = [];
+  const stop = subscribeThread((event: unknown) => events.push(event as { type: string }));
+
+  try {
+    sources[0]!.fire("open");
+    sources[0]!.fire("snapshot", snapshotFrame(1));
+    assert.equal(isPolling(), false, "one good frame means the body flowed");
+
+    // Errors every 30 ms: a re-arming clock would never fire, so only the last
+    // real frame's timer can trip the fallback.
+    let errors = 0;
+    for (let index = 0; index < 12 && !isPolling(); index += 1) {
+      sources[0]!.fire("error");
+      errors += 1;
+      await sleep(30);
+    }
+
+    assert.ok(errors >= 3, "the outage delivered several retries");
+    assert.equal(isPolling(), true, "repeated errors must not keep the fallback away");
+    assert.equal(sources[0]!.closed, true, "the failing source is closed");
+    assert.equal(
+      events.filter((event) => event.type === "error").length,
+      errors,
+      "every attempt is still reported while the fallback is pending",
+    );
+  } finally {
+    stop();
+    live.close();
+  }
+});
+
+test("a probe the server closes is not promoted as a recovered stream", async () => {
+  // `bus.subscribe` sends `reconnect` on cap eviction and shutdown. Promoting
+  // that probe would stop the poll loop and announce `open` for a connection
+  // that is already ended.
+  const { live, sources, counts } = harness({ firstFrameMs: 500, silenceMs: 500, pollMs: 20, retryMs: 60 });
+  const events: Array<{ type: string }> = [];
+  const stop = subscribeThread((event: unknown) => events.push(event as { type: string }));
+
+  try {
+    sources[0]!.fire("open");
+    assert.ok(await waitFor(() => isPolling()));
+    assert.ok(await waitFor(() => sources.length >= 2), "the fallback probes the stream");
+
+    const probe = sources[sources.length - 1]!;
+    const before = events.length;
+    probe.fire("reconnect");
+
+    assert.equal(isPolling(), true, "a closed probe is not a recovered transport");
+    assert.equal(probe.closed, true, "the probe is dropped");
+    assert.deepEqual(
+      events.slice(before).map((event) => event.type),
+      [],
+      "no catch-up burst for a connection the server just closed",
+    );
+
+    const after = counts.refresh;
+    await sleep(80);
+    assert.ok(counts.refresh > after, "the care poll loop keeps running");
+  } finally {
+    stop();
+    live.close();
+  }
 });

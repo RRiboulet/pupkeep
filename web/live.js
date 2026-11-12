@@ -23,9 +23,9 @@ const RECONNECT_DELAY_MS = 1000;
 // headers, then no body bytes — not the snapshot frame, not the heartbeat
 // (cloudflared#1449). A healthy stream is chatty, so silence is diagnosable:
 //
-//   * the server writes the thread snapshot before the response headers
-//     (`handleEvents`), so an open stream has a frame within milliseconds;
-//     5 s without one means the response body is being held;
+//   * `handleEvents` writes its headers, a `retry:` comment and then the
+//     snapshot in one synchronous block, so an open stream has a frame within
+//     milliseconds; 5 s without one means the response body is being held;
 //   * the server's heartbeat is every 15 s (`KEEPALIVE_MS` in
 //     `src/server/http.ts`), so 20 s without any frame means the transport is
 //     buffering, not merely idle.
@@ -177,6 +177,11 @@ export function startLive(deps = {}) {
     pollTimer = clearTimer(pollTimer);
   };
 
+  // In polling mode one tab holds a long-poll slot (`agent.js`) plus this
+  // fallback's probe for up to `firstFrameMs` every `retryMs`. Two tabs of one
+  // caregiver can therefore reach the server's four-per-member cap briefly;
+  // the cap evicts the oldest connection rather than failing, so the evicted
+  // poll answers 503 and the Agent screen retries on its next tick.
   const startPollLoop = () => {
     const tick = async () => {
       if (closed || !polling) return;
@@ -254,8 +259,12 @@ export function startLive(deps = {}) {
 
   /**
    * Wire one EventSource. The same handlers serve the live source and a probe:
-   * `active` drops frames from a connection that has been replaced, and every
-   * frame (not just `snapshot`) proves the body is flowing.
+   * `active` drops frames from a connection that has been replaced. Every
+   * event that carries a body frame (`snapshot`, `batch`, `heartbeat`,
+   * `profile`) proves the body is flowing and restarts the silence clock. An
+   * `error` is evidence the body is *not* flowing, so it must not restart it:
+   * EventSource retries every few seconds, and a re-arming clock would keep
+   * the watchdog from ever firing during an outage that fails on connect.
    */
   const attach = (candidate) => {
     const active = () => !closed && (source === candidate || probe === candidate);
@@ -304,12 +313,13 @@ export function startLive(deps = {}) {
 
     // The browser is retrying by itself; tell the Agent screen so it can show a
     // polite reconnecting state rather than an unexplained gap. A probe's error
-    // is not reported: the probe is ours, and polling is still working.
+    // is not reported: the probe is ours, and polling is still working. The
+    // watchdog armed by the last real frame (or by `openStream`) keeps running,
+    // so an outage that lasts past `silenceMs` still reaches polling.
     candidate.addEventListener("error", () => {
       if (!active()) return;
       if (probe === candidate) return;
       notifyThread({ type: "error" });
-      frame();
     });
 
     // A full view, not a delta: applying it is a replacement, so a missed frame
@@ -330,6 +340,16 @@ export function startLive(deps = {}) {
     // browser's own retry would replay the same dead connection, so close and
     // open a fresh one instead (which starts from a fresh snapshot).
     candidate.addEventListener("reconnect", () => {
+      if (probe === candidate) {
+        // The server is closing this probe (cap eviction, shutdown). That is
+        // not a recovered body: drop the probe and let the next retry try
+        // again, without promoting a connection that is already ended.
+        probe = null;
+        probeTimer = clearTimer(probeTimer);
+        candidate.close();
+        scheduleRetry();
+        return;
+      }
       if (!frame()) return;
       notifyThread({ type: "reconnect" });
       if (source === candidate) source = null;
@@ -343,6 +363,10 @@ export function startLive(deps = {}) {
     if (closed || polling) return;
     source = makeSource("/api/agent/events");
     attach(source);
+    // A connection that never opens (a hung TCP connect, an intermediary that
+    // never returns headers) emits no event at all, so the first-frame clock
+    // starts at creation, not at `open`.
+    armWatchdog(firstFrameMs);
   };
 
   openStream();
