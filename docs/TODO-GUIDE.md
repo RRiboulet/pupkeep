@@ -266,6 +266,8 @@ Next: <task IDs>
 | `P4-10` | Phase 4 tests | P4-03..P4-07 | phase-4, tests |
 | `P4-11` | Backlog: edit the meal schedule outside the wizard | P4-07 | phase-4, feature, ui, feeding |
 | `P5-01` | Kill/restart matrix on the phone | G4 | phase-5, durability, host |
+| `P5-01a` | Host half: kill matrix and the `--retry-parked` operator path (done) | G4 | phase-5, durability, test, cli |
+| `P5-01b` | Phone half: the walk, its recorded findings, and the boot/tunnel follow-ups | P5-01a | phase-5, phone, durability, docs |
 | `P5-02` | Backup/restore drill | P0-07, G4 | phase-5, durability, security |
 | `P5-03` | Two-client E2E (partner leg also needs P0-10) | G4 | phase-5, tests, web |
 | `P5-04` | Termux scripts and runbook polish | P1-13, P4-09 | phase-5, docs, host |
@@ -274,7 +276,7 @@ Next: <task IDs>
 | `P5-07` | Performance and data growth | G4 | phase-5, runtime, durability |
 | `P5-08` | Release | G5 | phase-5, release, docs |
 | `P5-09` | Final docs and limitations | P5-08 | phase-5, docs |
-| `P5-10` | Real-browser render checks at phone widths (Playwright) | P1-10 | phase-5, tests, web |
+| `P5-10` | Real-browser render checks at phone widths (Playwright; host half landed, phone leg open) | P1-10 | phase-5, tests, web |
 
 ## 9. Stop rules
 

@@ -7,7 +7,8 @@ The plan is the source of truth for product and architecture; the guide explains
 how to pick a task, branch, verify and report. Do not build app code beyond the
 current approved phase.
 
-**Current phase: Phase 4** (calendar, reminders, push, approvals). Phase 3 is
+**Current phase: Phase 5** (host-side hardening, then release; Phase 4 is
+complete through P4-11). Phase 3 is
 complete on `main` through P3-08; Gate G3 is covered by
 `test/dual-path.test.ts`. Phase 1 is complete through P1-14 and Phase 2 through
 P2-09. **P4-01** (`app.calendar` and its service), **P4-02** (appointment HTTP,
