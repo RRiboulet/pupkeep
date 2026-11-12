@@ -79,8 +79,10 @@ remain device-gated partner checks and do not block the host-side work. **P5-06*
 (the security review) is complete: [`security-review.md`](security-review.md)
 records thirteen adversarial attempts and [`../test/security.test.ts`](../test/security.test.ts)
 is their executable half, including the load-bearing agent-escape allowlist. The
-next host-side task is **P5-07** (performance and data growth); P5-09 and P5-08
-follow it. **P5-10** (real-browser render checks) is landed too:
+host half of **P5-07** (performance and data growth) is done — the numbers and
+the checkpoint decision are in [`data-growth.md`](data-growth.md), and the
+feeding archive is its carried follow-up; its phone half stays open. **P5-08**
+(release) and **P5-09** (final docs) are the next host-side tasks. **P5-10** (real-browser render checks) is landed too:
 `test/browser-render.test.ts` lays the real app out in a pinned Chromium at
 320/360/390/430 px, and its first run found the bottom nav 459 px wide inside
 every phone viewport, so the sixth tab was unreachable. The notification tab now

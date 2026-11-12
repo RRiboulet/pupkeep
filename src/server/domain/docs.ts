@@ -34,9 +34,15 @@
 // silent reset: resetting would discard members, settings or pending
 // idempotency records.
 //
-// `checkpointWhen` stores a full base every 100 deltas. The documents are small;
-// the point is to bound replay and to keep the policy explicit rather than a
-// permanent `() => false`.
+// `checkpointWhen` stores a base instead of a delta. This storage writes a
+// delta as the **whole document value**, so a window of N keeps up to N full
+// copies on disk and makes a cold read parse all of them — it buys no replay
+// saving that a base does not. P5-07 measured it (`docs/data-growth.md`): at
+// 900 feeds (196 KiB document) a window of 100 cost 21 MiB and a 97 ms first
+// read against 800 KiB and 8.7 ms at a window of 1, while the commit cost was
+// identical (33 ms) because either way the value is written whole. A window of
+// 1 — at most one delta between bases — is therefore the tightest bound on
+// both the file and the replay, and that is what the documents use.
 
 import type { Context } from "@earendil-works/chord";
 import type { CheckpointInfo, DocumentReader, Tx } from "@earendil-works/pi-durable";
@@ -105,7 +111,7 @@ export function checkpointEvery(deltas: number): (_value: unknown, _ops: unknown
   return (_value, _ops, info) => info.deltasSinceBase >= deltas;
 }
 
-const CHECKPOINT_DELTAS = 100;
+const CHECKPOINT_DELTAS = 1;
 
 export function emptyHousehold(): Household {
   return {

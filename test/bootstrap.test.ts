@@ -395,7 +395,10 @@ test("a model attached to the system conversation is cleared on boot", async () 
 
 test("the document checkpoints after a bounded number of deltas", () => {
   const household: Household = emptyHousehold();
-  assert.equal(HouseholdDoc.definition.checkpointWhen(household, [], { deltasSinceBase: 99 }), false);
-  assert.equal(HouseholdDoc.definition.checkpointWhen(household, [], { deltasSinceBase: 100 }), true);
+  // P5-07 measured the window: a delta is the whole document value in this
+  // storage, so 100 multiplied disk and cold start for no commit saving
+  // (`docs/data-growth.md` §3). At most one delta between bases is the bound.
+  assert.equal(HouseholdDoc.definition.checkpointWhen(household, [], { deltasSinceBase: 0 }), false);
+  assert.equal(HouseholdDoc.definition.checkpointWhen(household, [], { deltasSinceBase: 1 }), true);
   assert.ok(parseHousehold(household) === undefined, "the empty initial value is never a valid persisted household");
 });

@@ -33,8 +33,14 @@ cells still need a re-run on the device, and its host-side follow-up — the tun
 URL parser, the tunnel restart line, minting the owner on the tunnel origin — is
 done). **P5-06** (the security review) is done too: `docs/security-review.md` and
 `test/security.test.ts`, including the agent-escape allowlist. The next host-side
-task is **P5-07**; what remains for Phase 5 otherwise needs the phone (P5-01b's
-re-walk, P5-02, P5-05) or the release and docs passes (P5-08, P5-09).
+task is **P5-07**, whose host half is done: [`docs/data-growth.md`](docs/data-growth.md)
+records the measurements and chose the checkpoint policy (`CHECKPOINT_DELTAS`
+is 1: a document delta is the whole value here, so the old window of 100 cost
+100x the disk and cold start for nothing). Its carried follow-up is the feeding
+archive — a data-model change, needed before ~1 100 events — and its phone half
+stays open. What remains for Phase 5 otherwise needs the phone (P5-07's
+commit/WAL numbers, P5-01b's re-walk, P5-02, P5-05) or the release and docs
+passes (**P5-08**, **P5-09**), which are the next host-side tasks.
 
 **P5-10** (real-browser render checks) landed beside them and needs no device:
 `test/browser-render.test.ts` lays the real app out in a pinned Chromium at

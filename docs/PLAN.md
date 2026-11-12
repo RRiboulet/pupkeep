@@ -956,10 +956,13 @@ the executed result; P4-08 adds `app.usage` with the monthly baseline. Each
 value carries `schemaVersion: 1` and its Pi Durable document version is 1; a
 future change increments both and adds `migrate(value, fromVersion)`. An unknown schema version, or a malformed
 value, fails boot rather than resetting the document — a reset would lose
-members, settings or pending idempotency records. `checkpointWhen` stores a
-base every 100 deltas. Activity keeps its last 200 entries and commands keep
-24h/1000, enforced in the domain helpers as each document first gains a writer
-(activity and commands with P1-11).
+members, settings or pending idempotency records. `checkpointWhen` keeps at
+most **one delta between bases** (P5-07 measured the window: this storage stores
+a delta as the whole document value, so 100 multiplied disk and cold start by
+100 for no commit cost — `docs/data-growth.md` §3). Activity keeps its last 200
+entries and commands keep 24h/1000, enforced in the domain helpers as each
+document first gains a writer (activity and commands with P1-11); P5-07 measured
+both caps holding.
 
 The first shape change is P1-11's `app.puppy.rev`: the value is schema 2 and
 the document version 2, and `migrate` fills `rev: 0` for a version-1 document so
@@ -1124,8 +1127,11 @@ or "Household" and the confirming human.
   pending, unread or undelivered items.
 - Terminal Pi Durable task records remain; they are small. Prune only with a
   tested migration; never raw-SQL prune Pi tables.
-- `checkpointWhen` stores a base periodically (e.g. every 100–200 deltas or at a
-  day boundary) to bound replay.
+- `checkpointWhen` keeps at most **one delta between bases**, measured rather
+  than guessed (P5-07, `docs/data-growth.md` §3): a delta is the whole document
+  value here, so a window of N keeps N copies on disk and parses them on a cold
+  read, while a base costs the same write. The window is a disk/replay bound,
+  not a latency one.
 - **Clock/DST:** reminder sleeps are capped in chunks (e.g. ≤6h) and re-armed
   after a detected clock jump. `localDate` is derived from the event `at` in the
   household timezone, never from client input. Nonexistent/ambiguous local slot
@@ -4882,7 +4888,28 @@ changes nothing until confirmed.
       are P0-10's; the chroot DNS failure stays P5-01b's. Suite 849/849, typecheck
       clean.
 - [ ] **P5-07** Performance/data growth: commit latency on phone, doc sizes,
-      checkpoint policy, retention.
+      checkpoint policy, retention. **The host half landed (2026-11-12, no
+      device):** `scripts/measure-growth.ts` seeds a household of N days through
+      the real `logFeed` (300 feeds, 200 walks and 15 weights per 100 days),
+      then measures document sizes, the real read costs, commit latency, the
+      SQLite/WAL files, a cold reopen and the real `backup.ts` archive;
+      [`data-growth.md`](data-growth.md) is the record. **Numbers:** feeding is
+      ~217 bytes/event and a commit is linear in the document — 14 ms at 300
+      feeds, 53 ms at 1 500 (1.4 years of 3 meals a day), 159 ms at 4 500 — so
+      the 3 000-day seed (9 000 feeds) did not finish in ten minutes. The
+      activity cap holds at 33.6 KiB and the commands TTL keeps that document at
+      ~1.4 KiB (the 1000 cap is a backstop). **Fixed:** `CHECKPOINT_DELTAS` went
+      from 100 to **1**. A document delta is the whole value in this storage, so
+      the window multiplied both the file and the cold read by 100 for no commit
+      cost: at 900 feeds, 20.7 MiB and 97 ms became 800 KiB and 8.7 ms; at 1 500
+      feeds the encrypted backup went from 4.9 MiB to 162 KiB. Pinned by
+      `test/checkpoint-policy.test.ts`. **Carried:** feeding (and later walks)
+      must be archived before ~1 100 events — a data-model change (per-month
+      documents or an export plus a pruned document), not a constant, and it
+      must keep one-commit care actions and lose no history. The archive covers
+      feeding, walks and growth together. **Open:** the phone half (commit
+      latency and WAL on Termux storage, battery), which the same script runs
+      unchanged.
 - [ ] **P5-08** Release: version, changelog, tag, deploy notes, VPS fallback.
 - [ ] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
 - [ ] **P5-10** Real-browser render checks: a suite that lays the app out in a
