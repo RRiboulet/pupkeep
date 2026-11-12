@@ -4805,6 +4805,29 @@ changes nothing until confirmed.
       failure (the child exits ~5 ms after `Requesting new quick Tunnel`) — that is
       recorded in the matrix and still needs the operator's eyes, and cell 5 is
       re-walked with the P5-04 boot fix.
+      **Found by the host-side browser walk (2026-11-12, no device):** a quick
+      tunnel cannot carry the live stream at all. Cloudflare buffers a streaming
+      GET response on quick tunnels (cloudflared#1449 — a named tunnel streams;
+      the account-less quick tunnel is a demo product with guardrails): the
+      browser receives the `200` and the headers and then **no body bytes** — not
+      the snapshot, not the 15 s heartbeat — measured with `curl -N` and an
+      in-page `fetch` while `127.0.0.1` delivered the snapshot immediately. So
+      over `--access cloudflare` care state never updated live, and the Agent
+      screen only caught up through its 15 s busy watchdog (repeat snapshot
+      reads) — the long-poll fallback the plan requires only engaged when
+      `EventSource` was missing, never when it connected and stayed silent.
+      **Fixed:** `web/live.js` now diagnoses the silence from the server's own
+      contract (the snapshot lands within milliseconds of `open`; the heartbeat
+      is 15 s, `KEEPALIVE_MS`), closes the stream, polls the care state every 4 s
+      and tells the Agent screen to long-poll, and probes the stream again every
+      60 s — a probe that delivers a frame returns the page to live frames with
+      no reload. An `error` does not count as a frame (EventSource retries would
+      otherwise keep the watchdog away forever), a probe the server closes with
+      `reconnect` is retried rather than promoted, and the first-frame clock
+      starts at source creation so a connection that never opens also falls
+      back. `test/live-fallback.test.ts` pins all of it. The documented
+      HTTPS/PWA/push test path therefore still works, but "live over the tunnel"
+      means polling, not SSE; the daily Tailscale path is unchanged.
 - [ ] **P5-02** Backup/restore drill: clean Termux + Docker/VPS; encrypted copy;
       restore an interrupted generation; **rotate the passphrase** and confirm
       recovery without it stored beside the archive. The job, remote and
@@ -4827,7 +4850,10 @@ changes nothing until confirmed.
       accepts and resets every connection. **Still open:** `pkg upgrade` before
       `pkg install` (the index moved nodejs without libicu and left `node`
       unlinkable), and a re-walk of the reboot cell now that the boot path is
-      fixed.
+      fixed. The tunnel side of the runbook needs no change, but it now degrades
+      honestly: a quick tunnel cannot stream SSE, so the client polls (P5-01b's
+      2026-11-12 note) and the `--access cloudflare` test step is still the
+      supported way to check HTTPS, the PWA and Web Push.
 - [ ] **P5-05** Daily-phone battery/heat/phantom-process notes and checks, plus
       the two Phase 0 deferrals: **`termux-wake-lock` effectiveness** (not
       observable from Termux, P0-06) and a **kill/restart re-test with the
@@ -4906,6 +4932,20 @@ changes nothing until confirmed.
       its accessible name intact, but whether "To…/Cale…/Setti…" reads acceptably
       on an Android "Large" setting is exactly the sort of thing only the phone
       can answer.
+      **The same walk (2026-11-12, host-side, no device) found three text
+      defects the suite does not cover:** an appointment's detail rendered
+      `10:30–11:0030 min` (two template expressions on separate lines, whose
+      whitespace htm drops), assistant replies showed the model's raw `**bold**`
+      and `- ` markers, and the walk card read `Started at22:18`. All three are
+      fixed: the appointment and walk-hint sentences are composed in
+      `web/calendar.js`/`web/walks.js` so the separator is part of the text, and
+      assistant bubbles render a small data-only markdown subset
+      (`web/markdown.js` + `web/markdown-view.js` — records and vnodes, no HTML
+      sink, so model text can never become markup). Pinned by
+      `test/calendar-detail.test.ts`, `test/agent-markdown.test.ts` and
+      `test/walk-copy.test.js`. **The checkbox stays open for the phone:** the
+      remaining cell is the nav and text-scale layout on a real device, tracked
+      as a local todo (`P5-10 phone leg`), not a host-side gap.
 
 **Gate G5:** restore works on a clean host; phone reboot recovers; two-client
 E2E passes; no agent tool can escape app state.
