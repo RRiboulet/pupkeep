@@ -18,6 +18,37 @@ import { getState, setState } from "./store.js";
 
 const RECONNECT_DELAY_MS = 1000;
 
+// A stream can connect and then deliver nothing at all. Cloudflare's quick
+// tunnel buffers a streaming GET response: the client sees the `200` and the
+// headers, then no body bytes — not the snapshot frame, not the heartbeat
+// (cloudflared#1449). A healthy stream is chatty, so silence is diagnosable:
+//
+//   * the server writes the thread snapshot before the response headers
+//     (`handleEvents`), so an open stream has a frame within milliseconds;
+//     5 s without one means the response body is being held;
+//   * the server's heartbeat is every 15 s (`KEEPALIVE_MS` in
+//     `src/server/http.ts`), so 20 s without any frame means the transport is
+//     buffering, not merely idle.
+//
+// The fallback polls the care state every 4 s (cheap document reads) and probes
+// the stream again once a minute: a quick tunnel is fixed by a restart or by
+// switching to the daily Tailscale path, and a probe that receives its snapshot
+// switches the page back to live frames without a reload.
+const FIRST_FRAME_MS = 5_000;
+const SILENCE_MS = 20_000;
+const POLL_MS = 4_000;
+const RETRY_MS = 60_000;
+
+/**
+ * Whether the one live transport has fallen back to polling. A view mounted
+ * after the fallback began has no `open`/`poll` frame to learn this from, so it
+ * asks here before deciding whether to start its own poll loop.
+ */
+let polling = false;
+export function isPolling() {
+  return polling;
+}
+
 /**
  * Thread listeners, notified by the one stream `startLive` owns. The payloads
  * mirror the server's wire contract (thread.ts / http.ts `writeEvent`):
@@ -106,42 +137,185 @@ export function startLive(deps = {}) {
     void refreshBadge();
     return { close() {} };
   }
-  let source = null;
-  let retry = null;
-  let closed = false;
 
-  const open = () => {
-    if (closed) return;
-    source = makeSource("/api/agent/events");
+  const firstFrameMs = deps.firstFrameMs ?? FIRST_FRAME_MS;
+  const silenceMs = deps.silenceMs ?? SILENCE_MS;
+  const pollMs = deps.pollMs ?? POLL_MS;
+  const retryMs = deps.retryMs ?? RETRY_MS;
+
+  let source = null;
+  let probe = null;
+  let retry = null;
+  let watchdog = null;
+  let pollTimer = null;
+  let probeTimer = null;
+  let closed = false;
+  // One process, one tab, one transport: a fresh `startLive` owns the mode.
+  polling = false;
+
+  const clearTimer = (handle) => {
+    if (handle !== null) clearTimeout(handle);
+    return null;
+  };
+
+  const stopWatchdog = () => {
+    watchdog = clearTimer(watchdog);
+  };
+
+  // The stream is healthy until it stays silent: `firstFrameMs` after `open`,
+  // then `silenceMs` after every frame. A callback only ever enters polling.
+  const armWatchdog = (ms) => {
+    stopWatchdog();
+    if (closed || polling) return;
+    watchdog = setTimeout(() => {
+      watchdog = null;
+      if (!closed && !polling) enterPolling();
+    }, ms);
+  };
+
+  const stopPollLoop = () => {
+    pollTimer = clearTimer(pollTimer);
+  };
+
+  const startPollLoop = () => {
+    const tick = async () => {
+      if (closed || !polling) return;
+      try {
+        await refresh();
+        await refreshBadge();
+      } catch {
+        // A failed poll is not fatal; the next tick tries again.
+      }
+      if (closed || !polling) return;
+      pollTimer = setTimeout(tick, pollMs);
+    };
+    pollTimer = setTimeout(tick, pollMs);
+  };
+
+  const scheduleRetry = () => {
+    if (closed || !polling || retry !== null) return;
+    retry = setTimeout(() => {
+      retry = null;
+      openProbe();
+    }, retryMs);
+  };
+
+  // A probe is a throwaway EventSource: it either delivers its snapshot within
+  // `firstFrameMs` (and becomes the live source) or it is closed and the next
+  // probe is scheduled, without disturbing the care poll loop.
+  const armProbe = (candidate) => {
+    probeTimer = clearTimer(probeTimer);
+    if (closed || probe !== candidate) return;
+    probeTimer = setTimeout(() => {
+      probeTimer = null;
+      if (closed || probe !== candidate) return;
+      probe = null;
+      candidate.close();
+      scheduleRetry();
+    }, firstFrameMs);
+  };
+
+  const openProbe = () => {
+    if (closed || !polling) return;
+    const candidate = makeSource("/api/agent/events");
+    probe = candidate;
+    attach(candidate);
+    armProbe(candidate);
+  };
+
+  // The probe is alive again: stop the care poll loop and the retry timer, keep
+  // the new source, and tell the Agent screen so it can run its catch-up reads.
+  const promote = (candidate) => {
+    if (closed || probe !== candidate) return;
+    probe = null;
+    probeTimer = clearTimer(probeTimer);
+    polling = false;
+    stopPollLoop();
+    retry = clearTimer(retry);
+    source = candidate;
+    notifyThread({ type: "open" });
+    void refresh();
+    void refreshBadge();
+  };
+
+  const enterPolling = () => {
+    if (closed || polling) return;
+    polling = true;
+    stopWatchdog();
+    if (source !== null) {
+      source.close();
+      source = null;
+    }
+    retry = clearTimer(retry);
+    notifyThread({ type: "poll" });
+    startPollLoop();
+    scheduleRetry();
+  };
+
+  /**
+   * Wire one EventSource. The same handlers serve the live source and a probe:
+   * `active` drops frames from a connection that has been replaced, and every
+   * frame (not just `snapshot`) proves the body is flowing.
+   */
+  const attach = (candidate) => {
+    const active = () => !closed && (source === candidate || probe === candidate);
+
+    const frame = () => {
+      if (!active()) return false;
+      if (probe === candidate) promote(candidate);
+      if (source !== candidate) return false;
+      armWatchdog(silenceMs);
+      return true;
+    };
 
     // Fires on the first connection and on every automatic reconnect.
-    source.addEventListener("open", () => {
+    candidate.addEventListener("open", () => {
+      if (!active()) return;
+      if (probe === candidate) {
+        // The probe opened: its snapshot should follow immediately, so restart
+        // the first-frame clock from the connection rather than its creation.
+        armProbe(candidate);
+        return;
+      }
       notifyThread({ type: "open" });
       void refresh();
       void refreshBadge();
+      armWatchdog(firstFrameMs);
     });
 
     // The server's first frame: the whole thread, so a missed delta cannot
     // leave half-old state on screen.
-    source.addEventListener("snapshot", (event) => {
+    candidate.addEventListener("snapshot", (event) => {
+      if (!frame()) return;
       parsedThreadFrame(event, (snapshot) => notifyThread({ type: "snapshot", snapshot }));
     });
 
     // One commit's raw Pi Durable events. The Agent screen is the one place
     // that understands them; the shell itself only cares about `profile`.
-    source.addEventListener("batch", (event) => {
+    candidate.addEventListener("batch", (event) => {
+      if (!frame()) return;
       parsedThreadFrame(event, (batch) => notifyThread({ type: "batch", ...batch }));
     });
 
+    // A keepalive proves the body is not being buffered. Nothing renders it.
+    candidate.addEventListener("heartbeat", () => {
+      frame();
+    });
+
     // The browser is retrying by itself; tell the Agent screen so it can show a
-    // polite reconnecting state rather than an unexplained gap.
-    source.addEventListener("error", () => {
+    // polite reconnecting state rather than an unexplained gap. A probe's error
+    // is not reported: the probe is ours, and polling is still working.
+    candidate.addEventListener("error", () => {
+      if (!active()) return;
+      if (probe === candidate) return;
       notifyThread({ type: "error" });
+      frame();
     });
 
     // A full view, not a delta: applying it is a replacement, so a missed frame
     // cannot leave half-old state on screen.
-    source.addEventListener("profile", (event) => {
+    candidate.addEventListener("profile", (event) => {
+      if (!frame()) return;
       try {
         applyCareView(JSON.parse(event.data));
       } catch {
@@ -155,24 +329,36 @@ export function startLive(deps = {}) {
     // The server is restarting or shutting down: it asked us to reattach. The
     // browser's own retry would replay the same dead connection, so close and
     // open a fresh one instead (which starts from a fresh snapshot).
-    source.addEventListener("reconnect", () => {
+    candidate.addEventListener("reconnect", () => {
+      if (!frame()) return;
       notifyThread({ type: "reconnect" });
-      source?.close();
-      source = null;
-      if (retry !== null) clearTimeout(retry);
-      retry = setTimeout(open, RECONNECT_DELAY_MS);
+      if (source === candidate) source = null;
+      candidate.close();
+      retry = clearTimer(retry);
+      retry = setTimeout(openStream, RECONNECT_DELAY_MS);
     });
   };
 
-  open();
+  const openStream = () => {
+    if (closed || polling) return;
+    source = makeSource("/api/agent/events");
+    attach(source);
+  };
+
+  openStream();
 
   return {
     close() {
       closed = true;
-      if (retry !== null) clearTimeout(retry);
-      retry = null;
-      source?.close();
+      stopWatchdog();
+      stopPollLoop();
+      retry = clearTimer(retry);
+      probeTimer = clearTimer(probeTimer);
+      if (probe !== null) probe.close();
+      probe = null;
+      if (source !== null) source.close();
       source = null;
+      polling = false;
     },
   };
 }
