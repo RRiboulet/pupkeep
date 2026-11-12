@@ -7,7 +7,7 @@
 // time — a phone whose clock is minutes off still shows the same walk time to
 // both caregivers.
 //
-import { localTimeText } from "./clock.js";
+import { dateText, localDate, localTimeText } from "./clock.js";
 
 // These are plain functions over plain objects, so a Node test can pin the
 // offset, the stale boundary and the timer formatting without a DOM. The zone
@@ -60,4 +60,32 @@ export function walkStale(startedAt, nowMs, staleAfterMs) {
 /** `HH:MM` for a stored instant in the household zone (what the card shows). */
 export function walkTimeText(instant, timezone) {
   return localTimeText(instant, timezone);
+}
+
+/**
+ * The card's "Started …" line, as one string.
+ *
+ * Why a function rather than markup: the sentence used to be built inside the
+ * template as `Started ${sameDay ? "at" : `on ${date} at`}` followed by the
+ * time on the next line, and htm drops the whitespace between two expressions
+ * on separate lines — the card read "Started at22:18". Composing it here makes
+ * the separator part of the text, and lets a test pin it.
+ *
+ * An earlier day is named ("on 11 Nov 2026 at 18:00"), not left as the stored
+ * `2026-11-11`. `todayDate` is the household-local date of the server-corrected
+ * now; before the profile is read it is `null`, and the line falls back to the
+ * same-day form. "at an unknown time" belongs to `localTimeText`'s own
+ * fallback (a malformed instant), so it is not prefixed with a second "at".
+ */
+export function startedText(startedAt, timezone, todayDate) {
+  // Without a household zone `localTimeText` cannot name a time (it says "at an
+  // unknown time"), and the card must not read "Started at at an unknown time".
+  if (!timezone || !Number.isFinite(Date.parse(startedAt))) return "Started at an unknown time";
+  const time = walkTimeText(startedAt, timezone);
+  const zone = timezone ? ` (${timezone})` : "";
+  const startedDate = localDate(new Date(startedAt), timezone);
+  if (startedDate === null || todayDate === null || startedDate === todayDate) {
+    return `Started at ${time}${zone}`;
+  }
+  return `Started on ${dateText(startedDate)} at ${time}${zone}`;
 }
