@@ -22,10 +22,11 @@
 // never client input) and a zone change must not make yesterday's meals
 // unreadable; P2-02's service derives the date when it appends.
 
-import type { FeedEvent, Feeding, MealSlot } from "./domain.ts";
+import type { FeedEvent, Feeding, FeedingArchive, MealSlot } from "./domain.ts";
+import { monthOf, shiftMonth } from "./dates.ts";
 import { isLocalDate, hasControlCharacter } from "./profile.ts";
 import { HOUSEHOLD_FALLBACK_LABEL } from "./chat.ts";
-import { OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
+import { FEEDING_ARCHIVE_SCHEMA_VERSION, OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
 
 /** Most meals a schedule may hold; a puppy eating more than this is a typo. */
 export const MEAL_SLOTS_MAX = 12;
@@ -269,6 +270,37 @@ export function parseFeedEvents(raw: unknown): FeedEvent[] | undefined {
     events.push(event);
   }
   return events;
+}
+
+// --- the monthly archive (P5-07) -------------------------------------------
+
+/**
+ * Most events one archived month may hold. A month with more is a malformed
+ * document, not a household: 31 days of 3 meals plus a generous allowance for
+ * extras leaves this far above any real month, so a legitimate history is never
+ * refused while a corrupt one is.
+ */
+export const FEEDING_ARCHIVE_MAX_EVENTS = 1_000;
+
+/**
+ * One archived month, validated: the stored shape, the month it belongs to,
+ * and the same event invariants as `app.feeding`. The month is checked against
+ * the address it was read from, so a document cannot silently hold another
+ * month's meals.
+ */
+export function parseFeedingArchive(raw: unknown, month: string): FeedingArchive | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const keys = ["schemaVersion", "month", "events", "createdAt"];
+  if (Object.keys(record).some((key) => !keys.includes(key))) return undefined;
+  if (record.schemaVersion !== FEEDING_ARCHIVE_SCHEMA_VERSION) return undefined;
+  if (record.month !== month || shiftMonth(month, 0) !== month) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  if (!Array.isArray(record.events) || record.events.length > FEEDING_ARCHIVE_MAX_EVENTS) return undefined;
+  const events = parseFeedEvents(record.events);
+  if (!events) return undefined;
+  if (events.some((event) => monthOf(event.localDate) !== month)) return undefined;
+  return { schemaVersion: FEEDING_ARCHIVE_SCHEMA_VERSION, month, events, createdAt: record.createdAt };
 }
 
 // --- one day's view (P2-01's pure half; P2-03/P2-04 serve it) ---------------

@@ -1110,15 +1110,22 @@ or "Household" and the confirming human.
 
 ### 8.5 Retention and growth
 
-- Feeding events: keep all in v1; cap or archive by month if the doc grows past
-  a measured threshold. A **partial unique index** enforces one non-null
-  `slotId` per `localDate`; extra feeds have `slotId = NULL`. Both are document
-  invariants (P2-01); the parser refuses a stored double feed rather than
-  repairing it.
-- Growth history: keep all; the same archive path and measured threshold as
-  walks, with the cap decision in P5-07. A weight series is the chart's only
-  source, so nothing is pruned before that measurement exists.
-- Walk history: keep all; same archive path. After 8 hours a walk is **stale**:
+- Feeding events: **archived by month** (P5-07b, measured in
+  [`data-growth.md`](data-growth.md) §5). `app.feeding` keeps the current and
+  previous household month (~110 events, ~24 KiB); older events move on boot,
+  in one commit, into `app.feeding.archive`, one document per `YYYY-MM` — a
+  committed record, never a delete. The move is what keeps a feed commit flat
+  (11–13 ms at 500 and 1 500 days, against 53–159 ms unbounded). A **partial
+  unique index** enforces one non-null `slotId` per `localDate`; extra feeds
+  have `slotId = NULL`. Both are document invariants (P2-01); the parser refuses
+  a stored double feed rather than repairing it.
+- Growth history: **keep all** (P5-07 measured ~80 bytes a record, 42 KiB at
+  1 500 days). The chart's trend windows and its "all measurements" count read
+  the whole list, so archiving it would add a join for no measured saving.
+- Walk history: **archived by month** like feeding (P5-07b): `app.walks` keeps
+  the open walk and the current + previous month; older **closed** walks move to
+  `app.walks.archive`. An open walk never moves, whatever its age. After 8
+  hours a walk is **stale**:
   the banner offers end/discard; `start_walk` returns a stale conflict until it
   is resolved. No auto-close; the record keeps the real timestamps and the UI
   clamps the displayed duration.
@@ -4903,13 +4910,18 @@ changes nothing until confirmed.
       the window multiplied both the file and the cold read by 100 for no commit
       cost: at 900 feeds, 20.7 MiB and 97 ms became 800 KiB and 8.7 ms; at 1 500
       feeds the encrypted backup went from 4.9 MiB to 162 KiB. Pinned by
-      `test/checkpoint-policy.test.ts`. **Carried:** feeding (and later walks)
-      must be archived before ~1 100 events — a data-model change (per-month
-      documents or an export plus a pruned document), not a constant, and it
-      must keep one-commit care actions and lose no history. The archive covers
-      feeding, walks and growth together. **Open:** the phone half (commit
-      latency and WAL on Termux storage, battery), which the same script runs
-      unchanged.
+      `test/checkpoint-policy.test.ts`. **The archive landed too (P5-07b):** events
+      older than the current and previous household month move on boot, in one
+      commit, into `app.feeding.archive`/`app.walks.archive` (one document per
+      `YYYY-MM`, a Pi Durable document family). An open walk never moves, and
+      nothing is dropped. Re-measured with the archive: at 1 500 days the hot
+      documents are ~27 KiB each, a feed commit is 11 ms (was 159), SQLite is
+      2.4 MiB (was 98 MiB), the cold read is 2 ms (was 297) and the backup is
+      326 KiB (was 14.7 MiB) — flat in the household's age. Growth stays whole
+      (42 KiB at 1 500 days). `test/feeding-archive.test.ts` and
+      `test/walks-archive.test.ts` pin the move, its idempotence and the boot
+      seam. **Open:** the phone half (commit latency and WAL on Termux storage,
+      battery), which the same script runs unchanged.
 - [ ] **P5-08** Release: version, changelog, tag, deploy notes, VPS fallback.
 - [ ] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
 - [ ] **P5-10** Real-browser render checks: a suite that lays the app out in a

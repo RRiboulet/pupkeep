@@ -56,6 +56,8 @@ import { createShowerTools } from "./agent/shower-tools.ts";
 import { createCalendarTools } from "./agent/calendar-tools.ts";
 import { createApprovalTools } from "./agent/approval-tools.ts";
 import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
+import { archiveOldFeeds } from "./domain/feeding.ts";
+import { archiveOldWalks } from "./domain/walks.ts";
 import { reconcileUsageMonth } from "./domain/usage.ts";
 import { createAppModels, providersWithKeys, type AppModels } from "./models/collection.ts";
 import { PROBE_FRESH_MS, probeAndCache } from "./models/probe-run.ts";
@@ -590,6 +592,31 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     logger.warn("could not reconcile the feed planner; reminders may wait for the next schedule save", {
       error,
     });
+  }
+
+  // P5-07: feed events older than the hot window move to their month's archive
+  // in one commit, so `app.feeding` stays bounded (every feed commit rewrites
+  // it whole). After the household exists and after the planner has read the
+  // day. A failure is not fatal: the events stay in the hot document and the
+  // next boot retries.
+  try {
+    const archived = await archiveOldFeeds(opened.harness, context, new Date(options.now?.() ?? Date.now()));
+    if (archived.moved > 0) {
+      logger.info("archived feed events", { moved: archived.moved, months: archived.months.length });
+    }
+  } catch (error) {
+    logger.warn("could not archive old feed events; they stay in the hot document until the next boot", { error });
+  }
+
+  // P5-07: the same move for closed walks. An open walk never moves, whatever
+  // its age; it is state a caregiver must resolve.
+  try {
+    const archived = await archiveOldWalks(opened.harness, context, new Date(options.now?.() ?? Date.now()));
+    if (archived.moved > 0) {
+      logger.info("archived walks", { moved: archived.moved, months: archived.months.length });
+    }
+  } catch (error) {
+    logger.warn("could not archive old walks; they stay in the hot document until the next boot", { error });
   }
 
   // P4-08: the monthly baseline is repaired from `harness.usage()` — the ledger —

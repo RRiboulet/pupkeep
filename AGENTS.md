@@ -36,9 +36,11 @@ done). **P5-06** (the security review) is done too: `docs/security-review.md` an
 task is **P5-07**, whose host half is done: [`docs/data-growth.md`](docs/data-growth.md)
 records the measurements and chose the checkpoint policy (`CHECKPOINT_DELTAS`
 is 1: a document delta is the whole value here, so the old window of 100 cost
-100x the disk and cold start for nothing). Its carried follow-up is the feeding
-archive — a data-model change, needed before ~1 100 events — and its phone half
-stays open. What remains for Phase 5 otherwise needs the phone (P5-07's
+100x the disk and cold start for nothing). The follow-up landed with it: feed
+events and closed walks older than the current and previous household month move
+on boot into one committed document per month (`app.feeding.archive`,
+`app.walks.archive`), so a care commit is flat in the household's age (11 ms at
+1 500 days against 159 unbounded). Growth stays whole. Its phone half stays open. What remains for Phase 5 otherwise needs the phone (P5-07's
 commit/WAL numbers, P5-01b's re-walk, P5-02, P5-05) or the release and docs
 passes (**P5-08**, **P5-09**), which are the next host-side tasks.
 

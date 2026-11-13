@@ -49,9 +49,9 @@ import {
   NotificationsDoc,
   WalksDoc,
 } from "../src/server/domain/docs.ts";
-import { logFeed, readFeeding, updateMealSlots } from "../src/server/domain/feeding.ts";
+import { archiveOldFeeds, logFeed, readFeeding, updateMealSlots } from "../src/server/domain/feeding.ts";
 import { readGrowth } from "../src/server/domain/growth.ts";
-import { readWalks } from "../src/server/domain/walks.ts";
+import { archiveOldWalks, readWalks } from "../src/server/domain/walks.ts";
 import { parseGrowthMeasurements } from "../src/shared/growth.ts";
 import { parseWalkList } from "../src/shared/walks.ts";
 import type { MealSlot, Walk, GrowthMeasurement } from "../src/shared/domain.ts";
@@ -65,6 +65,7 @@ Usage: npm run measure:growth -- [options]
   --json <path>     also write the result row as JSON
   --keep            keep the data directory after measuring
   --no-backup       skip the backup/archive measurement (needs age)
+  --no-archive      measure the old unbounded document (no monthly move)
   -h, --help        show this help
 `;
 
@@ -83,6 +84,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 interface Row {
   days: number;
   feeds: number;
+  /** Feed events that the monthly archive moved out of the hot document. */
+  archivedFeeds: number;
+  /** Closed walks the monthly archive moved out of the hot document. */
+  archivedWalks: number;
   walks: number;
   weights: number;
   documents: {
@@ -209,6 +214,7 @@ async function main(): Promise<void> {
       json: { type: "string" },
       keep: { type: "boolean", default: false },
       "no-backup": { type: "boolean", default: false },
+      "no-archive": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
     allowPositionals: false,
@@ -282,6 +288,11 @@ async function main(): Promise<void> {
     });
 
     // --- feeding: real commits, one per meal ------------------------------
+    // P5-07b: a phone boots far more often than monthly, so the default run
+    // archives every 30 seeded days — the shipped shape. `--no-archive`
+    // measures the unbounded document the archive replaced.
+    const archive = !values["no-archive"];
+    let archivedFeeds = 0;
     const commitMs: number[] = [];
     let feeds = 0;
     for (let day = 0; day < days; day += 1) {
@@ -299,6 +310,18 @@ async function main(): Promise<void> {
         commitMs.push(performance.now() - began);
         feeds += 1;
       }
+      if (archive && (day + 1) % 30 === 0) {
+        const moved = await archiveOldFeeds(store, context, new Date(FIRST_DAY + day * DAY_MS + 12 * 60 * 60 * 1000));
+        archivedFeeds += moved.moved;
+      }
+    }
+    if (archive) {
+      const moved = await archiveOldFeeds(
+        store,
+        context,
+        new Date(FIRST_DAY + Math.max(0, days - 1) * DAY_MS + 12 * 60 * 60 * 1000),
+      );
+      archivedFeeds += moved.moved;
     }
 
     // --- walks and growth: one commit each, built by their parsers --------
@@ -327,6 +350,18 @@ async function main(): Promise<void> {
       const draft = await tx.doc(WalksDoc);
       draft.walks = walks;
     }, context);
+
+    // The shipped shape also bounds the walk history (P5-07b); archive it at the
+    // last seeded day so sizes and the file reflect a boot on that date.
+    let archivedWalks = 0;
+    if (archive) {
+      const moved = await archiveOldWalks(
+        store,
+        context,
+        new Date(FIRST_DAY + Math.max(0, days - 1) * DAY_MS + 12 * 60 * 60 * 1000),
+      );
+      archivedWalks = moved.moved;
+    }
 
     const measurements: GrowthMeasurement[] = [];
     for (let week = 0; week < Math.floor(days / 7) + 1; week += 1) {
@@ -384,6 +419,8 @@ async function main(): Promise<void> {
     const row: Row = {
       days,
       feeds,
+      archivedFeeds,
+      archivedWalks,
       walks: walks.length,
       weights: measurements.length,
       documents: {

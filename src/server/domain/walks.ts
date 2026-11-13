@@ -26,8 +26,10 @@ import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import type { Walk, Walks } from "../../shared/domain.ts";
+import { archiveCutoff, monthOf } from "../../shared/dates.ts";
 import {
   WALK_NONE_OPEN_MESSAGE,
+  parseWalksArchive,
   WALK_OBSERVATION_RULE,
   lastEndedWalk,
   openWalk,
@@ -41,8 +43,17 @@ import {
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
 import { requestHashOf, runIdempotent } from "./commands.ts";
-import { ActivityDoc, HouseholdDoc, WalksDoc, parseWalks, type DocStore } from "./docs.ts";
+import {
+  ActivityDoc,
+  HouseholdDoc,
+  WalksArchiveDoc,
+  WalksDoc,
+  parseHousehold,
+  parseWalks,
+  type DocStore,
+} from "./docs.ts";
 import { DomainConflictError, UnavailableError } from "./errors.ts";
+import { localDateAt } from "./time.ts";
 
 /** `app.walks` is missing or unreadable; retry once the server has booted. */
 export class WalksUnavailableError extends UnavailableError {
@@ -387,4 +398,95 @@ export async function discardWalk(
     if (error instanceof WalkMissingRefusal) return { kind: "no-open", message: error.message };
     throw error;
   }
+}
+
+// --- the monthly archive (P5-07) --------------------------------------------
+
+/** Months that stay in `app.walks`: the current one and the previous one. */
+export const WALKS_ARCHIVE_KEEP_MONTHS = 2;
+
+export interface WalkArchiveResult {
+  readonly moved: number;
+  readonly months: readonly string[];
+}
+
+/**
+ * The closed walks that belong to a month before `cutoff`. An **open** walk is
+ * never archivable, whatever its age: it is state a caregiver must resolve
+ * (end or discard), and §8.5 keeps a stale walk visible instead of hiding it.
+ * The household zone decides the month, from the server timestamp.
+ */
+export function archivableWalks(walks: Walks, cutoff: string, timezone: string): Walk[] {
+  return walks.walks.filter((walk) => {
+    if (walk.endedAt === undefined) return false;
+    const month = monthOf(localDateAt(new Date(walk.startedAt), timezone));
+    return month !== undefined && month < cutoff;
+  });
+}
+
+/** Chronological, stable: the archive keeps the hot document's order. */
+function byStartThenId(left: Walk, right: Walk): number {
+  return left.startedAt === right.startedAt ? left.id.localeCompare(right.id) : left.startedAt.localeCompare(right.startedAt);
+}
+
+/**
+ * Move closed walks older than the hot window into their month's archive, in
+ * one commit. Called on boot; idempotent (a second call finds nothing and does
+ * not commit). The same measurement that justifies the feed archive applies
+ * here: a walk start or end rewrites the whole document, so its cost is linear
+ * in the history it holds — ~340 bytes a walk, 2 walks a day.
+ */
+export async function archiveOldWalks(
+  store: DocStore,
+  context: Context,
+  now: Date = new Date(),
+  keepMonths: number = WALKS_ARCHIVE_KEEP_MONTHS,
+): Promise<WalkArchiveResult> {
+  const [walksSnapshot, householdSnapshot] = await Promise.all([
+    store.snapshot(WalksDoc, context),
+    store.snapshot(HouseholdDoc, context),
+  ]);
+  const walks = walksSnapshot === undefined ? undefined : parseWalks(walksSnapshot);
+  const household = householdSnapshot === undefined ? undefined : parseHousehold(householdSnapshot);
+  if (!walks || household === undefined) {
+    throw new WalksUnavailableError("the walk history is not available; retry after boot");
+  }
+  const cutoff = archiveCutoff(localDateAt(now, household.timezone), keepMonths);
+  if (cutoff === undefined) throw new WalksUnavailableError("the household zone cannot date the archive");
+  if (archivableWalks(walks, cutoff, household.timezone).length === 0) return { moved: 0, months: [] };
+
+  return store.commit(async (tx) => {
+    const draft = await tx.doc(WalksDoc);
+    const householdNow = await tx.doc(HouseholdDoc);
+    const zone = householdNow.timezone;
+    const cutoffNow = archiveCutoff(localDateAt(now, zone), keepMonths);
+    if (cutoffNow === undefined) throw new DomainConflictError("the household zone cannot date the archive");
+
+    const moving = archivableWalks(draft, cutoffNow, zone);
+    if (moving.length === 0) return { moved: 0, months: [] };
+
+    const byMonth = new Map<string, Walk[]>();
+    for (const walk of moving) {
+      const month = monthOf(localDateAt(new Date(walk.startedAt), zone))!;
+      const list = byMonth.get(month) ?? [];
+      list.push(walk);
+      byMonth.set(month, list);
+    }
+
+    const createdAt = now.toISOString();
+    for (const [month, walksOfMonth] of [...byMonth.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+      const archive = await tx.doc(WalksArchiveDoc, month, month);
+      const known = new Set(archive.walks.map((walk) => walk.id));
+      const merged = [...archive.walks, ...walksOfMonth.filter((walk) => !known.has(walk.id))].sort(byStartThenId);
+      if (archive.createdAt === "") archive.createdAt = createdAt;
+      const parsed = parseWalksArchive({ ...archive, walks: merged }, month);
+      if (!parsed) throw new DomainConflictError("that month's walk archive is not a shape this build understands");
+      archive.walks = parsed.walks;
+    }
+
+    const movingIds = new Set(moving.map((walk) => walk.id));
+    draft.walks = draft.walks.filter((walk) => !movingIds.has(walk.id));
+    if (!parseWalkList(draft.walks)) throw new DomainConflictError("the walk history could not be pruned");
+    return { moved: moving.length, months: [...byMonth.keys()].sort() };
+  }, context);
 }

@@ -132,3 +132,36 @@ one delta between bases — pinned by `test/checkpoint-policy.test.ts`.
 - **The agent/model path**: no model calls are made here.
 - **Notification-retention size at 500**: not seeded (a single-member household
   writes no intents); the cap's behaviour is pinned by its own tests.
+
+## 5. The archive, and what it fixes (P5-07b)
+
+The archive is the answer to §2's linear commit: events older than the current
+and previous household month move out of the hot document into **one committed
+document per month** (`app.feeding.archive` / `app.walks.archive`, a Pi Durable
+document family keyed by `YYYY-MM`). The move is one commit, runs on boot, and
+is idempotent (a second boot finds nothing and does not commit). Nothing is
+dropped: the month document is a committed, backed-up record, and an **open
+walk** never moves — it is state a caregiver must resolve (§8.5).
+
+Measured with `npm run measure:growth` (which now archives every 30 seeded days,
+
+- the shipped shape; `--no-archive` reproduces the old curve):
+
+| Days | Hot `app.feeding` | Hot `app.walks` | Feed commit | Windows | SQLite | Cold read | Backup |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 500 | 29.7 KiB | 30.6 KiB | **12.7 ms** | 1 368 feeds, 912 walks | 930 KiB | **1.9 ms** | **120 KiB** |
+| 1 500 | 26.5 KiB | 27.3 KiB | **11.1 ms** | 4 383 feeds, 2 922 walks | 2.4 MiB | **2.1 ms** | **326 KiB** |
+
+Against the unbounded document at the same points (53 ms / 159 ms per feed
+commit, 33 MiB / 98 MiB, 147 ms / 297 ms cold, 4.9 MiB / 14.7 MiB backup), the
+commit cost is now **flat and independent of the household's age** — the point
+of the exercise. The archive adds bounded month documents, one per month, each
+~30 KiB.
+
+Growth is deliberately **not** archived: a weight a week is ~80 bytes, 42 KiB at
+1 500 days (10 years), and the Pup screen's chart and "all measurements" count
+read the whole list. Keep all; revisit only if a future feature makes it big.
+
+Boot is the seam because a phone restarts far more often than monthly (Termux
+kills, reboots, launcher restarts). Between boots the hot document grows by one
+month at most — ~110 feeds, ~24 KiB — which is the same bound the archive keeps.

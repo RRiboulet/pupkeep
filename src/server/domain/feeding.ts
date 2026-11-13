@@ -23,14 +23,30 @@ import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import type { JsonObject, Tx } from "@earendil-works/pi-durable";
 import type { FeedEvent, Feeding, MealSlot, NotificationIntent } from "../../shared/domain.ts";
-import { MEAL_SCHEDULE_RULE, parseFeedEvent, parseFeedEvents, parseMealSlots } from "../../shared/feeding.ts";
+import {
+  MEAL_SCHEDULE_RULE,
+  parseFeedingArchive,
+  parseFeedEvent,
+  parseFeedEvents,
+  parseMealSlots,
+} from "../../shared/feeding.ts";
+import { archiveCutoff, monthOf } from "../../shared/dates.ts";
 import { notificationIntent, notificationKey } from "../../shared/notifications.ts";
 import { appendNotificationIntents } from "../notifications/intents.ts";
 import { armFeedReminders } from "../reminders/schedule.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorRef, ActorResolver } from "./actor.ts";
 import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type WriteOutcome } from "./commands.ts";
-import { ActivityDoc, FeedingDoc, HouseholdDoc, NotificationsDoc, parseFeeding, type DocStore } from "./docs.ts";
+import {
+  ActivityDoc,
+  FeedingArchiveDoc,
+  FeedingDoc,
+  HouseholdDoc,
+  NotificationsDoc,
+  parseFeeding,
+  parseHousehold,
+  type DocStore,
+} from "./docs.ts";
 import { DomainConflictError, StaleRevisionError, UnavailableError } from "./errors.ts";
 import { localDateAt, localTimeAt } from "./time.ts";
 
@@ -342,4 +358,109 @@ export async function logFeed(store: DocStore, context: Context, input: FeedWrit
   if (outcome.kind === "conflict") return { kind: "key-conflict" };
   const recorded = (outcome.kind === "replayed" ? outcome.result : outcome.value) as { event: FeedEvent };
   return { kind: outcome.kind === "replayed" ? "replayed" : "logged", event: recorded.event };
+}
+
+// --- the monthly archive (P5-07) --------------------------------------------
+
+/**
+ * Months that stay in `app.feeding`: the current one and the previous one. A
+ * caregiver may look at yesterday's meals across a month boundary, and the
+ * archive must never take "today" whatever the household zone does.
+ */
+export const FEEDING_ARCHIVE_KEEP_MONTHS = 2;
+
+export interface FeedArchiveResult {
+  /** How many events moved. 0 means the hot document was already inside the window. */
+  readonly moved: number;
+  /** The months written, oldest first. */
+  readonly months: readonly string[];
+}
+
+/** The events that belong to a month before `cutoff` (a `YYYY-MM`). */
+export function archivableFeedEvents(feeding: Feeding, cutoff: string): FeedEvent[] {
+  return feeding.events.filter((event) => {
+    const month = monthOf(event.localDate);
+    return month !== undefined && month < cutoff;
+  });
+}
+
+/** Chronological, stable: the archive keeps the hot document's order. */
+function byAtThenId(left: FeedEvent, right: FeedEvent): number {
+  return left.at === right.at ? left.id.localeCompare(right.id) : left.at.localeCompare(right.at);
+}
+
+/**
+ * Move feed events older than the hot window into their month's archive, in one
+ * commit (§7.2, §8.5). Nothing is dropped: the archive is a committed document
+ * per month, and the hot document is pruned only after that write is part of
+ * the same commit.
+ *
+ * Called on boot, after the household exists, so a phone that ran for a month
+ * archives on its next start. It is idempotent: a second call finds nothing to
+ * move and does not commit. A retry after a crash re-reads inside the commit and
+ * moves only what is still in the hot document.
+ *
+ * Why it matters (P5-07, `docs/data-growth.md`): every feed commit rewrites the
+ * whole document, so its cost is linear in the history it holds — 53 ms at
+ * 1 500 events on the host. Two months is ~220 events, ~48 KiB.
+ */
+export async function archiveOldFeeds(
+  store: DocStore,
+  context: Context,
+  now: Date = new Date(),
+  keepMonths: number = FEEDING_ARCHIVE_KEEP_MONTHS,
+): Promise<FeedArchiveResult> {
+  // A read-only pre-check keeps the common boot (nothing to move) commit-free.
+  const [feedingSnapshot, householdSnapshot] = await Promise.all([
+    store.snapshot(FeedingDoc, context),
+    store.snapshot(HouseholdDoc, context),
+  ]);
+  const feeding = feedingSnapshot === undefined ? undefined : parseFeeding(feedingSnapshot);
+  const household = householdSnapshot === undefined ? undefined : parseHousehold(householdSnapshot);
+  if (!feeding || !household) {
+    throw new FeedingUnavailableError("the meal history is not available; retry after boot");
+  }
+  const cutoff = archiveCutoff(localDateAt(now, household.timezone), keepMonths);
+  if (cutoff === undefined) throw new FeedingUnavailableError("the household zone cannot date the archive");
+  if (archivableFeedEvents(feeding, cutoff).length === 0) return { moved: 0, months: [] };
+
+  return store.commit(async (tx) => {
+    // Re-read inside the commit: this is the authoritative list, and a task or
+    // another boot cannot move an event twice.
+    const draft = await tx.doc(FeedingDoc);
+    const householdNow = await tx.doc(HouseholdDoc);
+    const cutoffNow = archiveCutoff(localDateAt(now, householdNow.timezone), keepMonths);
+    if (cutoffNow === undefined) throw new DomainConflictError("the household zone cannot date the archive");
+
+    const moving = archivableFeedEvents(draft, cutoffNow);
+    if (moving.length === 0) return { moved: 0, months: [] };
+
+    const byMonth = new Map<string, FeedEvent[]>();
+    for (const event of moving) {
+      const month = monthOf(event.localDate)!;
+      const list = byMonth.get(month) ?? [];
+      list.push(event);
+      byMonth.set(month, list);
+    }
+
+    const createdAt = now.toISOString();
+    for (const [month, events] of [...byMonth.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+      const archive = await tx.doc(FeedingArchiveDoc, month, month);
+      const known = new Set(archive.events.map((event) => event.id));
+      const merged = [...archive.events, ...events.filter((event) => !known.has(event.id))].sort(byAtThenId);
+      if (archive.createdAt === "") archive.createdAt = createdAt;
+      // The same backstop as every list write: an archive boot cannot read
+      // rolls the whole move back instead of being stored.
+      const parsed = parseFeedingArchive({ ...archive, events: merged }, month);
+      if (!parsed) throw new DomainConflictError("that month's meal archive is not a shape this build understands");
+      archive.events = parsed.events;
+    }
+
+    const movingIds = new Set(moving.map((event) => event.id));
+    draft.events = draft.events.filter((event) => !movingIds.has(event.id));
+    if (!parseFeedEvents(draft.events)) {
+      throw new DomainConflictError("the meal history could not be pruned");
+    }
+    return { moved: moving.length, months: [...byMonth.keys()].sort() };
+  }, context);
 }
