@@ -209,6 +209,24 @@ export type Feeding = {
 };
 
 /**
+ * One archived month of feed events (P5-07).
+ *
+ * `app.feeding` keeps only the current and previous household month, so the hot
+ * document — which every feed commit rewrites whole — stays bounded. Older
+ * events live here, one document per `YYYY-MM`, and **none is ever dropped**:
+ * the archive is a committed document, not a delete.
+ */
+export const FEEDING_ARCHIVE_SCHEMA_VERSION = 1 as const;
+export type FeedingArchive = {
+  schemaVersion: typeof FEEDING_ARCHIVE_SCHEMA_VERSION;
+  /** `YYYY-MM` on the household's calendar; every event belongs to it. */
+  month: string;
+  /** Append order, as in `app.feeding`. */
+  events: FeedEvent[];
+  createdAt: string;
+};
+
+/**
  * One walk (PLAN §8.3). A walk is a single record whose duration is derived
  * from two **server** timestamps: a phone's clock skew must not reorder two
  * caregivers' walks, and the timer a browser shows uses the server offset
@@ -264,6 +282,23 @@ export type Walk = {
 export type Walks = {
   schemaVersion: typeof WALKS_SCHEMA_VERSION;
   /** Append order; a reader sorts by `startedAt` where it needs chronology. */
+  walks: Walk[];
+  createdAt: string;
+};
+
+/**
+ * One archived month of walks (P5-07).
+ *
+ * `app.walks` keeps the open walk and the current + previous household month;
+ * older closed walks live here, one document per `YYYY-MM`, so the hot document
+ * (rewritten whole on every start/end) stays bounded. No walk is ever dropped.
+ */
+export const WALKS_ARCHIVE_SCHEMA_VERSION = 1 as const;
+export type WalksArchive = {
+  schemaVersion: typeof WALKS_ARCHIVE_SCHEMA_VERSION;
+  /** `YYYY-MM` on the household's calendar, as the move computed it. */
+  month: string;
+  /** Closed walks only; an open walk always stays in `app.walks`. */
   walks: Walk[];
   createdAt: string;
 };

@@ -46,7 +46,7 @@
 
 import type { Context } from "@earendil-works/chord";
 import type { CheckpointInfo, DocumentReader, Tx } from "@earendil-works/pi-durable";
-import { defineDoc } from "@earendil-works/pi-durable";
+import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
 import {
   ACTIVITY_SCHEMA_VERSION,
   APPROVALS_SCHEMA_VERSION,
@@ -54,6 +54,7 @@ import {
   COMMANDS_SCHEMA_VERSION,
   DEFAULT_HOUSEHOLD_NAME,
   DEFAULT_HOUSEHOLD_SETTINGS,
+  FEEDING_ARCHIVE_SCHEMA_VERSION,
   FEEDING_SCHEMA_VERSION,
   GROWTH_SCHEMA_VERSION,
   HOUSEHOLD_SCHEMA_VERSION,
@@ -64,6 +65,7 @@ import {
   USAGE_SCHEMA_VERSION,
   SHOWER_INTERVAL_MAX_DAYS,
   SHOWERS_SCHEMA_VERSION,
+  WALKS_ARCHIVE_SCHEMA_VERSION,
   WALKS_SCHEMA_VERSION,
   type Activity,
   type ActivityEntry,
@@ -73,6 +75,7 @@ import {
   type Commands,
   type FeedReminderRef,
   type Feeding,
+  type FeedingArchive,
   type Growth,
   type Showers,
   type Training,
@@ -85,15 +88,21 @@ import {
   type PuppySex,
   type UsageSnapshot,
   type Walks,
+  type WalksArchive,
 } from "../../shared/domain.ts";
 import { parseAppointmentList, parseReminderOffsets } from "../../shared/calendar.ts";
 import { parseApprovalList } from "../../shared/approvals.ts";
-import { SLOT_ID_LIMIT, parseFeedEvents, parseStoredMealSlots } from "../../shared/feeding.ts";
+import {
+  SLOT_ID_LIMIT,
+  parseFeedingArchive,
+  parseFeedEvents,
+  parseStoredMealSlots,
+} from "../../shared/feeding.ts";
 import { parseGrowthMeasurements } from "../../shared/growth.ts";
 import { parseTrainingList } from "../../shared/training.ts";
 import { parseShowerList } from "../../shared/showers.ts";
 import { parseNotificationIntents, pendingDelivery } from "../../shared/notifications.ts";
-import { parseWalkList } from "../../shared/walks.ts";
+import { parseWalkList, parseWalksArchive } from "../../shared/walks.ts";
 import { hasControlCharacter, isIanaZone, isLocalDate } from "../../shared/profile.ts";
 import { isUsageMonth } from "../../shared/usage.ts";
 
@@ -156,6 +165,60 @@ export function emptyCommands(): Commands {
 /** A fresh schedule: no slots until first-run setup writes them, no meals yet. */
 export function emptyFeeding(): Feeding {
   return { schemaVersion: FEEDING_SCHEMA_VERSION, rev: 0, slots: [], events: [], createdAt: "" };
+}
+
+/**
+ * One archived month of feed events (P5-07), keyed by its `YYYY-MM` address.
+ *
+ * The hot `app.feeding` document is rewritten whole on every feed commit, so it
+ * keeps only the current and previous month; older months move here, one
+ * document each, and nothing is dropped. A family rather than a list inside one
+ * document is the point: each member is bounded (~one month of meals) and has
+ * its own checkpoint history, so neither the file nor the first read grows with
+ * the household's age.
+ */
+export const FeedingArchiveDoc = defineDocFamily<FeedingArchive, string>({
+  kind: "app.feeding.archive",
+  version: 1,
+  family: true,
+  scope: "session",
+  initial: (month) => emptyFeedingArchive(month),
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/** The empty archive for a month; a writer sets `createdAt` on the first move. */
+export function emptyFeedingArchive(month: string): FeedingArchive {
+  return { schemaVersion: FEEDING_ARCHIVE_SCHEMA_VERSION, month, events: [], createdAt: "" };
+}
+
+/** Read one archived month, validated against the address it came from. */
+export function parseFeedingArchiveDoc(value: unknown, month: string): FeedingArchive | undefined {
+  return parseFeedingArchive(value, month);
+}
+
+/**
+ * One archived month of walks (P5-07), keyed by its `YYYY-MM` address. The hot
+ * `app.walks` document is rewritten whole on every start/end, so it keeps the
+ * open walk and the current + previous month; older *closed* walks move here.
+ * An open walk is never archived (the parser refuses one in an archive).
+ */
+export const WalksArchiveDoc = defineDocFamily<WalksArchive, string>({
+  kind: "app.walks.archive",
+  version: 1,
+  family: true,
+  scope: "session",
+  initial: (month) => emptyWalksArchive(month),
+  checkpointWhen: checkpointEvery(CHECKPOINT_DELTAS),
+});
+
+/** The empty archive for a month; a writer sets `createdAt` on the first move. */
+export function emptyWalksArchive(month: string): WalksArchive {
+  return { schemaVersion: WALKS_ARCHIVE_SCHEMA_VERSION, month, walks: [], createdAt: "" };
+}
+
+/** Read one archived month, validated against the address it came from. */
+export function parseWalksArchiveDoc(value: unknown, month: string): WalksArchive | undefined {
+  return parseWalksArchive(value, month);
 }
 
 /** No measurements yet; the target weight lives on `app.puppy` (P1-11). */

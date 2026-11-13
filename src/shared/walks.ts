@@ -24,8 +24,9 @@
 // The caregiver-facing sentences for the refusals live here too, so the HTTP
 // route and the agent tool (P2-07) render one copy instead of retyping it.
 
-import type { Walk, Walks } from "./domain.ts";
-import { OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
+import type { Walk, Walks, WalksArchive } from "./domain.ts";
+import { WALKS_ARCHIVE_SCHEMA_VERSION, OPAQUE_ID_PATTERN, isIsoInstant } from "./domain.ts";
+import { shiftMonth } from "./dates.ts";
 import { HOUSEHOLD_FALLBACK_LABEL } from "./chat.ts";
 import { hasControlCharacter } from "./profile.ts";
 
@@ -266,6 +267,32 @@ export function parseWalkList(raw: unknown): Walk[] | undefined {
     walks.push(walk);
   }
   return walks;
+}
+
+/** Most walks one archived month may hold; a month with more is malformed. */
+export const WALKS_ARCHIVE_MAX_WALKS = 1_000;
+
+/**
+ * One archived month, validated: the stored shape, the month it belongs to, and
+ * the walk-list invariants. The *month of each walk* is not re-derived here
+ * because that needs the household zone, which a stored value does not carry;
+ * the move computed it at write time, and the address is what the reader asks
+ * for. An archive never holds an open walk — the parser would accept one, so
+ * the writer is the guard.
+ */
+export function parseWalksArchive(raw: unknown, month: string): WalksArchive | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const keys = ["schemaVersion", "month", "walks", "createdAt"];
+  if (Object.keys(record).some((key) => !keys.includes(key))) return undefined;
+  if (record.schemaVersion !== WALKS_ARCHIVE_SCHEMA_VERSION) return undefined;
+  if (record.month !== month || shiftMonth(month, 0) !== month) return undefined;
+  if (!isIsoInstant(record.createdAt)) return undefined;
+  if (!Array.isArray(record.walks) || record.walks.length > WALKS_ARCHIVE_MAX_WALKS) return undefined;
+  const walks = parseWalkList(record.walks);
+  if (!walks) return undefined;
+  if (walks.some((walk) => walk.endedAt === undefined)) return undefined;
+  return { schemaVersion: WALKS_ARCHIVE_SCHEMA_VERSION, month, walks, createdAt: record.createdAt };
 }
 
 /** The open walk, if the household has one. At most one, by the parser above. */
