@@ -13,7 +13,8 @@
     "test": "node --test \"test/**/*.test.ts\" \"test/**/*.test.js\"",
     "typecheck": "tsc --noEmit",
     "backup": "node scripts/backup.ts",
-    "restore": "node scripts/restore.ts"
+    "restore": "node scripts/restore.ts",
+    "measure:growth": "node scripts/measure-growth.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",
