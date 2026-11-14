@@ -97,5 +97,7 @@ jobs:
             for tool in age expect jq openssl rclone rg sqlite3 tar tmux; do
               command -v "$tool" >/dev/null
             done
+            test "$(cat /opt/pi-packages/my-agent-setup/.pi-agent-setup-tag)" = "$(tr -d '[:space:]' < .devcontainer/pi-agent-setup.version)"
             pi list 2>/dev/null | grep 'my-agent-setup' >/dev/null
+            sh .devcontainer/check-pi-agent-setup.sh
             npm test

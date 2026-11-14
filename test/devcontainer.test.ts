@@ -78,6 +78,10 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
 
   assert.match(dockerfile, /@earendil-works\/pi-coding-agent@1\.5\.0/);
   assert.match(dockerfile, /test "\$\(pi --version\)" = "1\.5\.0"/);
+  assert.match(dockerfile, /COPY \.devcontainer\/pi-agent-setup\.version \/tmp\/pi-agent-setup\.version/);
+  assert.match(dockerfile, /ARG PI_AGENT_SETUP_TAG=v1\.12\.0/);
+  assert.match(dockerfile, /^ENV PI_AGENT_SETUP_TAG=\$\{PI_AGENT_SETUP_TAG\}$/m);
+  assert.match(dockerfile, /^LABEL org\.rriboulet\.pi-package="\$\{PI_AGENT_SETUP_TAG\}"$/m);
 
   assert.match(dockerfile, /CLOUDFLARED_VERSION=2026\.10\.5/);
   // Cloudflare publishes a `.deb` per architecture and no shared manifest, so
@@ -156,7 +160,7 @@ test("the image renames the base uid-1000 user to vscode, so its home is writabl
   assert.doesNotMatch(dockerfile, /^USER vscode$/m);
 });
 
-test("postCreate seeds .env, runs the suite, checks versions and installs the shared package personally", async () => {
+test("postCreate seeds .env, runs the suite, checks versions and declares the baked pi package", async () => {
   const script = await read(".devcontainer/postCreate.sh");
 
   assert.match(script, /if \[ ! -f \.env \]; then/);
@@ -187,19 +191,16 @@ test("postCreate seeds .env, runs the suite, checks versions and installs the sh
     assert.match(script, new RegExp(`\\b${tool}\\b`), `postCreate does not check ${tool}`);
   }
 
-  // The shared package goes into the personal pi settings in the volume, never
-  // the repo's .pi/settings.json — that is the duplicate-package failure the
-  // P1-05 guard pins from the other side.
-  assert.match(script, /SHARED_PACKAGE_REF=.*v1\.11\.0/);
-  assert.match(script, /grep -q 'my-agent-setup' \.pi\/settings\.json/);
-  assert.match(script, /pi install "git:github\.com\/RRiboulet\/my-agent-setup@\$\{SHARED_PACKAGE_REF\}"/);
-  // The volume outlives the pin. "already installed" must mean "installed at
-  // the wanted ref", or bumping SHARED_PACKAGE_REF silently keeps the previous
-  // release's extensions for the life of the volume.
-  assert.match(script, /grep -F "my-agent-setup@\$\{SHARED_PACKAGE_REF\}"/);
-  assert.match(script, /CURRENT_REF=/);
-  assert.match(script, /switching to \$\{SHARED_PACKAGE_REF\}/);
-  assert.doesNotMatch(script, /pi install[^\n]*--local/);
+  // The package comes from the image, not from a network install and never
+  // from the repo's .pi/settings.json — a project declaration would load the
+  // same extensions twice (the P1-05 guard pins that from the other side).
+  assert.match(script, /PI_PACKAGE=\/opt\/pi-packages\/my-agent-setup/);
+  assert.match(script, /pi-agent-setup\.version/);
+  assert.match(script, /EXPECTED_TAG=/);
+  assert.match(script, /ACTUAL_TAG=/);
+  assert.match(script, /jq --arg pkg "\$PI_PACKAGE"/);
+  assert.doesNotMatch(script, /pi install[^\n]*git:github\.com\/RRiboulet\/my-agent-setup/);
+  assert.doesNotMatch(script, /SHARED_PACKAGE_REF/);
   assert.doesNotMatch(script, />>?\s*\.pi\/settings\.json/);
 });
 

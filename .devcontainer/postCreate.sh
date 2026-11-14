@@ -145,35 +145,34 @@ esac
 echo "node $(node --version) · pi ${pi_version} · ${gh_version} · ${cloudflared_version}"
 echo "sqlite3 $(sqlite3 --version | cut -d' ' -f1) · $(rclone version | sed -n '1p')"
 
-# --- the shared pi package -------------------------------------------------
-# The package is NOT declared in this repo's `.pi/settings.json`: when pupkeep
-# lives inside a workspace that already loads those extensions, a second
-# declaration makes every extension load twice and subagents die on a duplicate
-# flag (test/pi-settings.test.ts guards this). A standalone devcontainer still
-# wants the package, so install it into the *personal* pi settings, which the
-# volume persists. `--local` would write the repo's settings file and is the one
-# thing this must never do.
-SHARED_PACKAGE_REF="${PUPKEEP_SHARED_PACKAGE_REF:-v1.11.0}"
-if [ -f .pi/settings.json ] && grep -q 'my-agent-setup' .pi/settings.json; then
-  echo "this project already declares the shared pi package; not installing a second copy"
-elif pi list 2>/dev/null | grep -F "my-agent-setup@${SHARED_PACKAGE_REF}" >/dev/null; then
-  echo "shared pi package already at ${SHARED_PACKAGE_REF}"
-else
-  # An installed package is not necessarily the *wanted* one: the pin moves, the
-  # volume keeps the old ref, and a bare "already installed" check then silently
-  # serves last release's extensions forever. Say what is there, then upgrade.
-  CURRENT_REF="$(pi list 2>/dev/null | grep -o 'my-agent-setup@[^[:space:]]*' | head -n1 | sed 's/.*@//' || true)"
-  if [ -n "$CURRENT_REF" ]; then
-    echo "shared pi package is at ${CURRENT_REF}; switching to ${SHARED_PACKAGE_REF}"
-  fi
-  if pi install "git:github.com/RRiboulet/my-agent-setup@${SHARED_PACKAGE_REF}"; then
-    echo "shared pi package is at ${SHARED_PACKAGE_REF}"
-  else
-    echo "WARNING: could not install the shared pi package at ${SHARED_PACKAGE_REF}." >&2
-    echo "         The app and its tests do not need it; run the command again when online:" >&2
-    echo "         pi install git:github.com/RRiboulet/my-agent-setup@${SHARED_PACKAGE_REF}" >&2
-  fi
+# --- pi package from the image (pinned) ------------------------------------
+# The image clones RRiboulet/my-agent-setup at the tag in
+# .devcontainer/pi-agent-setup.version and labels it. This container only
+# declares that baked copy in its own agent settings; it never fetches the
+# package. A stale image (repo pin bumped, image not rebuilt) fails here rather
+# than silently loading the previous release.
+PI_PACKAGE=/opt/pi-packages/my-agent-setup
+PI_PACKAGE_TAG_FILE="$PI_PACKAGE/.pi-agent-setup-tag"
+EXPECTED_TAG="$(tr -d '[:space:]' < "$REPO/.devcontainer/pi-agent-setup.version")"
+if [ ! -d "$PI_PACKAGE" ] || [ ! -f "$PI_PACKAGE_TAG_FILE" ]; then
+  echo "postCreate: missing baked pi package at $PI_PACKAGE; rebuild the image" >&2
+  exit 1
 fi
+ACTUAL_TAG="$(tr -d '[:space:]' < "$PI_PACKAGE_TAG_FILE")"
+if [ "$ACTUAL_TAG" != "$EXPECTED_TAG" ]; then
+  echo "postCreate: image carries $ACTUAL_TAG but this checkout pins $EXPECTED_TAG; rebuild the image (devc rebuild pupkeep)" >&2
+  exit 1
+fi
+
+# User-level declaration, absolute so the path does not depend on where the
+# agent dir lives. Remove any older git clone entry first: two entries would
+# load the same extensions twice, and pi exits on the duplicate tools.
+jq --arg pkg "$PI_PACKAGE" '
+  .packages = (((.packages // [])
+    | map(select((if type == "object" then (.source // "") else . end) | tostring | test("my-agent-setup") | not))) + [$pkg])
+' "$SETTINGS" > "$SETTINGS.tmp" && [ -s "$SETTINGS.tmp" ] \
+  && mv "$SETTINGS.tmp" "$SETTINGS" \
+  || { rm -f "$SETTINGS.tmp"; echo "postCreate: could not record $PI_PACKAGE in $SETTINGS" >&2; exit 1; }
 
 # --- gh and pi authentication ---------------------------------------------
 if ! gh auth status >/dev/null 2>&1; then
@@ -183,8 +182,9 @@ gh is installed but not authenticated. One-time setup, in this terminal:
 
   gh auth login --hostname github.com --git-protocol https --web
 
-The token is stored in the pi-config volume (GH_CONFIG_DIR), so it survives a
-rebuild. git's credential helper is configured system-wide in the image, so
+The token arrives as GH_TOKEN from the host environment (`~/.config/devc/env`,
+sourced by devc), so every container can share the credential without sharing a
+volume. git's credential helper is configured system-wide in the image, so
 plain `git push` works in a fresh container without a token in .git/config.
 
 MSG
