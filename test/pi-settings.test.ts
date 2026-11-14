@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 // Regression guard for a mistake that already cost a review run: declaring the
-// shared `my-agent-setup` package in this repo's `.pi/settings.json`. When pupkeep
-// sits inside a workspace that already loads those extensions, the second
-// declaration makes every extension load twice, and any pi process started here —
-// including a subagent — dies at startup on a duplicate flag.
+// shared `my-agent-setup` package in this repo's `.pi/settings.json`. The
+// devcontainer now gets that package from the image and declares it in the
+// container's own agent settings (postCreate.sh); a second project declaration
+// would load every extension twice, and any pi process started here — including
+// a subagent — dies at startup on a duplicate flag.
 //
 // The file may exist for other settings; it just must not re-declare the package.
-// A standalone clone adds it to its own local settings, not to the repo.
 
 const SETTINGS = join(import.meta.dirname, "..", ".pi", "settings.json");
 const PACKAGE_MARKER = "my-agent-setup";

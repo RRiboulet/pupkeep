@@ -90,14 +90,14 @@ carry a `.gitkeep` and nothing else — no `android/`, no rootfs, no Gradle.
 
 ## Development tooling
 
-**No pi package is declared here on purpose.** This repository usually lives
-inside a workspace that already loads the shared `my-agent-setup` extensions, and
-declaring the same package again makes every extension load twice — the first
-version of this repo did, and subagents launched in this directory failed at
-startup with `Flag "--attach-subagent" conflicts with …`. A standalone clone can
-add the package to its own local settings; the repo does not force it. The pi
-runtime the plan pins is `1.5.0`, enforced by the devcontainer (P1-02) rather
-than by a file here.
+**No pi package is declared in this repo on purpose.** The devcontainer image
+bakes `my-agent-setup` at the tag in `.devcontainer/pi-agent-setup.version`
+under `/opt/pi-packages/my-agent-setup`, and `postCreate.sh` declares that baked
+path in the container's own agent settings. Declaring it in `.pi/settings.json`
+as well would make every extension load twice — the first version of this repo
+did, and subagents launched in this directory failed at startup with
+`Flag "--attach-subagent" conflicts with …`. The pi runtime the plan pins is
+`1.5.0`, enforced by the devcontainer (P1-02) rather than by a file here.
 
 **The development agent is not the product agent, and they must never be
 confused.** The pi coding agent used to build this repo has shell, file and web
@@ -137,17 +137,20 @@ It publishes 8787 on the host's loopback, so `ssh -L 8787:127.0.0.1:8787 <host>`
 from a phone reaches the dev server without opening a port to the internet.
 
 - pi settings, sessions, model/provider auth and the gh token persist in the
-  `pupkeep-pi-config` volume at `/home/vscode/.pi`; run `gh auth login` and pi's
-  own login once per volume. gh is pinned to `2.103.2`.
+  `pupkeep-pi-config` volume at `/home/vscode/.pi`. Provider keys and `GH_TOKEN`
+  come from the host environment through `${localEnv:...}` (`devc` sources
+  `~/.config/devc/env`); no other container shares this volume. gh is pinned to
+  `2.103.2`.
 - `npm start` reads `.env` with `--env-file-if-exists`; a real environment
   variable wins over the file. The container installs the cloudflared build for
   its own architecture (amd64 or arm64), each pinned by SHA-256; the phone uses
   the arm64 release.
 - The development database is `/tmp/pupkeep-dev`, never the workspace mount.
-- The shared `my-agent-setup` package is installed at `v1.11.0` into the
-  container's personal pi settings; it is deliberately not declared in
-  `.pi/settings.json`, which would duplicate the enclosing workspace's
-  extensions.
+- The `my-agent-setup` package is baked into the image at `v1.12.0` and
+  declared in the container's personal pi settings; it is deliberately not
+  declared in `.pi/settings.json`, which would load every extension twice.
+  `sh .devcontainer/check-pi-agent-setup.sh` (also run by CI) fails when the
+  recorded pin, the Dockerfile and `postCreate` disagree.
 - Port 8787 is published on the host's loopback (`127.0.0.1:8787:8787`), which is
   what makes the dev server reachable from outside the container; `forwardPorts`
   alone does nothing headless. Reach it from a phone with `ssh -L

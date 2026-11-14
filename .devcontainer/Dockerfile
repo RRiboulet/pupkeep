@@ -87,11 +87,31 @@ RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
 RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.5.0 \
     && test "$(pi --version)" = "1.5.0"
 
+# The shared pi package (extensions + skills), baked at a pinned tag. The tag is
+# recorded once in .devcontainer/pi-agent-setup.version; the build fails if this
+# ARG and that file disagree, so a half-done bump cannot produce an image. The
+# clone lives outside $AGENT_DIR on purpose: a named volume mounted at ~/.pi
+# copies the image's content only when the volume is empty, so a package baked
+# there would freeze at the first container's copy.
+COPY .devcontainer/pi-agent-setup.version /tmp/pi-agent-setup.version
+ARG PI_AGENT_SETUP_TAG=v1.12.0
+RUN test "${PI_AGENT_SETUP_TAG}" = "$(tr -d '\r\n' < /tmp/pi-agent-setup.version)" \
+    && mkdir -p /opt/pi-packages \
+    && git clone --depth 1 --branch "${PI_AGENT_SETUP_TAG}" \
+         https://github.com/RRiboulet/my-agent-setup.git \
+         "/opt/pi-packages/my-agent-setup-${PI_AGENT_SETUP_TAG}" \
+    && ln -sfn "my-agent-setup-${PI_AGENT_SETUP_TAG}" /opt/pi-packages/my-agent-setup \
+    && test -f /opt/pi-packages/my-agent-setup/package.json \
+    && printf '%s\n' "${PI_AGENT_SETUP_TAG}" > "/opt/pi-packages/my-agent-setup-${PI_AGENT_SETUP_TAG}/.pi-agent-setup-tag" \
+    && rm -f /tmp/pi-agent-setup.version
+ENV PI_AGENT_SETUP_TAG=${PI_AGENT_SETUP_TAG}
+LABEL org.rriboulet.pi-package="${PI_AGENT_SETUP_TAG}"
+
 # The github-cli feature installs gh *after* this image. Register gh as git's
-# credential helper system-wide now: the token survives in the pi-config volume,
-# but ~/.gitconfig is container-local and would be discarded on rebuild, leaving
-# a valid token that git cannot use. The empty-value line shadows the helper
-# vscode-server installs system-wide, exactly as gh writes it.
+# credential helper system-wide now: the GH_TOKEN arrives from the host
+# environment, but ~/.gitconfig is container-local and would be discarded on
+# rebuild, leaving a valid token that git cannot use. The empty-value line
+# shadows the helper vscode-server installs system-wide, exactly as gh writes it.
 RUN git config --system credential.https://github.com.helper '' \
     && git config --system credential.https://github.com.helper '!/usr/bin/gh auth git-credential' \
     && git config --system credential.https://gist.github.com.helper '' \
