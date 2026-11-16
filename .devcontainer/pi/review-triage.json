@@ -1,0 +1,41 @@
+{
+  "judge": {
+    "provider": "openrouter",
+    "model": "perplexity/pplx-decider-v1.3:free",
+    "timeoutMs": 8000
+  },
+  "candidates": [
+    {
+      "provider": "opencode-go",
+      "model": "beam-free",
+      "tier": "low",
+      "cost": 0,
+      "description": "Free, fast model. A quick second read for obvious mistakes.",
+      "notFor": "Anything subtle, or a change with real blast radius."
+    },
+    {
+      "provider": "opencode-go",
+      "model": "mimo-v2.6-flash",
+      "tier": "low",
+      "cost": 0.14,
+      "description": "Cheap flash model. A quick second read for obvious mistakes.",
+      "notFor": "Anything subtle, or a change with real blast radius."
+    },
+    {
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "tier": "medium",
+      "cost": 0.15,
+      "description": "Mid-tier coder. A full correctness and edge-case pass.",
+      "notFor": "Hostile review of subtle or security-sensitive changes."
+    },
+    {
+      "provider": "opencode-go",
+      "model": "glm-5.3-flash",
+      "tier": "high",
+      "cost": 0.15,
+      "description": "Strong reasoner for hostile or high-stakes review.",
+      "notFor": "Routine changes a cheaper model already covers well."
+    }
+  ]
+}

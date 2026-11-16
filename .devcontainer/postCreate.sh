@@ -75,6 +75,29 @@ else
   echo '{"theme": "kokomi-theme"}' > "$SETTINGS"
 fi
 
+# --- review-triage policy ---
+# The policy lives on the private volume, not in the image or the clone, so a
+# fresh volume — which is what another host gets — would otherwise start from
+# the extension's built-in defaults. Seed this checkout's policy when the volume
+# has none, and never overwrite it: from then on the file belongs to whoever runs
+# the container, and a rebuild must not undo their edit. Validated with jq first
+# and installed through a temp file, so a malformed template fails here instead
+# of leaving pi with a policy it cannot parse.
+AGENT_DIR="${PI_CODING_AGENT_DIR:-/home/vscode/.pi/agent}"
+REVIEW_TRIAGE="$AGENT_DIR/review-triage.json"
+if [ ! -f "$REVIEW_TRIAGE" ]; then
+  if command -v jq >/dev/null 2>&1 \
+    && jq -e . "$REPO/.devcontainer/pi/review-triage.json" >/dev/null 2>&1 \
+    && jq . "$REPO/.devcontainer/pi/review-triage.json" > "$REVIEW_TRIAGE.tmp" \
+    && [ -s "$REVIEW_TRIAGE.tmp" ]; then
+    mv "$REVIEW_TRIAGE.tmp" "$REVIEW_TRIAGE"
+  else
+    rm -f "$REVIEW_TRIAGE.tmp"
+    echo "postCreate: could not install $REPO/.devcontainer/pi/review-triage.json into $AGENT_DIR" >&2
+    exit 1
+  fi
+fi
+
 # --- .env ------------------------------------------------------------------
 # Copy only when absent: a developer's local keys and overrides must survive a
 # rebuild. `.env` is gitignored; `.env.example` is the committed template.
@@ -188,6 +211,27 @@ volume. git's credential helper is configured system-wide in the image, so
 plain `git push` works in a fresh container without a token in .git/config.
 
 MSG
+fi
+
+# --- pi model catalogs ---
+# The judge the policy names can be newer than the model list pi ships with, so a
+# fresh volume does not have it and the judge fails with "not in pi's catalogue"
+# until one refresh has run. A container with no network or no provider key must
+# still come up usable: hence a warning, not an exit.
+MODELS_STORE="$AGENT_DIR/models-store.json"
+# A refresh that cannot reach a provider still exits 0 and writes an empty
+# catalog, so the exit status alone does not prove the judge is reachable.
+# Confirm that the model the policy names is actually in the catalog and say so
+# when it is not: the only other symptom is triage quietly falling back to its
+# most expensive profile.
+JUDGE_PROVIDER="$(jq -r '.judge.provider // empty' "$REVIEW_TRIAGE" 2>/dev/null || true)"
+JUDGE_ID="$(jq -r '.judge.model // empty' "$REVIEW_TRIAGE" 2>/dev/null || true)"
+if ! pi update --models >/dev/null; then
+  echo "postCreate: 'pi update --models' failed; review-triage may not find its judge in the catalog (run it again once this container has network and a provider key)" >&2
+elif [ -n "$JUDGE_PROVIDER" ] && [ -n "$JUDGE_ID" ] \
+  && ! jq -e --arg p "$JUDGE_PROVIDER" --arg id "$JUDGE_ID" \
+    '((.[$p].models) // []) | any(.id == $id)' "$MODELS_STORE" >/dev/null 2>&1; then
+  echo "postCreate: the review-triage judge $JUDGE_PROVIDER/$JUDGE_ID is not in the model catalog; supply that provider's key and run 'pi update --models' in this container" >&2
 fi
 
 cat <<'MSG'

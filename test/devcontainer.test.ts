@@ -79,7 +79,18 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
   assert.match(dockerfile, /@earendil-works\/pi-coding-agent@1\.5\.0/);
   assert.match(dockerfile, /test "\$\(pi --version\)" = "1\.5\.0"/);
   assert.match(dockerfile, /COPY \.devcontainer\/pi-agent-setup\.version \/tmp\/pi-agent-setup\.version/);
-  assert.match(dockerfile, /ARG PI_AGENT_SETUP_TAG=v1\.12\.0/);
+  // The tag is read from the pin file instead of being repeated here. A third
+  // hard-coded copy turned every bump into a test edit that failed for a reason
+  // unrelated to the change, while the drift it was meant to catch is already
+  // caught twice: `check-pi-agent-setup.sh` (also run by CI) requires the
+  // Dockerfile ARG to equal the version file, and `postCreate` requires the tag
+  // baked into the running image to equal it as well. What is left to guard here
+  // is that the ARG exists and names a tag at all.
+  const pinnedTag = (await read(".devcontainer/pi-agent-setup.version")).trim();
+  assert.match(
+    dockerfile,
+    new RegExp(`^ARG PI_AGENT_SETUP_TAG=${pinnedTag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"),
+  );
   assert.match(dockerfile, /^ENV PI_AGENT_SETUP_TAG=\$\{PI_AGENT_SETUP_TAG\}$/m);
   assert.match(dockerfile, /^LABEL org\.rriboulet\.pi-package="\$\{PI_AGENT_SETUP_TAG\}"$/m);
 

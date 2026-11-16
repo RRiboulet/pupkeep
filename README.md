@@ -146,7 +146,7 @@ from a phone reaches the dev server without opening a port to the internet.
   its own architecture (amd64 or arm64), each pinned by SHA-256; the phone uses
   the arm64 release.
 - The development database is `/tmp/pupkeep-dev`, never the workspace mount.
-- The `my-agent-setup` package is baked into the image at `v1.12.0` and
+- The `my-agent-setup` package is baked into the image at `v1.13.0` and
   declared in the container's personal pi settings; it is deliberately not
   declared in `.pi/settings.json`, which would load every extension twice.
   `sh .devcontainer/check-pi-agent-setup.sh` (also run by CI) fails when the

@@ -94,7 +94,7 @@ RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.5.0 \
 # copies the image's content only when the volume is empty, so a package baked
 # there would freeze at the first container's copy.
 COPY .devcontainer/pi-agent-setup.version /tmp/pi-agent-setup.version
-ARG PI_AGENT_SETUP_TAG=v1.12.0
+ARG PI_AGENT_SETUP_TAG=v1.13.0
 RUN test "${PI_AGENT_SETUP_TAG}" = "$(tr -d '\r\n' < /tmp/pi-agent-setup.version)" \
     && mkdir -p /opt/pi-packages \
     && git clone --depth 1 --branch "${PI_AGENT_SETUP_TAG}" \
