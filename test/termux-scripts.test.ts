@@ -353,6 +353,10 @@ test("the install script wires the boot wrapper and the tunnel unit with explici
   assert.match(install, /var\/service\/pupkeep-tunnel/);
   assert.match(install, /termux-tunnel\.sh/);
   assert.match(install, /sv-enable pupkeep-tunnel/);
+  // `runsvdir` throws a service's output away without a `log/` child, which is how
+  // a tunnel that lost the port for five days stayed silent (P5-01b, 2026-11-17).
+  assert.match(install, /\$\{unit\}\/log\/run/, "the unit gets a log service");
+  assert.match(install, /svlogd/, "and svlogd is what writes it somewhere");
 });
 
 /**

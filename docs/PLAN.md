@@ -4961,8 +4961,16 @@ changes nothing until confirmed.
       326 KiB (was 14.7 MiB) — flat in the household's age. Growth stays whole
       (42 KiB at 1 500 days). `test/feeding-archive.test.ts` and
       `test/walks-archive.test.ts` pin the move, its idempotence and the boot
-      seam. **Open:** the phone half (commit latency and WAL on Termux storage,
-      battery), which the same script runs unchanged.
+      seam. **The phone half is measured too (2026-11-17, `docs/data-growth.md`
+      §6):** the same script, unchanged, on the daily phone at 400 days — a care
+      action acks in **62.7 ms** median (p95 75.6, max 201; flat in the
+      household's age, ~5× the container's fsync), reads 0.7–1.3 ms, cold read
+      **8.0 ms**, SQLite 536 KiB, backup 110 KiB in 5.3 s, and the hot documents at
+      the same size the container archives to. The one number without a container
+      twin is the **WAL at 4.2 MiB**, eight times the database, which a clean close
+      truncates to 0: harmless at 25 GB free, and the reason to watch it rather
+      than assume. Battery and heat stay **P5-05**'s; nothing was tuned on these
+      numbers.
 - [ ] **P5-08** Release: version, changelog, tag, deploy notes, VPS fallback.
 - [ ] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
 - [ ] **P5-10** Real-browser render checks: a suite that lays the app out in a
