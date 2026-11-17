@@ -228,11 +228,18 @@ is enabled (P0-06), and every boot-path step fails closed on that.** With it
 enabled the same reboot should recover with no hands; that is the remaining
 owner step (P5-05's checklist item).
 
-One design note found here, and not yet fixed: **the boot path is one-shot.** It
-runs at boot, fails closed on Tailscale, and there is no second trigger when the
-tailnet comes up later — so the app stays down until somebody opens Termux. An
-`Always-on VPN` makes that race rare; a retry (or an `sv` unit for the launcher,
-which P5-04 leaves optional) would make it impossible.
+One design note found here: **the boot path was one-shot.** It ran at boot,
+failed closed on Tailscale, and there was no second trigger when the tailnet came
+up later — so the app stayed down until somebody opened Termux. **Fixed
+2026-11-17 (host-side, no device):** `scripts/termux-boot.sh` now waits for the
+tailnet (default 180 s, `PUPKEEP_BOOT_TAILNET_WAIT`, 10 s between attempts) using
+`scripts/termux-sshd.sh`'s own verdict — exit 2 is exactly "no address yet" — and
+starts the app as soon as it appears; a wait that runs out logs one sentence and
+starts nothing, because `--access tailscale` cannot work without it. The `sshd`
+presence check moved *after* the address check so exit 2 keeps that one meaning.
+An `Always-on VPN` is still what makes the wait end without anyone opening the
+app; the retry is what makes a late tailnet recover on its own. **This cell needs
+one more reboot** to record the pass, and that is the owner's hands.
 
 ### 5. Tunnel restart — fail (two defects, both fixed host-side)
 
@@ -438,8 +445,9 @@ spinning. The turn must complete after the restart with one care write.
   restart line carries the exit status/signal the launcher's already did. The
   third cause was the operator's config itself (the stale `LocalForward 8787`,
   which cannot work on a phone whose app owns 8787), and the fourth was two
-  tunnels on one phone. The **one-shot boot path** (nothing retries when Tailscale
-  arrives after boot) is recorded and unfixed.
+  tunnels on one phone. The **one-shot boot path** (nothing retried when Tailscale
+  arrived after boot) is fixed host-side in the same pass: a bounded wait for the
+  tailnet in `termux-boot.sh`, keyed on `termux-sshd.sh`'s exit 2.
 - The supervised unit's output has nowhere to go (`no log/` directory under
   `runsvdir`), so a stranded tunnel is silent unless somebody runs the script by
   hand. Fixing that belongs with P5-04's runbook polish.

@@ -80,6 +80,19 @@ files are untouched — re-measure the phone's Node (P0-01) before deploying
 rather than pinning it back on the spot. A link failure after a *later* upgrade
 is the same trap one upgrade later.
 
+### What the boot path waits for
+
+Termux:Boot runs `~/.termux/boot/pupkeep.sh`, which hands over to
+`scripts/termux-boot.sh`. That script writes the `boot:` line first (so a reboot
+is always visible in `server.log`), takes a wake lock, then **waits for the
+tailnet** — up to 180 s, retrying every 10 s (`PUPKEEP_BOOT_TAILNET_WAIT`,
+`PUPKEEP_BOOT_RETRY_STEP`) — because Android only reconnects Tailscale by itself
+with Always-on VPN, and even then the interface arrives a minute or two after
+boot. The wait ends on `scripts/termux-sshd.sh`'s verdict: it starts sshd as soon
+as there is an address, and the app follows immediately. If the address never
+arrives the script logs one sentence and starts nothing, since `--access
+tailscale` cannot work without it.
+
 ### Android settings that make the host survivable
 
 These are UI settings; Android does not let Termux read them back (P0-06), so
@@ -569,7 +582,8 @@ that rather than retrying in a loop.
 | `kex_exchange_identification: read: Connection reset by peer` | Something accepted on the remote port and then failed to reach the phone. Two causes, both cheap: sshd is not listening (`pgrep -a sshd`; run `scripts/termux-sshd.sh`), or the `RemoteForward` target is `localhost` (= `::1`) while sshd listens on `127.0.0.1`. Use the supervised tunnel (§6). |
 | `Warning: remote port forwarding failed for listen port 8022` | Another session already owns that remote port — usually an earlier tunnel whose phone side died, or your own `~/.ssh/config`. On the VPS: `sudo ss -ltnp | grep ':8022'` and kill that pid; on the phone, delete the `RemoteForward` line and use the supervised unit. |
 | After a reboot the app is not running and `server.log` has no `boot:` line | Termux:Boot did not get through. Check that the Termux:Boot app has been opened once, then run `~/.termux/boot/pupkeep.sh` by hand: it must append the boot line. If it prints `bad interpreter`, the wrapper is older than P5-01b — re-run `scripts/termux-install.sh`. |
-| After a reboot `server.log` **has** a `boot:` line, then `refusing to start: Tailscale is not connected` | The boot path worked and failed closed, as designed. Android does not reconnect Tailscale by itself after a reboot (P0-06), and the boot path runs **once**: if the tailnet arrives later, nothing restarts the app. Turn on Tailscale's **Always-on VPN** (then the next reboot recovers by itself), and until then start it by hand. |
+| After a reboot `server.log` **has** a `boot:` line, then `refusing to start: Tailscale is not connected` | From a boot script older than P5-01b's retry: the boot path ran **once** and gave up. Android does not reconnect Tailscale by itself after a reboot (P0-06), so turn on **Always-on VPN**, re-run `scripts/termux-install.sh` to regenerate the wrapper, and the next reboot waits for the tailnet instead. |
+| `boot: no tailnet address after 180s, so the app is not started` | The boot script waited the whole 180 s (`PUPKEEP_BOOT_TAILNET_WAIT`) and the interface never appeared, which means Always-on VPN is off and nobody opened Tailscale. Open the app, then run `~/.termux/boot/pupkeep.sh` again — or just `~/pupkeep-start.sh --access tailscale --port 8791`. |
 | Empty Today / wrong dates | The household timezone is wrong. First-run setup confirms it, and Settings shows the same three steps; fix the zone there and re-check the meal times. |
 | Push stopped after a tunnel restart | Expected: the origin changed. Reopen the new URL and re-subscribe. |
 | Notifications stopped arriving on the partner's phone | ntfy app backgrounded/killed, topic rotated, or the host is offline. The in-app centre is still authoritative. |

@@ -156,15 +156,18 @@ test("the boot script starts the app with no PATH and no HOME, and writes the bo
   }
 });
 
-test("the boot script still starts the app when sshd cannot (no Tailscale)", async () => {
-  // A phone with no operator shell beats a phone with no care app: the sshd
-  // failure is logged and the launcher runs anyway.
+test("the boot script still starts the app when sshd cannot, although the tailnet is up", async () => {
+  // A phone with no operator shell beats a phone with no care app: sshd fails for
+  // its own reason (here: the binary refuses), and that is *not* exit 2, so the
+  // wait is over and the launcher runs anyway.
   const phone = await makePhone();
   const nodeArgs = join(phone.root, "node-args");
   try {
+    await phone.stub("sshd", "exit 1");
     const result = phone.run("scripts/termux-boot.sh", [], {
       PREFIX: phone.prefix,
       PUPKEEP_DATA_DIR: phone.data,
+      TAILNET_ADDRESS: "100.101.102.61",
       NODE_ARGS_FILE: nodeArgs,
     });
     assert.equal(result.status, 0, `stderr: ${result.stderr}`);
@@ -172,6 +175,72 @@ test("the boot script still starts the app when sshd cannot (no Tailscale)", asy
     assert.match(log, /sshd not started; run scripts\/termux-sshd\.sh/);
     assert.match(log, /^boot: /m);
     assert.match(await readFile(nodeArgs, "utf8"), /--access\n?tailscale/);
+  } finally {
+    await phone.cleanup();
+  }
+});
+
+test("the boot script waits for the tailnet instead of dying at the first refusal", async () => {
+  // 2026-11-16 on the daily phone: the boot line was written and the launcher was
+  // refused 4 s later, because Android had not reconnected Tailscale yet. The
+  // interface arrives a minute or two after boot with Always-on VPN, so the boot
+  // path waits for it — the `ip` stub here hands out an address on the third call.
+  const phone = await makePhone();
+  const nodeArgs = join(phone.root, "node-args");
+  const attempts = join(phone.root, "ip-calls");
+  try {
+    await phone.stub(
+      "ip",
+      `count=0
+[ -f "${attempts}" ] && count="$(cat "${attempts}")"
+count=$((count + 1))
+echo "$count" > "${attempts}"
+if [ "$count" -ge 3 ]; then
+  echo "3: tun1    inet 100.101.102.61/32 scope global tun1"
+fi`,
+    );
+    const result = phone.run("scripts/termux-boot.sh", [], {
+      PREFIX: phone.prefix,
+      PUPKEEP_DATA_DIR: phone.data,
+      NODE_ARGS_FILE: nodeArgs,
+      // A second of patience per attempt keeps the test fast and still exercises
+      // the loop; the shipped default is 180 s.
+      PUPKEEP_BOOT_TAILNET_WAIT: "5",
+      PUPKEEP_BOOT_RETRY_STEP: "1",
+    });
+    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+
+    const log = await readFile(join(phone.data, "server.log"), "utf8");
+    // Refused twice, then bound: the wait is what the log has to show.
+    assert.equal((log.match(/Tailscale is not connected/g) ?? []).length, 2);
+    assert.match(log, /termux-sshd: listening on 100\.101\.102\.61:8022/);
+    assert.match(log, /^boot: 2026-11-10T15:00:00\+01:00/m);
+    assert.match(await readFile(nodeArgs, "utf8"), /--access\n?tailscale/);
+  } finally {
+    await phone.cleanup();
+  }
+});
+
+test("the boot script gives up after the wait, says why, and starts nothing", async () => {
+  // Always-on VPN off means the address never arrives. One sentence after the
+  // wait beats a launcher refusal in a log nobody reads, and the app genuinely
+  // cannot run without the tailnet in `--access tailscale`.
+  const phone = await makePhone();
+  const nodeArgs = join(phone.root, "node-args");
+  try {
+    const result = phone.run("scripts/termux-boot.sh", [], {
+      PREFIX: phone.prefix,
+      PUPKEEP_DATA_DIR: phone.data,
+      NODE_ARGS_FILE: nodeArgs,
+      PUPKEEP_BOOT_TAILNET_WAIT: "1",
+      PUPKEEP_BOOT_RETRY_STEP: "1",
+    });
+    assert.equal(result.status, 1, `stdout: ${result.stdout}`);
+    const log = await readFile(join(phone.data, "server.log"), "utf8");
+    assert.match(log, /no tailnet address after 1s, so the app is not started/);
+    assert.match(log, /Always-on VPN/, "it names the setting that fixes it");
+    assert.match(log, /^boot: 2026-11-10T15:00:00\+01:00/m, "the boot line is still written");
+    await assert.rejects(readFile(nodeArgs), "the launcher must not run");
   } finally {
     await phone.cleanup();
   }

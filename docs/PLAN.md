@@ -4829,7 +4829,14 @@ changes nothing until confirmed.
       quoting them) instead of noting them as harmless, and its restart line now
       carries the exit status/signal like the launcher's. Still open: the quick
       tunnel and its chroot DNS failure, the unit's output having nowhere to go
-      (no `log/` under `runsvdir`), and the one-shot boot path.
+      (no `log/` under `runsvdir`), and the one-shot boot path — **which is now
+      fixed too (2026-11-17, host-side):** `termux-boot.sh` writes its boot line,
+      takes the wake lock and then waits for the tailnet (180 s, `termux-sshd.sh`'s
+      exit 2 as the condition, so a late Always-on VPN now recovers by itself)
+      before starting the app; a wait that runs out logs one sentence and starts
+      nothing. `termux-sshd.sh`'s address check moved ahead of its `sshd` presence
+      check so exit 2 means only "no address". Two fake-Termux tests pin the wait
+      and the give-up; the cell still needs one reboot.
       **The P5-01b follow-up landed (2026-11-10, host-side, no device):**
       `parseTunnelUrl` now reads only the URL inside cloudflared's banner box, so
       `api.trycloudflare.com` is no longer announced as the tunnel and the failure

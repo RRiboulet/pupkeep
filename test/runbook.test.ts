@@ -55,7 +55,15 @@ test("the boot script runs the launcher through --boot and logs into the data di
   // phone with no care app.
   // The interpreter is explicit: Termux has no /usr/bin/env, so an exec of the
   // tracked script relies on a shebang that cannot resolve there (P5-01b).
-  assert.match(boot, /if ! "\$\{BASH:-\$\{PREFIX\}\/bin\/bash\}" "\$REPO_ROOT\/scripts\/termux-sshd\.sh"/);
+  assert.match(boot, /"\$\{BASH:-\$\{PREFIX\}\/bin\/bash\}" "\$REPO_ROOT\/scripts\/termux-sshd\.sh"/);
+  // 2026-11-16: a correct boot line, then the launcher refused 4 s later because
+  // Android had not reconnected Tailscale yet. The wait is what makes a late
+  // tailnet recover without hands; exit 2 is the condition it loops on, and the
+  // give-up path must not require the launcher to explain itself.
+  assert.match(boot, /PUPKEEP_BOOT_TAILNET_WAIT:-/, "the wait is bounded and overridable");
+  assert.match(boot, /-ne 2/, "only 'no tailnet address' is worth waiting for");
+  assert.match(boot, /no tailnet address after %ss, so the app is not started/);
+  assert.match(boot, /^ {2}exit 1$/m, "a wait that runs out starts nothing");
 });
 
 test("sshd is started on demand, re-resolves the tailnet address and never binds everything", async () => {
