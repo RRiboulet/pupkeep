@@ -429,19 +429,24 @@ spinning. The turn must complete after the restart with one care write.
    from the log (a death at the exec and a never-armed app look identical); the
    fix is required either way.
 
-10. **A tailnet that goes away strands the running app, and takes the operator
-    session with it** (observed 2026-11-17 ~17:40, accidentally). `ifconfig tun1`
-    went from `inet 100.90.202.61` to nothing while the launcher was up: the
-    server kept running and kept *listening*, but on an address that no longer
-    existed, so even the phone's own browser could not reach it (`healthz 000`)
-    while `pgrep -a node` showed the launcher and server alive. Restarting in
-    `--access local` on the same port brought it back at `127.0.0.1:8791`. The
-    same flap restarted sshd (pid `32717` → `20295`), because `termux-sshd.sh`
-    re-resolves the address on every start and the tunnel unit calls it — which
-    dropped the operator session mid-command. Two things follow: **the boot
-    path's wait is the code answer** (it now starts the app only once an address
-    exists), and **a live app needs a restart after the address moves**, which no
-    supervision covers today. P5-05's Always-on VPN check is where that ends up.
+10. **A tailnet flap strands the running app, and takes the operator session
+    with it** (observed 2026-11-17 ~17:40, accidentally). The app answered
+    `healthz 000` on `http://100.90.202.61:8791` while `pgrep -a node` showed the
+    launcher and server alive, and sshd restarted underneath (`32717` → `20295`)
+    — which is what `termux-sshd.sh` does when the address moves, and which
+    dropped the operator session mid-command. A restart re-bound the same address
+    and the app answered `200` again. So the listener is bound at start and
+    nothing rebinds it when the address goes away and comes back.
+    **A probe warning found while writing this down:** `ifconfig tun1` prints
+    nothing and exits **1** on this Android build (it only works with no
+    argument, and even then warns that `/proc/net/dev` is unreadable). The working
+    check is `ifconfig | grep -A2 '^tun'` — the one this finding first used,
+    `ifconfig tun1`, could not have shown an address at any point, so treat any
+    "tun1 DOWN" conclusion drawn from it as unproven. Two things follow: **the
+    boot path's wait is the code answer** (it starts the app only once an address
+    exists), and **a live app still needs a restart after the address moves**,
+    which no supervision covers — P5-05's Always-on VPN check is where that ends
+    up.
 
 ## Where the result lands
 
