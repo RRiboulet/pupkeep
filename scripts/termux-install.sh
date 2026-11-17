@@ -67,15 +67,72 @@ esac
 
 step "Termux packages"
 note "cloudflared is NOT in the Termux repo (P0-03); the pinned arm64 binary below replaces it."
-note "pkg update && pkg upgrade first if this Termux has not been updated (PLAN §6.1);"
-note "the upgrade is left to the operator because it can prompt about config files."
+# Upgrade before install (P5-01b finding 1, 2026-11-10). That phone's index had
+# already been moved by an earlier `pkg update`, so `pkg install nodejs` fetched
+# 26.13.0 without the matching libicu and `node` then died with
+# `CANNOT LINK EXECUTABLE "node": library "libicui18n.so.79" not found`. The note
+# that used to live here asked the operator to upgrade first; a note is not a
+# guarantee, and the result reads as a broken app rather than a stale index.
+#
+# `pkg upgrade` refreshes the index itself (termux-tools' `pkg` runs `apt update`
+# before `apt full-upgrade`), so the `pkg update` line is explicit intent rather
+# than necessity: it stays because the failure it prevents is this exact one, and
+# a change in `pkg` must not be able to bring the trap back silently.
+#
+# This is the longest step here and the only one that touches the package system,
+# so it takes a wake lock first: Android reclaiming Termux mid-transaction leaves
+# dpkg half-configured, which is worse than the stale index this repairs.
+termux-wake-lock >/dev/null 2>&1 ||
+  note "termux-wake-lock unavailable; keep Termux in the foreground until this finishes"
+#
+# Non-interactive, keeping local config files. `pkg upgrade` is apt underneath and
+# otherwise stops on a conffile prompt nobody is at the phone to answer: `confdef`
+# answers the "no default action" case, `confold` keeps the installed file. Both
+# fail through `die` like every other step, because raw apt output is the least
+# diagnosable error this script can produce, and each remedy below is one the
+# operator can act on at the phone.
+DEBIAN_FRONTEND=noninteractive pkg update ||
+  die "pkg update failed: no network, a dpkg lock held by another session, or a broken curl (pkg's mirror probe needs it: pkg install curl)" 4
+DEBIAN_FRONTEND=noninteractive pkg upgrade -y \
+  -o Dpkg::Options::=--force-confdef \
+  -o Dpkg::Options::=--force-confold ||
+  die "pkg upgrade failed: no network, a dpkg lock held by another session, or a full disk. If an earlier run was interrupted, run 'dpkg --configure -a'; if the mirror is the problem, 'termux-change-repo'. Nothing below ran." 4
+
 pkg install -y \
   nodejs git curl termux-api sqlite rclone age expect tar termux-services tmux openssh
 
-node_major="$(node --version | cut -d. -f1 | tr -d v)"
+# Installed is not the same as runnable, and the difference is the trap above, so
+# this runs the binary instead of reading the package list — and names the path it
+# ran, because on Termux PATH starts with $PREFIX/bin and the name is what makes a
+# shim visible. Nothing is written after this point, so a broken upgrade leaves no
+# half-configured boot wrapper behind.
+node_path="$(command -v node)" ||
+  die "node is not on PATH after pkg install: the nodejs package did not install" 1
+if ! node_diagnosis="$("${node_path}" --version 2>&1)"; then
+  # Deliberately not "run pkg update && pkg upgrade": this run has already done
+  # exactly that, so repeating it is the one remedy that cannot help.
+  die "${node_path} is installed but does not run:
+   ${node_diagnosis}
+   The index was updated and upgraded by this run, so a stale index is no longer
+   the likely cause. What is left: an interrupted dpkg ('dpkg --configure -a'), a
+   nodejs the upgrade held back ('pkg install --reinstall nodejs'), or a mirror
+   that failed mid-run ('termux-change-repo'). Nothing below ran." 1
+fi
+# stdout only: bionic's linker writes its failure to stderr, and a warning on
+# stderr must not become the version string this parses.
+node_version="$("${node_path}" --version 2>/dev/null)"
+[ -n "${node_version}" ] ||
+  die "${node_path} --version printed nothing: the nodejs package is broken ('pkg install --reinstall nodejs')" 1
+
+node_major="$(printf '%s' "${node_version}" | cut -d. -f1 | tr -d v)"
 case "${node_major}" in
-  24 | 26) note "node $(node --version)" ;;
-  *) die "Node ${node_major}: the plan measures 24 (devcontainer) and 26 (phone, P0-01); upgrade nodejs first" 1 ;;
+  24 | 26) note "node ${node_version}" ;;
+  *)
+    # The upgrade above can move Node across majors on its own (P0-01 measured
+    # 26.12.1, P5-01b 26.13.0), so this is "the line moved", not "the operator
+    # forgot to upgrade".
+    die "Node ${node_version} is outside the 24/26 the plan measured (P0-01). The upgrade this script runs can move Node across majors; re-measure this phone's Node before deploying, or pin nodejs back. The app and the boot wrapper were not touched." 1
+    ;;
 esac
 
 # Android storage permission is a UI dialog; declining it costs nothing, so this

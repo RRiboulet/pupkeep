@@ -502,7 +502,7 @@ not provide `termux-notification` or boot startup.
 
 ```bash
 pkg update && pkg upgrade
-pkg install nodejs git termux-api sqlite rclone age expect tar termux-services tmux
+pkg install nodejs git curl termux-api sqlite rclone age expect tar termux-services tmux openssh
 # cloudflared: the Termux package does NOT exist (P0-03). The arm64 binary in
 # ~/.pupkeep/bin only runs under the wrapper in §6.7 — never spawn it directly.
 termux-setup-storage
@@ -514,6 +514,13 @@ npm ci --omit=dev
 termux-wake-lock
 npm start -- --access tailscale --data ~/.pupkeep
 ```
+
+`scripts/termux-install.sh` is that list, done idempotently and with the checks
+the hand version skips: it upgrades before it installs (P5-04 — a stale index
+moved `nodejs` without `libicu` and left `node` unlinkable), verifies the `node`
+that landed actually runs, pins and checksums cloudflared, and writes the
+Termux:Boot wrapper (§6.3). The runbook points at the script; the block above is
+what it does, by hand.
 
 The pi coding agent is **not** required on the phone. The phone runs the Pupkeep
 server, Pi Durable and Pi AI only. The coding agent lives in the devcontainer.
@@ -4860,13 +4867,25 @@ changes nothing until confirmed.
       `termux-install.sh --with-tunnel <host>` as a `termux-services` unit): it
       checks the operator's `ssh -G` for a conflicting `RemoteForward` and starts
       sshd before it binds, because a reverse tunnel to a dead loopback sshd
-      accepts and resets every connection. **Still open:** `pkg upgrade` before
-      `pkg install` (the index moved nodejs without libicu and left `node`
-      unlinkable), and a re-walk of the reboot cell now that the boot path is
-      fixed. The tunnel side of the runbook needs no change, but it now degrades
-      honestly: a quick tunnel cannot stream SSE, so the client polls (P5-01b's
-      2026-11-12 note) and the `--access cloudflare` test step is still the
-      supported way to check HTTPS, the PWA and Web Push.
+      accepts and resets every connection. **The stale-index half landed
+      (2026-11-17, host-side):** the install script now runs `pkg update` and a
+      non-interactive `pkg upgrade -y -o Dpkg::Options::=--force-confdef -o
+      Dpkg::Options::=--force-confold` before `pkg install` (under a wake lock: a
+      reboot mid-upgrade leaves dpkg half-configured), each failing through `die`
+      with the recovery (`dpkg --configure -a`, `termux-change-repo`, a held-back
+      `nodejs`) instead of raw apt output. Then it runs the `node` it installed and
+      names the path, so a shim is visible: a binary that cannot link stops the
+      script before npm or the boot wrapper, and its message does not repeat the
+      upgrade the same run already did. A note asking the operator to upgrade first
+      was not a guarantee — on 2026-11-10 `pkg install nodejs` fetched 26.13.0
+      without its `libicu`. Three tests run the real script against a fake Termux
+      (ordering and a healthy node, a broken one, a failed upgrade); each fails on
+      the unfixed script, and the two review passes caught a flaky checksum stub
+      and a remedy that pointed back at the step that had just run. **Still open:**
+      a re-walk of the reboot cell now that the boot path is fixed. The tunnel side of the runbook needs no change, but it now
+      degrades honestly: a quick tunnel cannot stream SSE, so the client polls
+      (P5-01b's 2026-11-12 note) and the `--access cloudflare` test step is still
+      the supported way to check HTTPS, the PWA and Web Push.
 - [ ] **P5-05** Daily-phone battery/heat/phantom-process notes and checks, plus
       the two Phase 0 deferrals: **`termux-wake-lock` effectiveness** (not
       observable from Termux, P0-06) and a **kill/restart re-test with the

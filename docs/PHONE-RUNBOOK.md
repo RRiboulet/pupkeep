@@ -50,20 +50,35 @@ cd ~/pupkeep
 ./scripts/termux-install.sh
 ```
 
-It is idempotent and it does five things, in this order:
+It is idempotent and it does six things, in this order:
 
-1. `pkg install nodejs git curl termux-api sqlite rclone age expect tar termux-services tmux openssh`.
+1. `pkg update`, then `pkg upgrade -y` — non-interactively, and keeping local
+   config files. The upgrade is not optional: on 2026-11-10 this phone's index had
+   been moved by an earlier update, so a plain `pkg install nodejs` fetched 26.13.0
+   without the matching `libicu` and `node` could not link at all (P5-01b
+   finding 1). It takes a wake lock for this step, because Android killing Termux
+   mid-upgrade leaves dpkg half-configured.
+2. `pkg install nodejs git curl termux-api sqlite rclone age expect tar termux-services tmux openssh`.
    **`cloudflared` is not in the Termux repository** (P0-03) — nothing installs it
    from `pkg`, and nothing should try.
-2. Refuses a Node line other than the 24/26 the plan measured (P0-01).
-3. Downloads Cloudflare's **arm64 `cloudflared` 2026.10.5** into
+3. Runs the `node` it just installed and prints the path, so a shim is visible. A
+   binary that cannot link stops the script there, with the phone's own error and
+   the three causes left after an upgrade (`dpkg --configure -a`, a held-back
+   `nodejs`, a mirror that failed mid-run); a Node line outside the 24/26 the plan
+   measured (P0-01) stops it too. Neither case writes anything else.
+4. Downloads Cloudflare's **arm64 `cloudflared` 2026.10.5** into
    `~/.pupkeep/bin/cloudflared`, verified against a pinned SHA-256.
-4. `npm ci --omit=dev` — no build step, no native modules; `node:sqlite` only.
-5. Installs `~/.termux/boot/pupkeep.sh`, a one-line hop into the tracked
+5. `npm ci --omit=dev` — no build step, no native modules; `node:sqlite` only.
+6. Installs `~/.termux/boot/pupkeep.sh`, a one-line hop into the tracked
    `scripts/termux-boot.sh`, so the repo stays the source of truth.
 
-`pkg upgrade` on Termux occasionally moves Node across majors. If the server
-refuses to start after an upgrade, check `node --version` first.
+**A re-run upgrades the whole system, Node included.** That is what makes it the
+repair path (§12), and it is also its one cost: `pkg upgrade` occasionally moves
+Node across majors (P0-01 measured `v26.12.1`, P5-01b `v26.13.0`). If the script
+stops on "outside the 24/26", the upgrade has already happened and the app's
+files are untouched — re-measure the phone's Node (P0-01) before deploying
+rather than pinning it back on the spot. A link failure after a *later* upgrade
+is the same trap one upgrade later.
 
 ### Android settings that make the host survivable
 
@@ -537,6 +552,10 @@ that rather than retrying in a loop.
 | `owner link` lost | `npm start -- --reissue-owner --access tailscale` from physical Termux, then read `~/.pupkeep/owner-link.txt`. |
 | `no owner link can be minted: the quick tunnel reported no URL within 30000 ms` (exit **6**) | A `cloudflare` start needs the tunnel's URL to mint an owner link (and `--reissue-owner` needs it to rotate one), and the tunnel never registered — the lines above it in `server.log` say why (the chroot DNS failure, cell 5 of [`kill-restart-matrix.md`](kill-restart-matrix.md)). Fix the tunnel, then start again. Without `--reissue-owner`, a data directory that already has an owner boots anyway and the tunnel starts after the server. |
 | `a task was parked before this process started` | A task crashed the process five times and the harness parked it; a restart does not clear it. Stop the launcher and start with `--retry-parked` for one attempt (§11). |
+| `termux-install: pkg update failed: …` (exit **4**) | No network, a `dpkg` lock held by another Termux session, or a broken `curl` (the mirror probe needs it before `pkg` can install one). Stop the other session, or `pkg install curl`, then re-run. |
+| `termux-install: pkg upgrade failed: …` (exit **4**) | Raw apt output stays for the same three causes plus a full disk. If an earlier run was interrupted, `dpkg --configure -a` first; if the mirror is the problem, `termux-change-repo`. Nothing below the upgrade ran, so the app's files are untouched. |
+| `termux-install: /data/data/…/bin/node is installed but does not run:` | The package is installed and the binary cannot link (P5-01b finding 1: `CANNOT LINK EXECUTABLE … libicui18n.so.79 not found`). The index was already upgraded by that run, so try `dpkg --configure -a`, then `pkg install --reinstall nodejs`, then `termux-change-repo`. Nothing below the check ran. |
+| `termux-install: Node v27… is outside the 24/26` | The upgrade moved Node past what the plan measured (P0-01/P5-01b disagree by a patch already). The upgrade has happened and the app's files were not touched: measure the new line before deploying (§2), or pin `nodejs` back. |
 | `termux-sshd: Tailscale is not connected` | Tailscale is down, so there is no address to bind. Open the Tailscale app and run `scripts/termux-sshd.sh` again — it re-resolves and never listens on all interfaces. |
 | `kex_exchange_identification: read: Connection reset by peer` | Something accepted on the remote port and then failed to reach the phone. Two causes, both cheap: sshd is not listening (`pgrep -a sshd`; run `scripts/termux-sshd.sh`), or the `RemoteForward` target is `localhost` (= `::1`) while sshd listens on `127.0.0.1`. Use the supervised tunnel (§6). |
 | `Warning: remote port forwarding failed for listen port 8022` | Another session already owns that remote port — usually an earlier tunnel whose phone side died, or your own `~/.ssh/config`. On the VPS: `sudo ss -ltnp | grep ':8022'` and kill that pid; on the phone, delete the `RemoteForward` line and use the supervised unit. |

@@ -308,9 +308,13 @@ spinning. The turn must complete after the restart with one care write.
 1. **`pkg update` without `pkg upgrade` breaks Node on this phone** (observed
    12:01): the index moved `nodejs` to 26.13.0 but not `libicu`, and `node` then
    died with `CANNOT LINK EXECUTABLE "node": library "libicui18n.so.79" not found`.
-   `scripts/termux-install.sh`'s own note says to upgrade first, but the script
-   does not do it and does not check afterwards. P5-04 should make it run the
-   upgrade (or fail with that sentence).
+   `scripts/termux-install.sh`'s own note said to upgrade first, but the script
+   did not do it and did not check afterwards. **Fixed 2026-11-17 (P5-04), host
+   side:** the script now runs `pkg update` and a non-interactive `pkg upgrade -y`
+   before `pkg install`, takes a wake lock for that step, and then runs the `node`
+   it installed — a binary that cannot link stops there, names the path and the
+   remaining causes, and writes nothing else. `test/termux-scripts.test.ts` pins
+   it. Not yet re-run on this phone.
 2. **`scripts/termux-install.sh` works end to end on a clean Termux** (12:03):
    packages, the pinned cloudflared (checksum matched the P0-03 binary), `npm ci
    --omit=dev` (93 packages, 9 s), the boot wrapper. `termux-setup-storage` was
