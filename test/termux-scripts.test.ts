@@ -13,7 +13,7 @@
 // has to be a real one.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -209,6 +209,38 @@ test("the tunnel refuses a config that already owns the remote port", async () =
   }
 });
 
+test("the tunnel refuses an alias whose LocalForward lines would starve it", async () => {
+  const phone = await makePhone();
+  const g = join(phone.root, "ssh-g");
+  try {
+    // 2026-11-17 on the operator's phone: `LocalForward 8787` (the app's port)
+    // plus the tunnel's ExitOnForwardFailure killed every attempt before the
+    // remote bind, and the reason was only ever printed on the phone.
+    await writeFile(
+      g,
+      [
+        "hostname vps.example",
+        "user ubuntu",
+        "localforward 8787 127.0.0.1:8787",
+        "localforward 8000 127.0.0.1:8000",
+        "",
+      ].join("\n"),
+    );
+    const result = phone.run("scripts/termux-tunnel.sh", ["oracle", "--dry-run"], {
+      PREFIX: phone.prefix,
+      PUPKEEP_DATA_DIR: phone.data,
+      SSH_G_OUT: g,
+      TAILNET_ADDRESS: "100.101.102.61",
+    });
+    assert.equal(result.status, 3, result.stderr);
+    assert.match(result.stderr, /forwards local port/);
+    assert.match(result.stderr, /localforward 8787/, "the offending line is quoted");
+    assert.match(result.stderr, /Host block with no LocalForward lines/, "it says what to do");
+  } finally {
+    await phone.cleanup();
+  }
+});
+
 test("the tunnel refuses when sshd is not listening, instead of accepting and resetting", async () => {
   const phone = await makePhone();
   const g = join(phone.root, "ssh-g");
@@ -246,6 +278,49 @@ test("the tunnel builds one supervised ssh command and nothing else", async () =
     assert.match(command, /-o ExitOnForwardFailure=yes/);
     assert.match(command, /-o ServerAliveInterval=15/);
     assert.match(command, / oracle$/);
+  } finally {
+    await phone.cleanup();
+  }
+});
+
+test("the tunnel says why it died, with the exit status, like the launcher", async () => {
+  const phone = await makePhone();
+  const g = join(phone.root, "ssh-g");
+  try {
+    await writeFile(g, "hostname vps.example\nuser ubuntu\n");
+    // The stub dies the way a SIGKILLed tunnel does, so `wait` returns 137. That
+    // is the shape a duplicate tunnel, a dead link or a refused key must not hide
+    // behind: each is a different fix.
+    await phone.stub(
+      "ssh",
+      `if [ "\${1:-}" = "-G" ]; then cat "$SSH_G_OUT"; exit 0; fi
+kill -9 $$`,
+    );
+    const child = spawn(BASH, [join(ROOT, "scripts/termux-tunnel.sh"), "oracle"], {
+      detached: true,
+      env: {
+        PREFIX: phone.prefix,
+        PUPKEEP_DATA_DIR: phone.data,
+        SSH_G_OUT: g,
+        TAILNET_ADDRESS: "100.101.102.61",
+        PUPKEEP_TUNNEL_BACKOFF: "1",
+      },
+    });
+    let out = "";
+    child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => (out += chunk.toString()));
+    // The supervisor loop never ends by design, so this waits for the one line and
+    // then ends the process group.
+    const deadline = Date.now() + 8000;
+    while (!/tunnel exited/.test(out) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    try {
+      process.kill(-child.pid!, "SIGKILL");
+    } catch {
+      // already gone
+    }
+    assert.match(out, /tunnel exited \(code null, signal KILL\); retrying in 1s/);
   } finally {
     await phone.cleanup();
   }

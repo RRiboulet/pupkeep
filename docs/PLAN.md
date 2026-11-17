@@ -4808,6 +4808,28 @@ changes nothing until confirmed.
       denied from Termux and the Android Settings force stop did not take on this
       phone (cell 3 used a UID-wide `SIGKILL` instead), and the operator's own
       `ssh` config claims port 8787 while a session is open.
+      **Cells 4 and 5 were re-walked on the same phone (2026-11-16/17):** the
+      rebooted phone now **writes the boot line** — `boot: 2026-11-16T04:27:21+01:00
+      (boot_id 29006057-…)`, which is the evidence the old wrapper could not
+      produce — so the P5-04 boot fix is verified on the device. Recovery still
+      fails, for a reason that is a setting: Tailscale had not reconnected, both
+      `termux-sshd.sh` and the launcher refused in one sentence each ("Refusing to
+      bind 0.0.0.0 instead"), and **the boot path runs once** — nothing retried
+      when the tailnet came up hours later. G5's "phone reboot recovers" now waits
+      on Android **Always-on VPN**, not on code. The operator-tunnel cell **passes**
+      for the supervised unit, after an operator-config fix: the `Host oracle`
+      block's `LocalForward 8787`/`8000` were applied to the tunnel's own
+      connection and, with `ExitOnForwardFailure` set, one busy phone port (8787 is
+      the app) killed every attempt before `-R 8022`; a manual tunnel also fought
+      the unit for the remote port. With the lines gone the unit took 8022 in 15 s,
+      a `kill -9` of its ssh child restored it in ≤ 15 s with sshd and the app
+      untouched (healthz 200 across it), and the app itself now runs on
+      `http://100.90.202.61:8791`. Two defects fixed host-side with tests:
+      `termux-tunnel.sh` **refuses** an alias carrying `LocalForward` lines (exit 3,
+      quoting them) instead of noting them as harmless, and its restart line now
+      carries the exit status/signal like the launcher's. Still open: the quick
+      tunnel and its chroot DNS failure, the unit's output having nowhere to go
+      (no `log/` under `runsvdir`), and the one-shot boot path.
       **The P5-01b follow-up landed (2026-11-10, host-side, no device):**
       `parseTunnelUrl` now reads only the URL inside cloudflared's banner box, so
       `api.trycloudflare.com` is no longer announced as the tunnel and the failure

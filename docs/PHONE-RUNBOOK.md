@@ -342,6 +342,13 @@ silent and both cost an hour on 2026-11-10:
   `RemoteForward 0.0.0.0:8022 …` in the same Host block wins the bind, and then
   that interactive session *is* the tunnel — with whatever target it was written
   with. Delete that line; the supervised unit owns the port now.
+- **…and the alias must not carry `LocalForward` lines either.** ssh applies them
+  to every connection through the alias, and the tunnel sets `ExitOnForwardFailure`
+  (because a stranded remote port has to be loud), so one busy local port on the
+  phone kills the tunnel before it binds. `LocalForward 8787` is the one that
+  bites here: the app owns 8787 on the phone. Give the tunnel its own Host block
+  with `HostName`, `User` and `IdentityFile` and nothing else, and run
+  `scripts/termux-tunnel.sh <that-alias>`.
 - **sshd must be listening.** A reverse tunnel to a loopback sshd that is down
   accepts every connection and resets it, which reads as a network fault and is
   not one (`kex_exchange_identification: read: Connection reset by peer`).
@@ -556,10 +563,13 @@ that rather than retrying in a loop.
 | `termux-install: pkg upgrade failed: …` (exit **4**) | Raw apt output stays for the same three causes plus a full disk. If an earlier run was interrupted, `dpkg --configure -a` first; if the mirror is the problem, `termux-change-repo`. Nothing below the upgrade ran, so the app's files are untouched. |
 | `termux-install: /data/data/…/bin/node is installed but does not run:` | The package is installed and the binary cannot link (P5-01b finding 1: `CANNOT LINK EXECUTABLE … libicui18n.so.79 not found`). The index was already upgraded by that run, so try `dpkg --configure -a`, then `pkg install --reinstall nodejs`, then `termux-change-repo`. Nothing below the check ran. |
 | `termux-install: Node v27… is outside the 24/26` | The upgrade moved Node past what the plan measured (P0-01/P5-01b disagree by a patch already). The upgrade has happened and the app's files were not touched: measure the new line before deploying (§2), or pin `nodejs` back. |
+| `termux-tunnel: ~/.ssh/config forwards local ports for …` (exit **3**) | The alias has `LocalForward` lines, which ssh applies to the tunnel's own connection; with `ExitOnForwardFailure` set, a busy phone port (8787 is the app) kills it before it binds. Give the tunnel a Host block with no forwards (§6). |
+| `bind [127.0.0.1]:8787: Address already in use` / `Could not request local forwarding` | The same lines seen from ssh's side rather than the preflight's. The phone's 8787 is the app, so that forward can never work from this phone — delete it from the Host block. |
 | `termux-sshd: Tailscale is not connected` | Tailscale is down, so there is no address to bind. Open the Tailscale app and run `scripts/termux-sshd.sh` again — it re-resolves and never listens on all interfaces. |
 | `kex_exchange_identification: read: Connection reset by peer` | Something accepted on the remote port and then failed to reach the phone. Two causes, both cheap: sshd is not listening (`pgrep -a sshd`; run `scripts/termux-sshd.sh`), or the `RemoteForward` target is `localhost` (= `::1`) while sshd listens on `127.0.0.1`. Use the supervised tunnel (§6). |
 | `Warning: remote port forwarding failed for listen port 8022` | Another session already owns that remote port — usually an earlier tunnel whose phone side died, or your own `~/.ssh/config`. On the VPS: `sudo ss -ltnp | grep ':8022'` and kill that pid; on the phone, delete the `RemoteForward` line and use the supervised unit. |
 | After a reboot the app is not running and `server.log` has no `boot:` line | Termux:Boot did not get through. Check that the Termux:Boot app has been opened once, then run `~/.termux/boot/pupkeep.sh` by hand: it must append the boot line. If it prints `bad interpreter`, the wrapper is older than P5-01b — re-run `scripts/termux-install.sh`. |
+| After a reboot `server.log` **has** a `boot:` line, then `refusing to start: Tailscale is not connected` | The boot path worked and failed closed, as designed. Android does not reconnect Tailscale by itself after a reboot (P0-06), and the boot path runs **once**: if the tailnet arrives later, nothing restarts the app. Turn on Tailscale's **Always-on VPN** (then the next reboot recovers by itself), and until then start it by hand. |
 | Empty Today / wrong dates | The household timezone is wrong. First-run setup confirms it, and Settings shows the same three steps; fix the zone there and re-check the meal times. |
 | Push stopped after a tunnel restart | Expected: the origin changed. Reopen the new URL and re-subscribe. |
 | Notifications stopped arriving on the partner's phone | ntfy app backgrounded/killed, topic rotated, or the host is offline. The in-app centre is still authoritative. |
