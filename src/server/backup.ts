@@ -977,8 +977,15 @@ export async function restoreDataDir(
     }
 
     if (hasData) {
-      movedAside = join(dataDir, `restore-backup-${archiveStamp(now)}-${process.pid}`);
-      await mkdir(movedAside, { mode: 0o700 });
+      // Assigned only once the directory exists: the failure path below tells the
+      // operator "the previous files are in <dir>", and a `mkdir` that failed (a
+      // read-only data directory, a full disk) would otherwise name a directory
+      // that was never created. Tried to catch this by timing during P5-02's
+      // drill and could not — the window is milliseconds — so the invariant is
+      // made structural instead.
+      const directory = join(dataDir, `restore-backup-${archiveStamp(now)}-${process.pid}`);
+      await mkdir(directory, { mode: 0o700 });
+      movedAside = directory;
       for (const name of present) {
         await rename(join(dataDir, name), join(movedAside, name));
       }

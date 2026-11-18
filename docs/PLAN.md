@@ -380,7 +380,12 @@ pupkeep/
 │   ├── partner-ios-checklist.md     # the P0-10 device check
 │   ├── security-review.md           # P5-06's record and findings
 │   ├── kill-restart-matrix.md       # P5-01b's phone walk
+│   ├── backup-drill.md              # P5-02's drill and its findings
+│   ├── data-growth.md               # P5-07's measurements
+│   ├── DEPLOY.md                    # P5-08's deploy notes for both targets
 │   └── TODO-GUIDE.md          # how to pick the next task
+├── CHANGELOG.md               # the release record (P5-08)
+├── docker-compose.yml         # VPS fallback: loopback publish, /data volume
 ├── package.json
 ├── package-lock.json
 ├── README.md
@@ -4881,6 +4886,28 @@ changes nothing until confirmed.
       restore an interrupted generation; **rotate the passphrase** and confirm
       recovery without it stored beside the archive. The job, remote and
       retention themselves are P1-07's; this task proves they work.
+      **Drilled 2026-11-18 on the live household**
+      ([`backup-drill.md`](backup-drill.md)): a 12 KiB bundle of 23 documents
+      restored **on a different machine** and booted with `secrets.json` absent; a
+      pre-snapshot session still authenticated afterwards (`/api/session`,
+      `/api/puppy`, `/api/walks` 200, and 401 without a cookie); VAPID keys,
+      subscriptions and ntfy topics survived; an off-device copy went through a
+      **real `rclone` sftp remote** and restored from that copy; a truncated
+      archive was refused with an empty data directory; three archives rotated
+      A→B in one run, the oldest and newest restored under B, and A stopped
+      decrypting. **Fixed on the way:** `restoreDataDir` assigned its
+      `restore-backup-<stamp>-<pid>` path before `mkdir`, so a failed `mkdir`
+      would name a directory that was never created — it is assigned only once the
+      directory exists. Two findings recorded because they fool a driller: a
+      session minted after the snapshot is not in it (order: sign in, then back
+      up), and a stray launcher on the same port answers from the *old* data
+      directory (`EADDRINUSE` + supervisor restarts), which reads as a failed
+      restore. `rclone`'s sftp backend checks no host key by default and the drill
+      had to name `known_hosts_file`. **Still open:** a **clean** Termux install
+      (the drill used the daily phone), the **Docker/VPS restore** (no daemon
+      here, image unbuilt), and a schedule — no `crontab` and no `sv` unit runs
+      the job on the phone, which is P5-04's, and an unattended run needs a
+      passphrase source that is not beside the archive (§7.5).
 - [ ] **P5-03** Two-client E2E: feed race, walk, appointment, shared thread,
       approvals, reconnect. The partner leg needs **P0-10** in addition to G4.
 - [ ] **P5-04** Termux install/boot scripts and PHONE-RUNBOOK polish. **Partly
