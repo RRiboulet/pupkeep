@@ -125,10 +125,9 @@ one delta between bases — pinned by `test/checkpoint-policy.test.ts`.
 
 ## What this does not cover
 
-- **The phone** (P5-07's other half): commit latency and WAL behaviour on
-  Termux storage, battery/heat, and the same seeds on a device. The script runs
-  unchanged there (`npm run measure:growth -- --days 500 --data ~/pupkeep-measure`
-  on internal storage, never the workspace mount).
+- **Battery, heat and phantom processes** on the phone: a seeded five-minute run
+  says nothing about a day of running, so those stay P5-05's checks. Commit
+  latency and WAL behaviour on Termux storage *are* measured now — §6.
 - **The agent/model path**: no model calls are made here.
 - **Notification-retention size at 500**: not seeded (a single-member household
   writes no intents); the cap's behaviour is pinned by its own tests.
@@ -165,3 +164,55 @@ read the whole list. Keep all; revisit only if a future feature makes it big.
 Boot is the seam because a phone restarts far more often than monthly (Termux
 kills, reboots, launcher restarts). Between boots the hot document grows by one
 month at most — ~110 feeds, ~24 KiB — which is the same bound the archive keeps.
+
+## 6. The phone (P5-07's other half), measured 2026-11-17
+
+The same script, unchanged, on the daily phone: Samsung `SM-G998B`, Node
+`v26.13.0`, internal storage, `--days 400` (the archive shipped, so months older
+than the current and previous one move out as they do in production). The phone
+was also running the household app and the operator tunnel during the run, which
+is the honest everyday case rather than a quiet device:
+
+```
+ssh phone 'cd ~/pupkeep-measure && npm run measure:growth -- --days 400 --json ~/p5-07-phone-400.json'
+```
+
+| | Phone, 400 days | Container, 500 days (§5) | Ratio |
+|---|---:|---:|---:|
+| Feed commit, median | **62.7 ms** (p95 75.6, max 201) | 12.7 ms | **~5×** |
+| …last 100 commits | 62.1 ms (p95 72.2) | — | flat |
+| Read feeding / walks / growth | 1.32 / 0.97 / 0.67 ms | — | — |
+| Cold read after reopen | **8.0 ms** | 1.9 ms | ~4× |
+| Hot `app.feeding` / `app.walks` | 23.0 / 23.7 KiB | 29.7 / 30.6 KiB | (400 vs 500 days) |
+| `app.growth` / `app.activity` | 11.5 / 34.4 KiB (200 entries) | 42 KiB at 1 500 days / 33.6 KiB | — |
+| `app.commands` | 1.4 KiB (4 records) | 1.4 KiB | — |
+| SQLite | 536 KiB | 930 KiB | — |
+| **WAL** | **4.2 MiB** | — | — |
+| Reopened (clean close) | 831 KiB, WAL 0 | — | — |
+| Backup (real `age` archive) | 5.3 s, **110 KiB** | (size only) 120 KiB at 500 days | — |
+
+What this settles:
+
+1. **A care action acks in ~63 ms on the phone's storage**, p95 76 ms. That is
+   the number the plan wanted, and it is flat in the household's age because the
+   archive bounds the hot document — the same property the container shows. The
+   5× over the devcontainer's SSD is the phone's fsync, not the code; nothing
+   below ~4 ms write+fsync was ever achievable (§4.5).
+2. **The checkpoint policy holds on the device.** 1 200 fed commits, cold read
+   8 ms — 4× the container and still an order of magnitude below anything a
+   screen shows. A `CHECKPOINT_DELTAS` of 100 (the pre-P5-07 value) multiplied by
+   this age would have been ~400 MiB of database and a cold start in seconds.
+3. **The WAL is the one number without a container twin: 4.2 MiB, eight times
+   the 536 KiB database.** A clean close truncates it to 0 and leaves 831 KiB, so
+   it is *recoverable* growth, not a leak — but it is the first measurement of
+   the WAL on this storage and the reason to keep an eye on it rather than
+   assume it stays small. At 25 GB free it is harmless today; if a future device
+   check shows it climbing without a checkpoint, cap it in `docs.ts` rather than
+   tuning storage.
+4. **The encrypted backup is 110 KiB and takes 5.3 s on the phone** — small
+   enough to ride to the remote target nightly (P5-02's drill). The 5.3 s is the
+   online backup plus `age` on the phone; the container records the size but not
+   the duration, so the two are not compared here.
+
+What is *not* in this table: battery, heat and phantom processes. Those are
+P5-05's day-long checks, and a five-minute seeded run says nothing about them.

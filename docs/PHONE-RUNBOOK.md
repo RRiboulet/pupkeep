@@ -50,20 +50,48 @@ cd ~/pupkeep
 ./scripts/termux-install.sh
 ```
 
-It is idempotent and it does five things, in this order:
+It is idempotent and it does six things, in this order:
 
-1. `pkg install nodejs git curl termux-api sqlite rclone age expect tar termux-services tmux openssh`.
+1. `pkg update`, then `pkg upgrade -y` — non-interactively, and keeping local
+   config files. The upgrade is not optional: on 2026-11-10 this phone's index had
+   been moved by an earlier update, so a plain `pkg install nodejs` fetched 26.13.0
+   without the matching `libicu` and `node` could not link at all (P5-01b
+   finding 1). It takes a wake lock for this step, because Android killing Termux
+   mid-upgrade leaves dpkg half-configured.
+2. `pkg install nodejs git curl termux-api sqlite rclone age expect tar termux-services tmux openssh`.
    **`cloudflared` is not in the Termux repository** (P0-03) — nothing installs it
    from `pkg`, and nothing should try.
-2. Refuses a Node line other than the 24/26 the plan measured (P0-01).
-3. Downloads Cloudflare's **arm64 `cloudflared` 2026.10.5** into
+3. Runs the `node` it just installed and prints the path, so a shim is visible. A
+   binary that cannot link stops the script there, with the phone's own error and
+   the three causes left after an upgrade (`dpkg --configure -a`, a held-back
+   `nodejs`, a mirror that failed mid-run); a Node line outside the 24/26 the plan
+   measured (P0-01) stops it too. Neither case writes anything else.
+4. Downloads Cloudflare's **arm64 `cloudflared` 2026.10.5** into
    `~/.pupkeep/bin/cloudflared`, verified against a pinned SHA-256.
-4. `npm ci --omit=dev` — no build step, no native modules; `node:sqlite` only.
-5. Installs `~/.termux/boot/pupkeep.sh`, a one-line hop into the tracked
+5. `npm ci --omit=dev` — no build step, no native modules; `node:sqlite` only.
+6. Installs `~/.termux/boot/pupkeep.sh`, a one-line hop into the tracked
    `scripts/termux-boot.sh`, so the repo stays the source of truth.
 
-`pkg upgrade` on Termux occasionally moves Node across majors. If the server
-refuses to start after an upgrade, check `node --version` first.
+**A re-run upgrades the whole system, Node included.** That is what makes it the
+repair path (§12), and it is also its one cost: `pkg upgrade` occasionally moves
+Node across majors (P0-01 measured `v26.12.1`, P5-01b `v26.13.0`). If the script
+stops on "outside the 24/26", the upgrade has already happened and the app's
+files are untouched — re-measure the phone's Node (P0-01) before deploying
+rather than pinning it back on the spot. A link failure after a *later* upgrade
+is the same trap one upgrade later.
+
+### What the boot path waits for
+
+Termux:Boot runs `~/.termux/boot/pupkeep.sh`, which hands over to
+`scripts/termux-boot.sh`. That script writes the `boot:` line first (so a reboot
+is always visible in `server.log`), takes a wake lock, then **waits for the
+tailnet** — up to 180 s, retrying every 10 s (`PUPKEEP_BOOT_TAILNET_WAIT`,
+`PUPKEEP_BOOT_RETRY_STEP`) — because Android only reconnects Tailscale by itself
+with Always-on VPN, and even then the interface arrives a minute or two after
+boot. The wait ends on `scripts/termux-sshd.sh`'s verdict: it starts sshd as soon
+as there is an address, and the app follows immediately. If the address never
+arrives the script logs one sentence and starts nothing, since `--access
+tailscale` cannot work without it.
 
 ### Android settings that make the host survivable
 
@@ -327,6 +355,13 @@ silent and both cost an hour on 2026-11-10:
   `RemoteForward 0.0.0.0:8022 …` in the same Host block wins the bind, and then
   that interactive session *is* the tunnel — with whatever target it was written
   with. Delete that line; the supervised unit owns the port now.
+- **…and the alias must not carry `LocalForward` lines either.** ssh applies them
+  to every connection through the alias, and the tunnel sets `ExitOnForwardFailure`
+  (because a stranded remote port has to be loud), so one busy local port on the
+  phone kills the tunnel before it binds. `LocalForward 8787` is the one that
+  bites here: the app owns 8787 on the phone. Give the tunnel its own Host block
+  with `HostName`, `User` and `IdentityFile` and nothing else, and run
+  `scripts/termux-tunnel.sh <that-alias>`.
 - **sshd must be listening.** A reverse tunnel to a loopback sshd that is down
   accepts every connection and resets it, which reads as a network fault and is
   not one (`kex_exchange_identification: read: Connection reset by peer`).
@@ -534,13 +569,22 @@ that rather than retrying in a loop.
 | `could not bind the HTTP listener … EADDRINUSE` on 8787 | Something else on the phone owns the port. The common cause here is the operator's own `ssh` config: `LocalForward 8787 127.0.0.1:8787` binds it while that session is open. Close the session or start with `--port <n>`. |
 | `a server already owns ~/.pupkeep (pid …)` | The launcher lock is free but `server.pid` is held: the previous launcher was SIGKILLed and its detached server is still alive. Stop that pid (it is printed) and start again. |
 | The app is up but your partner cannot reach it | Check the tailnet address the launcher printed, that both devices are on the tailnet, and that Tailscale is connected on the host. |
+| `healthz` fails on the tailnet address while `pgrep -a node` shows the launcher and server running | The app binds the tailnet address **at start** and nothing rebinds it when Tailscale drops that address and brings it back. Check the address with `ifconfig | grep -A2 '^tun'` — **not** `ifconfig tun1`, which prints nothing and exits 1 on this Android build — then restart the launcher. Interim access on the phone itself: `~/pupkeep-start.sh --access local --port 8791`. |
 | `owner link` lost | `npm start -- --reissue-owner --access tailscale` from physical Termux, then read `~/.pupkeep/owner-link.txt`. |
 | `no owner link can be minted: the quick tunnel reported no URL within 30000 ms` (exit **6**) | A `cloudflare` start needs the tunnel's URL to mint an owner link (and `--reissue-owner` needs it to rotate one), and the tunnel never registered — the lines above it in `server.log` say why (the chroot DNS failure, cell 5 of [`kill-restart-matrix.md`](kill-restart-matrix.md)). Fix the tunnel, then start again. Without `--reissue-owner`, a data directory that already has an owner boots anyway and the tunnel starts after the server. |
 | `a task was parked before this process started` | A task crashed the process five times and the harness parked it; a restart does not clear it. Stop the launcher and start with `--retry-parked` for one attempt (§11). |
+| `termux-install: pkg update failed: …` (exit **4**) | No network, a `dpkg` lock held by another Termux session, or a broken `curl` (the mirror probe needs it before `pkg` can install one). Stop the other session, or `pkg install curl`, then re-run. |
+| `termux-install: pkg upgrade failed: …` (exit **4**) | Raw apt output stays for the same three causes plus a full disk. If an earlier run was interrupted, `dpkg --configure -a` first; if the mirror is the problem, `termux-change-repo`. Nothing below the upgrade ran, so the app's files are untouched. |
+| `termux-install: /data/data/…/bin/node is installed but does not run:` | The package is installed and the binary cannot link (P5-01b finding 1: `CANNOT LINK EXECUTABLE … libicui18n.so.79 not found`). The index was already upgraded by that run, so try `dpkg --configure -a`, then `pkg install --reinstall nodejs`, then `termux-change-repo`. Nothing below the check ran. |
+| `termux-install: Node v27… is outside the 24/26` | The upgrade moved Node past what the plan measured (P0-01/P5-01b disagree by a patch already). The upgrade has happened and the app's files were not touched: measure the new line before deploying (§2), or pin `nodejs` back. |
+| `termux-tunnel: ~/.ssh/config forwards local ports for …` (exit **3**) | The alias has `LocalForward` lines, which ssh applies to the tunnel's own connection; with `ExitOnForwardFailure` set, a busy phone port (8787 is the app) kills it before it binds. Give the tunnel a Host block with no forwards (§6). |
+| `bind [127.0.0.1]:8787: Address already in use` / `Could not request local forwarding` | The same lines seen from ssh's side rather than the preflight's. The phone's 8787 is the app, so that forward can never work from this phone — delete it from the Host block. |
 | `termux-sshd: Tailscale is not connected` | Tailscale is down, so there is no address to bind. Open the Tailscale app and run `scripts/termux-sshd.sh` again — it re-resolves and never listens on all interfaces. |
 | `kex_exchange_identification: read: Connection reset by peer` | Something accepted on the remote port and then failed to reach the phone. Two causes, both cheap: sshd is not listening (`pgrep -a sshd`; run `scripts/termux-sshd.sh`), or the `RemoteForward` target is `localhost` (= `::1`) while sshd listens on `127.0.0.1`. Use the supervised tunnel (§6). |
 | `Warning: remote port forwarding failed for listen port 8022` | Another session already owns that remote port — usually an earlier tunnel whose phone side died, or your own `~/.ssh/config`. On the VPS: `sudo ss -ltnp | grep ':8022'` and kill that pid; on the phone, delete the `RemoteForward` line and use the supervised unit. |
 | After a reboot the app is not running and `server.log` has no `boot:` line | Termux:Boot did not get through. Check that the Termux:Boot app has been opened once, then run `~/.termux/boot/pupkeep.sh` by hand: it must append the boot line. If it prints `bad interpreter`, the wrapper is older than P5-01b — re-run `scripts/termux-install.sh`. |
+| After a reboot `server.log` **has** a `boot:` line, then `refusing to start: Tailscale is not connected` | From a boot script older than P5-01b's retry: the boot path ran **once** and gave up. Android does not reconnect Tailscale by itself after a reboot (P0-06), so turn on **Always-on VPN**, re-run `scripts/termux-install.sh` to regenerate the wrapper, and the next reboot waits for the tailnet instead. |
+| `boot: no tailnet address after 180s, so the app is not started` | The boot script waited the whole 180 s (`PUPKEEP_BOOT_TAILNET_WAIT`) and the interface never appeared, which means Always-on VPN is off and nobody opened Tailscale. Open the app, then run `~/.termux/boot/pupkeep.sh` again — or just `~/pupkeep-start.sh --access tailscale --port 8791`. |
 | Empty Today / wrong dates | The household timezone is wrong. First-run setup confirms it, and Settings shows the same three steps; fix the zone there and re-check the meal times. |
 | Push stopped after a tunnel restart | Expected: the origin changed. Reopen the new URL and re-subscribe. |
 | Notifications stopped arriving on the partner's phone | ntfy app backgrounded/killed, topic rotated, or the host is offline. The in-app centre is still authoritative. |

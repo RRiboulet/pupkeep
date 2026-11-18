@@ -92,7 +92,7 @@ esac
 # `ssh -G` is the effective config, so this sees the Host block, a `Host *` block
 # and `Match` alike — no parsing of the file itself.
 preflight_ssh_config() {
-  local effective conflict app_port_conflict
+  local effective conflict local_conflict
   effective="$(ssh -G "$HOST" 2>/dev/null || true)"
   conflict="$(printf '%s\n' "$effective" | awk -v port="$PORT" '
     $1 == "remoteforward" {
@@ -109,18 +109,28 @@ preflight_ssh_config() {
     printf 'termux-tunnel: the port now.\n' >&2
     return 3
   fi
-  # A `LocalForward` on the app's default port is not fatal — in `tailscale` mode
-  # the launcher binds the tailnet address, not loopback — but it collides with a
-  # `local`-mode app, and it is the same class of silent surprise.
-  app_port_conflict="$(printf '%s\n' "$effective" | awk '
-    $1 == "localforward" {
-      split($2, parts, ":")
-      if (parts[length(parts)] == "8787") print "  " $0
-    }')"
-  if [ -n "$app_port_conflict" ]; then
-    printf 'termux-tunnel: note: ~/.ssh/config also forwards local 8787, which a\n' >&2
-    printf 'termux-tunnel: local-mode app binds. Harmless in tailscale mode; it will fail there.\n' >&2
-    printf '%s\n' "$app_port_conflict" >&2
+  # ssh applies a Host block's `LocalForward` lines to *every* connection through
+  # the alias, and this unit sets ExitOnForwardFailure (a stranded remote port has
+  # to be loud). A single busy local port is then fatal before the remote bind is
+  # even attempted. Observed 2026-11-17: the operator's `LocalForward 8787` met the
+  # app on the phone's 8787 and the tunnel retried behind a screen nobody watches,
+  # with the reason printed nowhere but the phone.
+  #
+  # This used to be a note — "harmless in tailscale mode" — which stopped being
+  # true when ExitOnForwardFailure arrived. A forward the tunnel cannot carry is
+  # the same silent stranding as a conflicting RemoteForward, so it fails the same
+  # way and with its own sentence.
+  local_conflict="$(printf '%s\n' "$effective" | awk '
+    $1 == "localforward" { print "  " $0 }')"
+  if [ -n "$local_conflict" ]; then
+    printf 'termux-tunnel: ~/.ssh/config forwards local ports for %s:\n%s\n' \
+      "'$HOST'" "$local_conflict" >&2
+    printf 'termux-tunnel: ssh applies those to this connection too, and this unit sets\n' >&2
+    printf 'termux-tunnel: ExitOnForwardFailure (a stranded remote port must be loud), so one\n' >&2
+    printf 'termux-tunnel: busy port on the phone kills the tunnel before it binds.\n' >&2
+    printf 'termux-tunnel: Give the tunnel its own Host block with no LocalForward lines\n' >&2
+    printf 'termux-tunnel: (HostName/User/IdentityFile only), or drop them from this one.\n' >&2
+    return 3
   fi
   return 0
 }
@@ -207,7 +217,23 @@ while :; do
   printf 'termux-tunnel: connecting to %s (remote 0.0.0.0:%s)\n' "$HOST" "$PORT"
   ssh "${SSH_ARGS[@]}" &
   child=$!
-  wait "$child" || printf 'termux-tunnel: the tunnel exited; retrying in %ss\n' "$BACKOFF"
+  status=0
+  wait "$child" || status=$?
   child=""
+  # Mirror the launcher's line (P5-01b's follow-up, `src/launcher/tunnel.ts`):
+  # "address already in use", a refused key and a dead link are three different
+  # fixes, and the exit status is what tells them apart when the only record left
+  # is a scrollback. Without it every death reads the same, which is how the
+  # duplicate-tunnel fight on 2026-11-17 first looked like a network fault.
+  if [ "$status" -ne 0 ]; then
+    if [ "$status" -gt 128 ] && [ "$status" -lt 193 ]; then
+      signal="$(kill -l "$((status - 128))" 2>/dev/null || printf '%s' "$((status - 128))")"
+      printf 'termux-tunnel: tunnel exited (code null, signal %s); retrying in %ss\n' \
+        "$signal" "$BACKOFF"
+    else
+      printf 'termux-tunnel: tunnel exited (code %s, signal none); retrying in %ss\n' \
+        "$status" "$BACKOFF"
+    fi
+  fi
   pause
 done

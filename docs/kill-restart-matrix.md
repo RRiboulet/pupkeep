@@ -1,10 +1,12 @@
 # Kill/restart matrix — the host phone (P5-01b)
 
-**Status: first pass walked 2026-11-10 on the daily phone.** Two cells passed, one
-failed with two defects recorded, two are still to run (they need the owner's
-hands), and the agent-mid-turn cell could not be observed on this host. Every row
-below says what was seen, when, and on which device — nothing is inferred from a
-devcontainer run.
+**Status: walked 2026-11-10, cells 4 and 5 re-walked 2026-11-16/17 on the same
+phone.** Cells 1–3 pass; the reboot cell's wrapper fix is now verified on the
+device while the recovery itself still fails on Tailscale; the operator tunnel
+cell passes for the supervised unit after an ssh-config fix; and the
+agent-mid-turn cell still cannot be observed on this host (no provider key).
+Every row below says what was seen, when, and on which device — nothing is
+inferred from a devcontainer run.
 
 **Owner of the device:** the household owner. **Owner of the host-side claims:**
 [`../test/kill-matrix.test.ts`](../test/kill-matrix.test.ts) (P5-01a).
@@ -69,8 +71,8 @@ Finding 3.
 | 1 | **Server child** killed (`SIGKILL`) | **pass** | 2026-11-10 12:09:35 |
 | 2 | **Launcher** killed (`SIGKILL`) | **pass**, with the documented consequence | 2026-11-10 12:09:56 |
 | 3 | **Termux app** killed (every process of the UID) | **pass** | 2026-11-10 13:53 |
-| 4 | **Phone reboot** | **fail as shipped** — the data and the session survive, the boot path does not start the app | 2026-11-10 ~15:0x reboot, `boot_id` `3e85e392-…` |
-| 5 | **Tunnel restart** | **fail** — two defects, both fixed host-side 2026-11-10; the cell needs a re-walk (the chroot DNS failure is still unexplained) | 2026-11-10 12:10–12:14 |
+| 4 | **Phone reboot** | **the wrapper is fixed and verified; recovery still fails, now on Tailscale** | 2026-11-16 04:27 reboot (`boot_id` `29006057-…`), re-walked 2026-11-17 |
+| 5 | **Tunnel restart** | **pass for the supervised unit** (2026-11-17); the chroot DNS finding below stays open | 2026-11-17 17:15–17:19 |
 | 6 | **Agent mid-turn** | **not observed** — no provider key on this host | — |
 
 ---
@@ -198,6 +200,47 @@ the wrapper dying at the `exec` and the app never being armed both leave exactly
 this evidence (no boot line). The fix makes that distinction visible — a working
 wrapper always writes the boot line.
 
+#### Re-walked 2026-11-16/17 — the wrapper passes, recovery does not
+
+The phone rebooted on **2026-11-16 04:27:21 +01:00** (`boot_id`
+`29006057-09bb-4a1c-9356-328c0f37f48d`), with the regenerated
+`~/.termux/boot/pupkeep.sh` on disk:
+
+```
+#!/data/data/com.termux/files/usr/bin/bash
+exec "/data/data/com.termux/files/usr/bin/bash" "/data/data/com.termux/files/home/pupkeep/scripts/termux-boot.sh"
+```
+
+| | |
+|---|---|
+| Boot line | **written**: `boot: 2026-11-16T04:27:21+01:00 (boot_id 29006057-…)` |
+| …what that proves | Termux:Boot **did** run the wrapper, the explicit interpreter **did** resolve, and `PREFIX`/`HOME` **were** established — the 2026-11-10 death at the `exec` is gone |
+| sshd | **not started**: `termux-sshd: Tailscale is not connected, so there is no address to bind … sshd stays off rather than listening on every interface`, then `boot: sshd not started; run scripts/termux-sshd.sh once Tailscale is connected` |
+| Launcher | **refused, in one sentence**: `refusing to start: Tailscale is not connected: no 100.64.0.0/10 address on a tun interface. Start Tailscale (and set Android's Always-on VPN), or choose another --access mode. Refusing to bind 0.0.0.0 instead.` |
+| App after the reboot | **down** — the boot path ran once and exited; nothing retried when Tailscale came up hours later |
+| Data after the reboot | intact — the household, its documents and its sessions all came back when the app was started by hand at 16:06 |
+
+So the P5-04 fix is **verified on the device** (the boot line is exactly the
+evidence the old wrapper could not produce), and G5's "phone reboot recovers" is
+still **not met**, for one reason that is a setting rather than code:
+**Tailscale does not reconnect after a reboot unless Android's "Always-on VPN"
+is enabled (P0-06), and every boot-path step fails closed on that.** With it
+enabled the same reboot should recover with no hands; that is the remaining
+owner step (P5-05's checklist item).
+
+One design note found here: **the boot path was one-shot.** It ran at boot,
+failed closed on Tailscale, and there was no second trigger when the tailnet came
+up later — so the app stayed down until somebody opened Termux. **Fixed
+2026-11-17 (host-side, no device):** `scripts/termux-boot.sh` now waits for the
+tailnet (default 180 s, `PUPKEEP_BOOT_TAILNET_WAIT`, 10 s between attempts) using
+`scripts/termux-sshd.sh`'s own verdict — exit 2 is exactly "no address yet" — and
+starts the app as soon as it appears; a wait that runs out logs one sentence and
+starts nothing, because `--access tailscale` cannot work without it. The `sshd`
+presence check moved *after* the address check so exit 2 keeps that one meaning.
+An `Always-on VPN` is still what makes the wait end without anyone opening the
+app; the retry is what makes a late tailnet recover on its own. **This cell needs
+one more reboot** to record the pass, and that is the owner's hands.
+
 ### 5. Tunnel restart — fail (two defects, both fixed host-side)
 
 Run as a throwaway second instance on port 8793 so the household was untouched.
@@ -290,6 +333,28 @@ exit code and signal that the server's restart line carries.
 > booted behind it, and `kill -9` of the tunnel child produced the new restart line
 > and a new URL announcement.
 
+#### Re-walked 2026-11-17 — pass for the supervised unit, after a config fix
+
+The tunnel cell was re-run on the same phone, with the supervised unit
+`pupkeep-tunnel` (`sv status` → `run (pid 12490)`, up since 2026-11-10). It
+**passes**, but only after the operator's own ssh config stopped competing with
+it — and the first failures had nothing to do with cloudflared.
+
+| | |
+|---|---|
+| Failure seen | every attempt died with `bind [127.0.0.1]:8787: Address already in use` / `Could not request local forwarding` and `termux-tunnel: the tunnel exited; retrying in 10s` |
+| Cause | the `Host oracle` block carried `LocalForward 8787 …` and `LocalForward 8000 …`. ssh applies those to **every** connection through the alias, and the unit sets `ExitOnForwardFailure` (a stranded remote port must be loud), so one busy phone port was fatal before `-R 8022` was attempted. 8787 is the app's own port (Finding 3), so that forward can never work from this phone at all |
+| Fix (operator, on the phone) | the two `LocalForward` lines removed from both `Host` blocks (`~/.ssh/config.bak-20261117` kept). `ssh -G oracle` now reports zero forward lines |
+| Second failure seen | two tunnels on one phone: a manual `ssh -N -R 0.0.0.0:8022 … oracle` (pid 32725) held the remote port while the unit retried and lost every 10 s. `sv status` said `run` and `ssh` still worked — through the manual session, which is the misleading part |
+| Fix | the manual one was killed; the unit's ssh child took the port **within 15 s** (pid `13061`, `ExitOnForwardFailure` plus the 10 s backoff) |
+| Restart test | `kill -9` of the unit's ssh child at 17:18:15: the port came back in **≤ 15 s** (child `13241`), sshd was untouched (pid `32717`, same pid before and after), and the app was untouched (`healthz 200` on `http://100.90.202.61:8791` across it) |
+| A third defect, found and fixed host-side | `termux-tunnel.sh` printed `the tunnel exited; retrying in 10s` with **no exit status**, so a duplicate tunnel, a refused key and a dead link read identically. It now prints the launcher's shape — `tunnel exited (code null, signal KILL); retrying in 10s` — and it **refuses** an alias that carries `LocalForward` lines (exit 3, naming them) instead of noting them as harmless, which is what made the first failure take an hour to read |
+| Not re-tested today | the cloudflared quick tunnel and the chroot DNS failure above; this cell's re-walk covers the **operator** tunnel, which is the one P5-01b is about |
+
+The unit has no `log/` directory, so under `runsvdir` its output goes nowhere —
+the restart line is visible only in an interactive run. That is worth fixing
+before the release (a `log/run` with `svlogd`, or the launcher's own log target).
+
 ### 6. Agent mid-turn — not observed on this host
 
 The cell needs a real model turn, and the host has no provider key
@@ -308,9 +373,13 @@ spinning. The turn must complete after the restart with one care write.
 1. **`pkg update` without `pkg upgrade` breaks Node on this phone** (observed
    12:01): the index moved `nodejs` to 26.13.0 but not `libicu`, and `node` then
    died with `CANNOT LINK EXECUTABLE "node": library "libicui18n.so.79" not found`.
-   `scripts/termux-install.sh`'s own note says to upgrade first, but the script
-   does not do it and does not check afterwards. P5-04 should make it run the
-   upgrade (or fail with that sentence).
+   `scripts/termux-install.sh`'s own note said to upgrade first, but the script
+   did not do it and did not check afterwards. **Fixed 2026-11-17 (P5-04), host
+   side:** the script now runs `pkg update` and a non-interactive `pkg upgrade -y`
+   before `pkg install`, takes a wake lock for that step, and then runs the `node`
+   it installed — a binary that cannot link stops there, names the path and the
+   remaining causes, and writes nothing else. `test/termux-scripts.test.ts` pins
+   it. Not yet re-run on this phone.
 2. **`scripts/termux-install.sh` works end to end on a clean Termux** (12:03):
    packages, the pinned cloudflared (checksum matched the P0-03 binary), `npm ci
    --omit=dev` (93 packages, 9 s), the boot wrapper. `termux-setup-storage` was
@@ -360,13 +429,46 @@ spinning. The turn must complete after the restart with one care write.
    from the log (a death at the exec and a never-armed app look identical); the
    fix is required either way.
 
+10. **A tailnet flap strands the running app, and takes the operator session
+    with it** (observed 2026-11-17 ~17:40, accidentally). The app answered
+    `healthz 000` on `http://100.90.202.61:8791` while `pgrep -a node` showed the
+    launcher and server alive, and sshd restarted underneath (`32717` → `20295`)
+    — which is what `termux-sshd.sh` does when the address moves, and which
+    dropped the operator session mid-command. A restart re-bound the same address
+    and the app answered `200` again. So the listener is bound at start and
+    nothing rebinds it when the address goes away and comes back.
+    **A probe warning found while writing this down:** `ifconfig tun1` prints
+    nothing and exits **1** on this Android build (it only works with no
+    argument, and even then warns that `/proc/net/dev` is unreadable). The working
+    check is `ifconfig | grep -A2 '^tun'` — the one this finding first used,
+    `ifconfig tun1`, could not have shown an address at any point, so treat any
+    "tun1 DOWN" conclusion drawn from it as unproven. Two things follow: **the
+    boot path's wait is the code answer** (it starts the app only once an address
+    exists), and **a live app still needs a restart after the address moves**,
+    which no supervision covers — P5-05's Always-on VPN check is where that ends
+    up.
+
 ## Where the result lands
 
 - The two defects and the install findings go to P5-01b's follow-up (host-side
   fixes with tests) and P5-04 (the install script). **The tunnel defects are fixed**
   (2026-11-10): A and B as above, and the chroot DNS failure is recorded as open
   with the evidence the phone produced.
-- The reboot row stays open until Tailscale is installed and the owner reboots the
-  phone; G5's "phone reboot recovers" is **not** met until then.
+- The reboot row stays open on one setting, not on code: with Android
+  **Always-on VPN** enabled for Tailscale, the 2026-11-16 failure (a correct
+  fail-closed refusal, after a correct boot line) should become a recovery. That
+  is the owner's step, and it is P5-05's checklist item; until it is taken, G5's
+  "phone reboot recovers" is **not** met.
+- The re-walk's two host-side defects are fixed with tests: a `LocalForward`
+  alias is refused instead of silently starving the tunnel, and the tunnel's
+  restart line carries the exit status/signal the launcher's already did. The
+  third cause was the operator's config itself (the stale `LocalForward 8787`,
+  which cannot work on a phone whose app owns 8787), and the fourth was two
+  tunnels on one phone. The **one-shot boot path** (nothing retried when Tailscale
+  arrived after boot) is fixed host-side in the same pass: a bounded wait for the
+  tailnet in `termux-boot.sh`, keyed on `termux-sshd.sh`'s exit 2.
+- The supervised unit's output has nowhere to go (`no log/` directory under
+  `runsvdir`), so a stranded tunnel is silent unless somebody runs the script by
+  hand. Fixing that belongs with P5-04's runbook polish.
 - P5-05 owns the day-long battery/heat and the wake-lock effect; this file does
   not claim either.

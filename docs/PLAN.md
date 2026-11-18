@@ -502,7 +502,7 @@ not provide `termux-notification` or boot startup.
 
 ```bash
 pkg update && pkg upgrade
-pkg install nodejs git termux-api sqlite rclone age expect tar termux-services tmux
+pkg install nodejs git curl termux-api sqlite rclone age expect tar termux-services tmux openssh
 # cloudflared: the Termux package does NOT exist (P0-03). The arm64 binary in
 # ~/.pupkeep/bin only runs under the wrapper in §6.7 — never spawn it directly.
 termux-setup-storage
@@ -514,6 +514,13 @@ npm ci --omit=dev
 termux-wake-lock
 npm start -- --access tailscale --data ~/.pupkeep
 ```
+
+`scripts/termux-install.sh` is that list, done idempotently and with the checks
+the hand version skips: it upgrades before it installs (P5-04 — a stale index
+moved `nodejs` without `libicu` and left `node` unlinkable), verifies the `node`
+that landed actually runs, pins and checksums cloudflared, and writes the
+Termux:Boot wrapper (§6.3). The runbook points at the script; the block above is
+what it does, by hand.
 
 The pi coding agent is **not** required on the phone. The phone runs the Pupkeep
 server, Pi Durable and Pi AI only. The coding agent lives in the devcontainer.
@@ -4801,6 +4808,35 @@ changes nothing until confirmed.
       denied from Termux and the Android Settings force stop did not take on this
       phone (cell 3 used a UID-wide `SIGKILL` instead), and the operator's own
       `ssh` config claims port 8787 while a session is open.
+      **Cells 4 and 5 were re-walked on the same phone (2026-11-16/17):** the
+      rebooted phone now **writes the boot line** — `boot: 2026-11-16T04:27:21+01:00
+      (boot_id 29006057-…)`, which is the evidence the old wrapper could not
+      produce — so the P5-04 boot fix is verified on the device. Recovery still
+      fails, for a reason that is a setting: Tailscale had not reconnected, both
+      `termux-sshd.sh` and the launcher refused in one sentence each ("Refusing to
+      bind 0.0.0.0 instead"), and **the boot path runs once** — nothing retried
+      when the tailnet came up hours later. G5's "phone reboot recovers" now waits
+      on Android **Always-on VPN**, not on code. The operator-tunnel cell **passes**
+      for the supervised unit, after an operator-config fix: the `Host oracle`
+      block's `LocalForward 8787`/`8000` were applied to the tunnel's own
+      connection and, with `ExitOnForwardFailure` set, one busy phone port (8787 is
+      the app) killed every attempt before `-R 8022`; a manual tunnel also fought
+      the unit for the remote port. With the lines gone the unit took 8022 in 15 s,
+      a `kill -9` of its ssh child restored it in ≤ 15 s with sshd and the app
+      untouched (healthz 200 across it), and the app itself now runs on
+      `http://100.90.202.61:8791`. Two defects fixed host-side with tests:
+      `termux-tunnel.sh` **refuses** an alias carrying `LocalForward` lines (exit 3,
+      quoting them) instead of noting them as harmless, and its restart line now
+      carries the exit status/signal like the launcher's. Still open: the quick
+      tunnel and its chroot DNS failure, the unit's output having nowhere to go
+      (no `log/` under `runsvdir`), and the one-shot boot path — **which is now
+      fixed too (2026-11-17, host-side):** `termux-boot.sh` writes its boot line,
+      takes the wake lock and then waits for the tailnet (180 s, `termux-sshd.sh`'s
+      exit 2 as the condition, so a late Always-on VPN now recovers by itself)
+      before starting the app; a wait that runs out logs one sentence and starts
+      nothing. `termux-sshd.sh`'s address check moved ahead of its `sshd` presence
+      check so exit 2 means only "no address". Two fake-Termux tests pin the wait
+      and the give-up; the cell still needs one reboot.
       **The P5-01b follow-up landed (2026-11-10, host-side, no device):**
       `parseTunnelUrl` now reads only the URL inside cloudflared's banner box, so
       `api.trycloudflare.com` is no longer announced as the tunnel and the failure
@@ -4860,13 +4896,25 @@ changes nothing until confirmed.
       `termux-install.sh --with-tunnel <host>` as a `termux-services` unit): it
       checks the operator's `ssh -G` for a conflicting `RemoteForward` and starts
       sshd before it binds, because a reverse tunnel to a dead loopback sshd
-      accepts and resets every connection. **Still open:** `pkg upgrade` before
-      `pkg install` (the index moved nodejs without libicu and left `node`
-      unlinkable), and a re-walk of the reboot cell now that the boot path is
-      fixed. The tunnel side of the runbook needs no change, but it now degrades
-      honestly: a quick tunnel cannot stream SSE, so the client polls (P5-01b's
-      2026-11-12 note) and the `--access cloudflare` test step is still the
-      supported way to check HTTPS, the PWA and Web Push.
+      accepts and resets every connection. **The stale-index half landed
+      (2026-11-17, host-side):** the install script now runs `pkg update` and a
+      non-interactive `pkg upgrade -y -o Dpkg::Options::=--force-confdef -o
+      Dpkg::Options::=--force-confold` before `pkg install` (under a wake lock: a
+      reboot mid-upgrade leaves dpkg half-configured), each failing through `die`
+      with the recovery (`dpkg --configure -a`, `termux-change-repo`, a held-back
+      `nodejs`) instead of raw apt output. Then it runs the `node` it installed and
+      names the path, so a shim is visible: a binary that cannot link stops the
+      script before npm or the boot wrapper, and its message does not repeat the
+      upgrade the same run already did. A note asking the operator to upgrade first
+      was not a guarantee — on 2026-11-10 `pkg install nodejs` fetched 26.13.0
+      without its `libicu`. Three tests run the real script against a fake Termux
+      (ordering and a healthy node, a broken one, a failed upgrade); each fails on
+      the unfixed script, and the two review passes caught a flaky checksum stub
+      and a remedy that pointed back at the step that had just run. **Still open:**
+      a re-walk of the reboot cell now that the boot path is fixed. The tunnel side of the runbook needs no change, but it now
+      degrades honestly: a quick tunnel cannot stream SSE, so the client polls
+      (P5-01b's 2026-11-12 note) and the `--access cloudflare` test step is still
+      the supported way to check HTTPS, the PWA and Web Push.
 - [ ] **P5-05** Daily-phone battery/heat/phantom-process notes and checks, plus
       the two Phase 0 deferrals: **`termux-wake-lock` effectiveness** (not
       observable from Termux, P0-06) and a **kill/restart re-test with the
@@ -4920,8 +4968,16 @@ changes nothing until confirmed.
       326 KiB (was 14.7 MiB) — flat in the household's age. Growth stays whole
       (42 KiB at 1 500 days). `test/feeding-archive.test.ts` and
       `test/walks-archive.test.ts` pin the move, its idempotence and the boot
-      seam. **Open:** the phone half (commit latency and WAL on Termux storage,
-      battery), which the same script runs unchanged.
+      seam. **The phone half is measured too (2026-11-17, `docs/data-growth.md`
+      §6):** the same script, unchanged, on the daily phone at 400 days — a care
+      action acks in **62.7 ms** median (p95 75.6, max 201; flat in the
+      household's age, ~5× the container's fsync), reads 0.7–1.3 ms, cold read
+      **8.0 ms**, SQLite 536 KiB, backup 110 KiB in 5.3 s, and the hot documents at
+      the same size the container archives to. The one number without a container
+      twin is the **WAL at 4.2 MiB**, eight times the database, which a clean close
+      truncates to 0: harmless at 25 GB free, and the reason to watch it rather
+      than assume. Battery and heat stay **P5-05**'s; nothing was tuned on these
+      numbers.
 - [ ] **P5-08** Release: version, changelog, tag, deploy notes, VPS fallback.
 - [ ] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
 - [ ] **P5-10** Real-browser render checks: a suite that lays the app out in a

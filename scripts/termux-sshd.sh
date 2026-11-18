@@ -100,8 +100,10 @@ running_pid() {
   fi
 }
 
-command -v sshd >/dev/null 2>&1 || die "sshd is not installed; run: pkg install openssh" 3
-
+# The tailnet address comes first, before the `sshd` presence check, because it is
+# the precondition a caller can wait on: exit 2 means exactly "no address yet",
+# and the boot path loops on it until Android's Always-on VPN brings the interface
+# up (P5-01b). A missing package is a different failure with a different fix.
 address="$(tailnet_address)"
 if [ -z "$address" ]; then
   die "Tailscale is not connected, so there is no address to bind. Android does not \
@@ -109,6 +111,8 @@ reconnect Tailscale by itself after a reboot (P0-06): open the Tailscale app (or
 Always-on VPN), then run this again. sshd stays off rather than listening on every \
 interface." 2
 fi
+
+command -v sshd >/dev/null 2>&1 || die "sshd is not installed; run: pkg install openssh" 3
 
 mkdir -p "$STATE"
 chmod 700 "$STATE"

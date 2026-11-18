@@ -13,14 +13,23 @@
 // has to be a real one.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 const ROOT = join(import.meta.dirname, "..");
 const read = (path: string): Promise<string> => readFile(join(ROOT, path), "utf8");
+/**
+ * The interpreter is resolved here, in the test's own environment. `spawnSync`
+ * looks the command up on the *child's* `PATH`, so a test that hands a script
+ * nothing but a fake prefix could not find `bash` at all — and a test that added
+ * the container's `PATH` to make it work would let a missing stub fall through to
+ * the real tool and pass for the wrong reason.
+ */
+const BASH = spawnSync("sh", ["-c", "command -v bash"], { encoding: "utf8" }).stdout.trim();
+assert.ok(BASH !== "", "bash is needed to run the phone scripts");
 
 interface Phone {
   readonly root: string;
@@ -28,6 +37,8 @@ interface Phone {
   readonly prefix: string;
   readonly home: string;
   readonly data: string;
+  /** Write an executable stub into the fake prefix's `bin`. */
+  stub(name: string, body: string): Promise<void>;
   /** Replace an existing environment entirely, the way runit and Termux:Boot do. */
   run(script: string, args: readonly string[], env: Record<string, string>): { status: number | null; stdout: string; stderr: string };
   cleanup(): Promise<void>;
@@ -45,8 +56,9 @@ async function makePhone(): Promise<Phone> {
   await mkdir(home, { recursive: true });
 
   // Only what the scripts actually call, so the PATH really is minimal: the
-  // scripts must find these through the PATH they set themselves.
-  for (const tool of ["mkdir", "chmod", "mv", "cat", "awk", "tr", "sleep", "dirname", "basename", "touch", "rm"]) {
+  // scripts must find these through the PATH they set themselves. `cut` is the
+  // install script's, which reads the Node major line out of `node --version`.
+  for (const tool of ["mkdir", "chmod", "mv", "cat", "awk", "cut", "tr", "sleep", "dirname", "basename", "touch", "rm"]) {
     const found = spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
     assert.ok(found !== "", `${tool} is needed to build the fake phone`);
     await symlink(found, join(bin, tool));
@@ -97,8 +109,9 @@ printf "%s\\n" "$@" >> "$SSH_ARGS_FILE"`,
     prefix,
     home,
     data,
+    stub,
     run(script, args, env) {
-      const result = spawnSync("bash", [join(ROOT, script), ...args], {
+      const result = spawnSync(BASH, [join(ROOT, script), ...args], {
         encoding: "utf8",
         // Deliberately not spreading process.env: the whole point is that these
         // scripts cannot rely on it.
@@ -143,15 +156,18 @@ test("the boot script starts the app with no PATH and no HOME, and writes the bo
   }
 });
 
-test("the boot script still starts the app when sshd cannot (no Tailscale)", async () => {
-  // A phone with no operator shell beats a phone with no care app: the sshd
-  // failure is logged and the launcher runs anyway.
+test("the boot script still starts the app when sshd cannot, although the tailnet is up", async () => {
+  // A phone with no operator shell beats a phone with no care app: sshd fails for
+  // its own reason (here: the binary refuses), and that is *not* exit 2, so the
+  // wait is over and the launcher runs anyway.
   const phone = await makePhone();
   const nodeArgs = join(phone.root, "node-args");
   try {
+    await phone.stub("sshd", "exit 1");
     const result = phone.run("scripts/termux-boot.sh", [], {
       PREFIX: phone.prefix,
       PUPKEEP_DATA_DIR: phone.data,
+      TAILNET_ADDRESS: "100.101.102.61",
       NODE_ARGS_FILE: nodeArgs,
     });
     assert.equal(result.status, 0, `stderr: ${result.stderr}`);
@@ -159,6 +175,72 @@ test("the boot script still starts the app when sshd cannot (no Tailscale)", asy
     assert.match(log, /sshd not started; run scripts\/termux-sshd\.sh/);
     assert.match(log, /^boot: /m);
     assert.match(await readFile(nodeArgs, "utf8"), /--access\n?tailscale/);
+  } finally {
+    await phone.cleanup();
+  }
+});
+
+test("the boot script waits for the tailnet instead of dying at the first refusal", async () => {
+  // 2026-11-16 on the daily phone: the boot line was written and the launcher was
+  // refused 4 s later, because Android had not reconnected Tailscale yet. The
+  // interface arrives a minute or two after boot with Always-on VPN, so the boot
+  // path waits for it — the `ip` stub here hands out an address on the third call.
+  const phone = await makePhone();
+  const nodeArgs = join(phone.root, "node-args");
+  const attempts = join(phone.root, "ip-calls");
+  try {
+    await phone.stub(
+      "ip",
+      `count=0
+[ -f "${attempts}" ] && count="$(cat "${attempts}")"
+count=$((count + 1))
+echo "$count" > "${attempts}"
+if [ "$count" -ge 3 ]; then
+  echo "3: tun1    inet 100.101.102.61/32 scope global tun1"
+fi`,
+    );
+    const result = phone.run("scripts/termux-boot.sh", [], {
+      PREFIX: phone.prefix,
+      PUPKEEP_DATA_DIR: phone.data,
+      NODE_ARGS_FILE: nodeArgs,
+      // A second of patience per attempt keeps the test fast and still exercises
+      // the loop; the shipped default is 180 s.
+      PUPKEEP_BOOT_TAILNET_WAIT: "5",
+      PUPKEEP_BOOT_RETRY_STEP: "1",
+    });
+    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+
+    const log = await readFile(join(phone.data, "server.log"), "utf8");
+    // Refused twice, then bound: the wait is what the log has to show.
+    assert.equal((log.match(/Tailscale is not connected/g) ?? []).length, 2);
+    assert.match(log, /termux-sshd: listening on 100\.101\.102\.61:8022/);
+    assert.match(log, /^boot: 2026-11-10T15:00:00\+01:00/m);
+    assert.match(await readFile(nodeArgs, "utf8"), /--access\n?tailscale/);
+  } finally {
+    await phone.cleanup();
+  }
+});
+
+test("the boot script gives up after the wait, says why, and starts nothing", async () => {
+  // Always-on VPN off means the address never arrives. One sentence after the
+  // wait beats a launcher refusal in a log nobody reads, and the app genuinely
+  // cannot run without the tailnet in `--access tailscale`.
+  const phone = await makePhone();
+  const nodeArgs = join(phone.root, "node-args");
+  try {
+    const result = phone.run("scripts/termux-boot.sh", [], {
+      PREFIX: phone.prefix,
+      PUPKEEP_DATA_DIR: phone.data,
+      NODE_ARGS_FILE: nodeArgs,
+      PUPKEEP_BOOT_TAILNET_WAIT: "1",
+      PUPKEEP_BOOT_RETRY_STEP: "1",
+    });
+    assert.equal(result.status, 1, `stdout: ${result.stdout}`);
+    const log = await readFile(join(phone.data, "server.log"), "utf8");
+    assert.match(log, /no tailnet address after 1s, so the app is not started/);
+    assert.match(log, /Always-on VPN/, "it names the setting that fixes it");
+    assert.match(log, /^boot: 2026-11-10T15:00:00\+01:00/m, "the boot line is still written");
+    await assert.rejects(readFile(nodeArgs), "the launcher must not run");
   } finally {
     await phone.cleanup();
   }
@@ -191,6 +273,38 @@ test("the tunnel refuses a config that already owns the remote port", async () =
     assert.equal(result.status, 3, result.stderr);
     assert.match(result.stderr, /already forwards remote port 8022/);
     assert.match(result.stderr, /Remove the RemoteForward line/, "the message says what to do");
+  } finally {
+    await phone.cleanup();
+  }
+});
+
+test("the tunnel refuses an alias whose LocalForward lines would starve it", async () => {
+  const phone = await makePhone();
+  const g = join(phone.root, "ssh-g");
+  try {
+    // 2026-11-17 on the operator's phone: `LocalForward 8787` (the app's port)
+    // plus the tunnel's ExitOnForwardFailure killed every attempt before the
+    // remote bind, and the reason was only ever printed on the phone.
+    await writeFile(
+      g,
+      [
+        "hostname vps.example",
+        "user ubuntu",
+        "localforward 8787 127.0.0.1:8787",
+        "localforward 8000 127.0.0.1:8000",
+        "",
+      ].join("\n"),
+    );
+    const result = phone.run("scripts/termux-tunnel.sh", ["oracle", "--dry-run"], {
+      PREFIX: phone.prefix,
+      PUPKEEP_DATA_DIR: phone.data,
+      SSH_G_OUT: g,
+      TAILNET_ADDRESS: "100.101.102.61",
+    });
+    assert.equal(result.status, 3, result.stderr);
+    assert.match(result.stderr, /forwards local port/);
+    assert.match(result.stderr, /localforward 8787/, "the offending line is quoted");
+    assert.match(result.stderr, /Host block with no LocalForward lines/, "it says what to do");
   } finally {
     await phone.cleanup();
   }
@@ -238,6 +352,49 @@ test("the tunnel builds one supervised ssh command and nothing else", async () =
   }
 });
 
+test("the tunnel says why it died, with the exit status, like the launcher", async () => {
+  const phone = await makePhone();
+  const g = join(phone.root, "ssh-g");
+  try {
+    await writeFile(g, "hostname vps.example\nuser ubuntu\n");
+    // The stub dies the way a SIGKILLed tunnel does, so `wait` returns 137. That
+    // is the shape a duplicate tunnel, a dead link or a refused key must not hide
+    // behind: each is a different fix.
+    await phone.stub(
+      "ssh",
+      `if [ "\${1:-}" = "-G" ]; then cat "$SSH_G_OUT"; exit 0; fi
+kill -9 $$`,
+    );
+    const child = spawn(BASH, [join(ROOT, "scripts/termux-tunnel.sh"), "oracle"], {
+      detached: true,
+      env: {
+        PREFIX: phone.prefix,
+        PUPKEEP_DATA_DIR: phone.data,
+        SSH_G_OUT: g,
+        TAILNET_ADDRESS: "100.101.102.61",
+        PUPKEEP_TUNNEL_BACKOFF: "1",
+      },
+    });
+    let out = "";
+    child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => (out += chunk.toString()));
+    // The supervisor loop never ends by design, so this waits for the one line and
+    // then ends the process group.
+    const deadline = Date.now() + 8000;
+    while (!/tunnel exited/.test(out) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    try {
+      process.kill(-child.pid!, "SIGKILL");
+    } catch {
+      // already gone
+    }
+    assert.match(out, /tunnel exited \(code null, signal KILL\); retrying in 1s/);
+  } finally {
+    await phone.cleanup();
+  }
+});
+
 test("the scripts never depend on the repo shebang for an exec", async () => {
   // The repo keeps `#!/usr/bin/env bash` so the devcontainer can run and parse the
   // scripts; Termux has no `/usr/bin/env`, so anything *exec'd* from them must
@@ -265,4 +422,164 @@ test("the install script wires the boot wrapper and the tunnel unit with explici
   assert.match(install, /var\/service\/pupkeep-tunnel/);
   assert.match(install, /termux-tunnel\.sh/);
   assert.match(install, /sv-enable pupkeep-tunnel/);
+  // `runsvdir` throws a service's output away without a `log/` child, which is how
+  // a tunnel that lost the port for five days stayed silent (P5-01b, 2026-11-17).
+  assert.match(install, /\$\{unit\}\/log\/run/, "the unit gets a log service");
+  assert.match(install, /svlogd/, "and svlogd is what writes it somewhere");
+});
+
+/**
+ * The install script is the one phone script that runs *before* anything on the
+ * phone works, so its failure modes are the expensive ones: it drives `pkg`,
+ * `curl`, `npm` and the Node binary itself. The stubs below are only those, and
+ * `PATH` is the fake prefix and nothing else — so a test cannot reach the
+ * container's real `node` and pass for the wrong reason.
+ *
+ * `node` deliberately does not exist until the `pkg` stub is asked to install:
+ * the guard under test must sit *after* the install, because on a first run the
+ * phone has no `node` until `pkg install` puts one there.
+ */
+async function stubInstallTools(
+  phone: Phone,
+  options: { nodeRuns: boolean; pkgFails?: "update" | "upgrade" },
+): Promise<{ pkgLog: string; npmLog: string }> {
+  const pkgLog = join(phone.root, "pkg.log");
+  const npmLog = join(phone.root, "npm.log");
+  const template = join(phone.root, "node-template");
+
+  // The failure the phone produced on 2026-11-10: the binary is there, the
+  // library it links against is not. bionic's linker exits 1, not 127.
+  await writeFile(
+    template,
+    options.nodeRuns
+      ? '#!/bin/sh\nif [ "${1:-}" = "--version" ]; then echo v26.13.0; fi\n'
+      : '#!/bin/sh\nif [ "${1:-}" = "--version" ]; then\n' +
+          '  printf \'CANNOT LINK EXECUTABLE "node": library "libicui18n.so.79" not found\\n\' >&2\n  exit 1\nfi\n',
+  );
+  await rm(join(phone.bin, "node"), { force: true });
+
+  // Two columns, because the non-interactive flag is part of what must be true: a
+  // stub that logs only its arguments cannot notice when it disappears.
+  await phone.stub(
+    "pkg",
+    `printf '%s\\t%s\\n' "\${DEBIAN_FRONTEND:-unset}" "$*" >> "${pkgLog}"
+if [ "\${1:-}" = "${options.pkgFails ?? "none"}" ]; then
+  printf 'E: Failed to fetch http://mirror.invalid/dists/stable/InRelease 403 Forbidden\\n' >&2
+  exit 100
+fi
+case " $* " in
+  *" install "*)
+    cat "${template}" > "${phone.prefix}/bin/node"
+    chmod 755 "${phone.prefix}/bin/node"
+    ;;
+esac`,
+  );
+  // `curl -fsSL -o <path> <url>` is the only shape the script uses.
+  await phone.stub("curl", 'while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then : > "$2"; fi; shift; done');
+  // The checksum is pinned by test/runbook.test.ts and by the phone itself; this
+  // test is about ordering. It must consume stdin: `set -o pipefail` turns the
+  // writer's SIGPIPE into a failed pipeline, and that made this test flake.
+  await phone.stub("sha256sum", "cat >/dev/null; exit 0");
+  await phone.stub("npm", `printf '%s\\n' "$*" >> "${npmLog}"`);
+  await phone.stub("uname", `if [ "\${1:-}" = "-m" ]; then echo aarch64; else echo Linux; fi`);
+  await phone.stub("termux-setup-storage", "exit 0");
+  return { pkgLog, npmLog };
+}
+
+/** The environment the install script needs, and nothing from this container. */
+function installEnv(phone: Phone): Record<string, string> {
+  return {
+    // A prefix that need not exist: without --with-tunnel the script only writes
+    // under HOME and the data directory, and this is what lets the real script
+    // run in a container.
+    PREFIX: "/data/data/com.termux/files/usr",
+    HOME: phone.home,
+    PATH: phone.bin,
+    PUPKEEP_DATA_DIR: phone.data,
+  };
+}
+
+test("the install script refreshes and upgrades the index before it installs, then writes the wrapper", async () => {
+  const phone = await makePhone();
+  const { pkgLog, npmLog } = await stubInstallTools(phone, { nodeRuns: true });
+  try {
+    const result = phone.run("scripts/termux-install.sh", [], installEnv(phone));
+    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+
+    const calls = (await readFile(pkgLog, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [env, ...args] = line.split("\t");
+        return { env, args: args.join("\t") };
+      });
+    const update = calls.findIndex((call) => call.args === "update");
+    const upgrade = calls.findIndex((call) => call.args.startsWith("upgrade"));
+    const install = calls.findIndex((call) => call.args.startsWith("install"));
+    assert.ok(update >= 0, `the index is refreshed: ${JSON.stringify(calls)}`);
+    assert.ok(upgrade > update, `the upgrade follows the index refresh: ${JSON.stringify(calls)}`);
+    assert.ok(install > upgrade, `both come before the install: ${JSON.stringify(calls)}`);
+
+    // Non-interactive, and prompt-free at the dpkg level: nobody is at the phone.
+    assert.equal(calls[update]!.env, "noninteractive");
+    assert.equal(calls[upgrade]!.env, "noninteractive");
+    assert.match(calls[upgrade]!.args, /-y\b/);
+    assert.match(calls[upgrade]!.args, /--force-confdef/, "confold alone still prompts for 'no default action'");
+    assert.match(calls[upgrade]!.args, /--force-confold/);
+
+    assert.match(result.stdout, /node v26\.13\.0/);
+    assert.match(await readFile(npmLog, "utf8"), /^ci --omit=dev$/m);
+
+    // And the state the reboot cell depends on is only written once that passed.
+    assert.match(
+      await readFile(join(phone.home, ".termux", "boot", "pupkeep.sh"), "utf8"),
+      /scripts\/termux-boot\.sh/,
+    );
+  } finally {
+    await phone.cleanup();
+  }
+});
+
+test("the install script stops on a node that cannot link, names the causes, and writes nothing", async () => {
+  const phone = await makePhone();
+  const { npmLog } = await stubInstallTools(phone, { nodeRuns: false });
+  try {
+    const result = phone.run("scripts/termux-install.sh", [], installEnv(phone));
+    assert.equal(result.status, 1, `stdout: ${result.stdout}`);
+
+    // The sentence the phone printed is what makes this diagnosable at all.
+    assert.match(result.stderr, /CANNOT LINK EXECUTABLE "node": library "libicui18n\.so\.79" not found/);
+    assert.match(result.stderr, /is installed but does not run/);
+    // …and the advice is not the step that just ran: this run upgraded already.
+    assert.doesNotMatch(result.stderr, /Run 'pkg update && pkg upgrade'/);
+    assert.match(result.stderr, /dpkg --configure -a/, "an interrupted dpkg is the likeliest cause now");
+    assert.match(result.stderr, /pkg install --reinstall nodejs/);
+    assert.match(result.stderr, /termux-change-repo/);
+
+    // Nothing downstream runs: no dependencies, no data directory, no boot
+    // wrapper on a phone whose node cannot start the app.
+    await assert.rejects(readFile(npmLog), "npm ci must not run");
+    await assert.rejects(stat(phone.data), "the data directory is created after the check");
+    await assert.rejects(readFile(join(phone.home, ".termux", "boot", "pupkeep.sh")));
+  } finally {
+    await phone.cleanup();
+  }
+});
+
+test("a failed upgrade is a curated failure, not raw apt output", async () => {
+  const phone = await makePhone();
+  const { npmLog } = await stubInstallTools(phone, { nodeRuns: true, pkgFails: "upgrade" });
+  try {
+    const result = phone.run("scripts/termux-install.sh", [], installEnv(phone));
+    assert.equal(result.status, 4, `stdout: ${result.stdout}`);
+    assert.match(result.stderr, /pkg upgrade failed/);
+    assert.match(result.stderr, /dpkg --configure -a/, "the message says how to recover a half-run dpkg");
+    assert.match(result.stderr, /Nothing below ran/);
+
+    // `|| true` or a silent recovery would look exactly like this script working.
+    await assert.rejects(readFile(npmLog), "the install must not continue");
+    await assert.rejects(readFile(join(phone.home, ".termux", "boot", "pupkeep.sh")));
+  } finally {
+    await phone.cleanup();
+  }
 });
