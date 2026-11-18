@@ -4895,15 +4895,31 @@ changes nothing until confirmed.
       **real `rclone` sftp remote** and restored from that copy; a truncated
       archive was refused with an empty data directory; three archives rotated
       A→B in one run, the oldest and newest restored under B, and A stopped
-      decrypting. **Fixed on the way:** `restoreDataDir` assigned its
-      `restore-backup-<stamp>-<pid>` path before `mkdir`, so a failed `mkdir`
-      would name a directory that was never created — it is assigned only once the
-      directory exists. Two findings recorded because they fool a driller: a
+      decrypting. **Fixed on the way, and this is the finding that justifies the
+      drill:** `backupDataDir` encrypted **straight to the final archive name**, so
+      a `SIGKILL` during encryption left a truncated file under the *newest* name —
+      the next `--verify` and a restore with no `--archive` both failed on it while
+      older archives sat beside it waiting for retention. A reviewer reproduced it
+      with twelve real kills and caught the 800 ms one (3 553 B that would not
+      decrypt), and the same kill left a `.staging-*` with the **plaintext** bundle
+      (VAPID keys included) that only the next run sweeps. The cipher now writes
+      `<name>.partial`, verifies from that name, and only then renames and fsyncs;
+      pinned by two tests. Also **fixed:** `restoreDataDir` assigned its
+      `restore-backup-<stamp>-<pid>` path before `mkdir`, so a failed `mkdir` would
+      name a directory that was never created — an error-message accuracy fix, not
+      a structural one. Two findings recorded because they fool a driller: a
       session minted after the snapshot is not in it (order: sign in, then back
       up), and a stray launcher on the same port answers from the *old* data
       directory (`EADDRINUSE` + supervisor restarts), which reads as a failed
       restore. `rclone`'s sftp backend checks no host key by default and the drill
-      had to name `known_hosts_file`. **Still open:** a **clean** Termux install
+      had to name `known_hosts_file` — now in the runbook's §10. The rotation ran
+      **local-only**; the remote half stays the unit test's. The record does not
+      claim: a clean install (this host is a provisioned devcontainer), an open
+      walk or a reminder firing post-restore (the counts and `/api/puppy` were
+      read), or the interrupted-restore clause (unproven until the module has a
+      filesystem seam). The passphrase reached the phone in a process environment
+      for each run — recorded as a **drill violation** in P0-07's manner, not
+      presented as hygiene. **Still open:** a **clean** Termux install
       (the drill used the daily phone), the **Docker/VPS restore** (no daemon
       here, image unbuilt), and a schedule — no `crontab` and no `sv` unit runs
       the job on the phone, which is P5-04's, and an unattended run needs a

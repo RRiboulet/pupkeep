@@ -6,8 +6,9 @@ this file is the drill that tries to break it, and it records what was seen, wha
 was not, and the three things that went wrong here.
 
 Companions: PLAN §7.5 (the procedure this checks), §14.4 (what may and may not be
-in a bundle), [`PHONE-RUNBOOK.md`](PHONE-RUNBOOK.md) §7 (the operator's copy of
-the same job), [`DEPLOY.md`](DEPLOY.md) (where a restore fits a deployment).
+in a bundle), [`PHONE-RUNBOOK.md`](PHONE-RUNBOOK.md) **§10** (the operator's copy of
+the same job — §7 is daily access), [`DEPLOY.md`](DEPLOY.md) (where a restore fits
+a deployment).
 
 ## What this proves, and what it does not
 
@@ -17,7 +18,7 @@ the same job), [`DEPLOY.md`](DEPLOY.md) (where a restore fits a deployment).
 | A session minted before the snapshot still authenticates after the restore, and VAPID keys/subscriptions/ntfy topics survive | The partner's device: no push was delivered (P0-10) |
 | An off-device copy through a real `rclone` sftp remote uploads, verifies and restores | A network remote other than sftp; no S3/WebDAV/B2 target was configured |
 | A truncated archive is refused and installs nothing | A restore interrupted **mid-move**, caught by timing: see §5 |
-| Rotation re-encrypts every retained archive and does not orphan the oldest | The Docker/VPS fallback: no Docker daemon here, and the image is unbuilt |
+| Rotation re-encrypts every retained **local** archive and does not orphan the oldest | The Docker/VPS fallback: no Docker daemon here, and the image is unbuilt |
 | — | That the job ever runs by itself: **no schedule is installed** (§8) |
 
 ## Hosts
@@ -29,9 +30,22 @@ the same job), [`DEPLOY.md`](DEPLOY.md) (where a restore fits a deployment).
 | Data | the **live** household: 23 documents, 6 task rows, durable `next_seq` 53 |
 | Archive | 12 262 B for that household (`pupkeep-20261118T133349Z.tar.gz.age`) |
 
-The passphrase was generated on the coding host into a 0600 file, sent to the
-phone **on stdin** (`IFS= read -r P && export PUPKEEP_BACKUP_PASSPHRASE="$P"`),
-and never appeared in a command line, a file on the phone, or this document.
+The passphrase was generated on the coding host into a 0600 file and sent to the
+phone **on stdin**, read into `PUPKEEP_BACKUP_PASSPHRASE` for the length of the
+run (`IFS= read -r P && export PUPKEEP_BACKUP_PASSPHRASE="$P"`). It never appeared
+in a command line *on the coding host* and never in this document.
+
+**Recorded as a drill violation, exactly as P0-07 recorded its own:** the
+passphrase was present *on the backup host* for the duration of each run, in a
+process environment. PLAN §7.5's strong form is that it lives off the backup host,
+and §14.4 says so; here rotation has to run where the archives are, so the key
+necessarily reached the machine that holds them. A same-uid process could have
+read `/proc/<pid>/environ` while the run was alive. That is acceptable on a
+single-user phone (the plan says so for the `expect` path) and is **not**
+acceptable as a pattern for the unattended run, which §8 leaves open on purpose.
+The rotation command in §7 is shown with both passphrases as environment
+assignments because that is the shape the job needs; the drill's own runs used
+stdin as described.
 
 ## 1. The backup job on the phone
 
@@ -45,8 +59,12 @@ backup ~/.pupkeep/backups/pupkeep-20261118T133221Z.tar.gz.age (12263 bytes, seq 
 ```
 
 Two observations. The warning is exactly the gap P1-07 recorded (no remote), and
-`seq 53->53` is the job's watermark check: nothing committed between the snapshot
-and the verification, so there was nothing to miss.
+`seq 53->53` is the job's watermark check — the source's seq when the copy began
+against the copy's seq when it finished, and the archive is then verified against
+the copy-start value. So it catches a copy that lagged; it does **not** see a
+commit that lands after the copy but before the verify. That is what "a snapshot,
+not corruption" means in §7.5, and the number here says the household was quiet
+for the seconds the copy took.
 
 ## 2. The off-device copy, over a real remote
 
@@ -59,6 +77,8 @@ npm run backup -- --data ~/.pupkeep --remote vps:pupkeep-offsite/drill
 
 ```
 backup ~/.pupkeep/backups/pupkeep-20261118T133349Z.tar.gz.age (12268 bytes, seq 53->53, uploaded)
+# 12 268 B here and in the listing below; the 12 262 B in the table above is an
+# earlier archive (13:32:21Z), not the same file.
 ```
 
 and `--verify`, which decrypts the archive it just wrote and re-checks the seq:
@@ -123,7 +143,7 @@ Both are worth more than the pass, because both will fool the next person:
 
 ```bash
 npm run restore -- --data /tmp/p5-02/data-restored --archive phone-20261118.age
-npm run start  # --access local --port 8790
+node bin/pupkeep.js --access local --port 8790 --data /tmp/p5-02/data-restored
 ```
 
 ```
@@ -132,9 +152,11 @@ listening url=http://127.0.0.1:8790
 ```
 
 `healthz` 200, 23 documents, the planner reconciled, `secrets.json` absent and
-the server did not care. That is the "restore works on a clean host" half of G5
-as far as this container can carry it — a different machine, a different Node
-major (24 vs 26), the same bundle.
+the server did not care. That is **evidence toward** G5's "restore works on a
+clean host" — a different machine, a different Node major (24 vs 26), the same
+bundle — and it is **not** the clause itself: this host was a provisioned
+devcontainer, not a clean install, and §15.6's G5 also still lacks the two-client
+pass and the phone reboot.
 
 ## 5. An interrupted restore — and why the drill could not catch it
 
@@ -164,8 +186,31 @@ ERROR [restore] age could not decrypt truncated.age (exit 1)
 ```
 
 and the data directory stayed **empty** — no half-installed database, no
-plausible-looking partial file. The job's own write path uses a temporary name and
-a rename, so an interrupted *backup* does not leave an archive that looks newest.
+plausible-looking partial file.
+
+### What the reviewers found here, and the fix
+
+This section originally ended by claiming the *backup* path also used a temporary
+name and a rename. **It did not.** `backupDataDir` encrypted straight to the final
+archive name, so a `SIGKILL` during encryption left a truncated file under the
+**newest** name: the next default `--verify` and a restore with no `--archive`
+both failed on it while the older archives sat beside it waiting for retention to
+delete them. One reviewer reproduced it with twelve real kills at 250–800 ms and
+caught the 800 ms one — 3 553 B at the final name that would not decrypt. The
+same kill left a `.staging-*` directory holding the **plaintext** bundle
+(`config.json`, `push.json` with the VAPID private keys, the database), which
+`sweepStaging` only removes after an hour *and only when another backup runs* —
+and §8 records that nothing runs this job on a schedule.
+
+That is the answer to this section's question, so it was fixed rather than
+reworded: the cipher now writes `<name>.partial`, the archive is decrypted and
+seq-checked from that name, and only then renamed into place and fsynced. A
+killed run can therefore leave a `.partial` and a `.staging-*`, never something
+that matches the archive pattern. `test/backup.test.ts` pins both halves: no
+archive-shaped file exists while encryption is running, and a stale `.partial` is
+never `newestArchive`'s answer. **The staging residue is still only swept by the
+next run** — it is 0700 and inside a 0700 directory, but a schedule (P5-04) is
+what actually bounds it, and that is now recorded rather than assumed.
 
 ## 7. Rotation, and the oldest retained archive
 
@@ -207,14 +252,46 @@ is the failure that would otherwise leave an old-key copy off-device unnoticed.
 - **Push delivery after the restore.** The VAPID keys and subscriptions are in
   the bundle and the restored `push.json` parses; no notification was actually
   delivered to the partner's device (P0-10).
+- **Two items from §7.5's post-restore checklist.** The drill confirmed the
+  transcript and task rows by **count**, not by reading them, and it did not
+  confirm an **open walk** after a restore or a reminder task **firing** post
+  restore. The counts and the `/api/puppy` read make both very likely; neither was
+  observed, so neither is claimed.
+- **The interrupted restore itself.** §5 explains why timing could not catch it;
+  until the module has a filesystem seam, §7.5's "the drill checks the interrupted
+  case" stays unproven rather than passed.
+- **Rotation with a remote configured.** The rotation ran local-only; the remote
+  half is covered by `test/backup.test.ts` ("refuses a remote-only archive") and by
+  the upload leg in §2, not by a drill that rotated and re-uploaded.
 
 ## Cleanup, and what was left on the phone
 
 The drill's archives were encrypted under a passphrase that existed only on this
-host for the duration of the drill, so they were **deleted from the phone and from
-the VPS** afterwards (`vps:pupkeep-offsite/drill`, `~/.pupkeep/backups`,
-`~/p5-02/`). That returns the household to the state it was found in: **no
-archives at all**, because none had ever been taken. The rclone remote definition
-(`vps`) was left in the phone's rclone config — it is one config stanza, and the
-next operator will want it — and the drill passphrases were removed from this
-host.
+host for the duration of the drill, so they were removed afterwards. Nothing was
+left that could look like a usable backup and then fail:
+
+```bash
+# on the phone
+pkill -f 'p5-02/restore[d]' ; rm -rf ~/p5-02 ~/.pupkeep/backups
+rclone purge vps:pupkeep-offsite/drill
+rclone lsf vps:pupkeep-offsite/          # empty
+ls ~/.pupkeep | grep -c backups          # 0
+# here
+rm -rf /tmp/p5-02                        # archives and passphrase files
+```
+
+That returns the household to the state it was found in: **no archives at all**,
+because none had ever been taken. **`status.json` went with the directory** — it
+lives in `<data>/backups`, so deleting the directory also deletes the app's
+backup-warning signal; the app re-creates it on the next failed run. **Do not copy
+this part of the drill against real backups**: deleting a live household's only
+backup directory would be a data-loss event, and it was only safe here because
+every archive in it was made minutes earlier with a key that died with the drill.
+
+The rclone remote definition (`vps`) was **left** in the phone's rclone config.
+It holds a hostname, a user, a path and a `key_file` path — no key material and no
+passphrase — so it is not a secret. It is a **half-configured target** (no
+schedule, no passphrase source), and "the next operator will want it" must not be
+read as "backups are running".
+
+The drill passphrases were removed from this host with `/tmp/p5-02`.
