@@ -4991,8 +4991,15 @@ changes nothing until confirmed.
       that list to be real). **The image is unbuilt**: the coding container has no
       Docker daemon, and `DEPLOY.md` says so in the operator's words instead of
       implying a verified fallback — P5-02's drill is where it gets proven.
-      **Still open:** the `v0.1.0` tag (it goes on a commit that passed typecheck
-      and the suite, after review) and G5's three remaining device legs.
+      **Tagged and released (2026-11-18):** PR #80 merged as `c760c4d`, CI on
+      `main` passed (typecheck, 902 tests, the devcontainer build), and
+      **`v0.1.0`** is an annotated tag on that commit with a GitHub release whose
+      notes are the changelog's own v0.1.0 section. The phone was deployed **from
+      the tag** (`git checkout v0.1.0`, `npm ci --omit=dev`, `--access tailscale
+      --port 8791`) and answered `healthz 200` on `http://100.90.202.61:8791`, so
+      the deploy note is the path that was actually walked. **Still open:** G5's
+      three device legs (P5-01b's reboot cell, P5-02's clean-host restore, P5-03),
+      and the Docker image remains unbuilt.
 - [ ] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
 - [ ] **P5-10** Real-browser render checks: a suite that lays the app out in a
       real browser at phone widths, so a CSS regression is caught before a phone
