@@ -5043,7 +5043,26 @@ changes nothing until confirmed.
       the deploy note is the path that was actually walked. **Still open:** G5's
       three device legs (P5-01b's reboot cell, P5-02's clean-host restore, P5-03),
       and the Docker image remains unbuilt.
-- [ ] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
+- [x] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
+      **Landed 2026-11-18:** the README is the front door again — v0.1.0's status,
+      a docs map that includes `DEPLOY.md`, `CHANGELOG.md`, the backup drill, the
+      kill matrix, the security review and the growth record, every stale claim
+      removed (the "listener is a scaffold, every other route is 503" paragraph and
+      the `.gitkeep` sentence were both wrong), and a **Known limitations** section
+      that is the honest statement of what is unproven: the partner's iPhone
+      (P0-10), the reboot recovering by itself (P5-01b), two real clients (P5-03),
+      a day-long phone run (P5-05), the phone's own browser layout (P5-10's device
+      half), a restore on a genuinely clean host and the unbuilt Docker image
+      (P5-02), no backup schedule, and the product limits that were decisions (no
+      domain, a quick tunnel cannot stream, member recovery is an operator
+      procedure, agent proposals only, one process, the accepted stale-lock race
+      from §3.2). `AGENTS.md` carries the current phase state in place of the build
+      log, the release procedure it never had (version → changelog → PR → CI →
+      annotated tag → release notes from the file → deploy the tag), the
+      backup-write-path fact P5-02 added to the safety rules, and the phone's real
+      entry points. `CHANGELOG.md`'s **Unreleased** section carries the two fixes
+      that landed after `v0.1.0` — the archive's `.partial` rename and the restore
+      directory message — so the next release is not assembled from memory.
 - [ ] **P5-10** Real-browser render checks: a suite that lays the app out in a
       real browser at phone widths, so a CSS regression is caught before a phone
       shows it. **Landed (2026-11-11, host-side, no device):**

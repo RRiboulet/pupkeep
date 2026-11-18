@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+Fixed:
+
+- **A backup kill could leave a truncated file wearing the newest name.** The job
+  encrypted straight to the final archive name, so a `SIGKILL` during encryption
+  left a partial archive that `--verify` (which defaults to the newest) and a
+  restore with no `--archive` would both pick, while the older, valid archives sat
+  beside it waiting for retention to delete them. P5-02's drill reviewers
+  reproduced it with twelve real kills. The cipher now writes `<name>.partial`,
+  the archive is decrypted and seq-checked from that name, and only then renamed
+  and fsynced; two tests pin it. The same kill also leaves a `.staging-*`
+  directory holding the plaintext bundle until the next run sweeps it, which is
+  recorded in the runbook as one more reason the job needs a schedule.
+- **`restoreDataDir` could name a directory it never created.** Its
+  `restore-backup-<stamp>-<pid>` path was assigned before `mkdir`, so a failed
+  `mkdir` produced "the previous files are in `<dir>`" about nothing. It is
+  assigned only once the directory exists.
+
 ## v0.1.0 — 2026-11-17
 
 The first release: one household, two caregivers, one shared agent, running on a
