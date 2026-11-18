@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,6 +18,8 @@ import {
   backupDataDir,
   expiredArchives,
   failureStatus,
+  isBackupArchive,
+  newestArchive,
   normalizeRemote,
   parseArchiveTime,
   parseBackupStatus,
@@ -284,6 +286,55 @@ test("a live backup contains the §7.5 set, verifies, and restores its commit", 
     await source.close();
     await rm(source.dir, { recursive: true, force: true });
     await rm(target, { recursive: true, force: true });
+  }
+});
+
+test("the archive name only exists once the bundle has been verified", async () => {
+  // P5-02's reviewers killed a real run at 800 ms and found a truncated file under
+  // the *newest* name, which then broke the default --verify and a default
+  // restore while older archives waited for retention to delete them. The output
+  // is a `.partial` now, renamed after the decrypt-and-seq check, so this asserts
+  // the invariant at the moment of encryption: nothing that looks like an archive
+  // exists yet.
+  const source = await seedDataDir("partial-before-rename");
+  try {
+    const now = new Date("2026-10-29T12:00:00.000Z");
+    const backupDir = join(source.dir, "backups");
+    let seen: string[] = [];
+    let outputName = "";
+    const spyCipher: ArchiveCipher = {
+      encrypt: async (input, output) => {
+        outputName = output;
+        seen = (await readdir(backupDir)).filter(isBackupArchive);
+        await copyFile(input, output);
+      },
+      decrypt: async (input, output) => {
+        await copyFile(input, output);
+      },
+    };
+    const result = await backupDataDir({ dataDir: source.dir, passphrase: PASSPHRASE, now }, { cipher: spyCipher });
+
+    assert.deepEqual(seen, [], "no file matches the archive pattern while encryption is running");
+    assert.match(outputName, /\.partial$/, "age writes a .partial name");
+    assert.equal(result.archive, join(backupDir, "pupkeep-20261029T120000Z.tar.gz.age"));
+    const left = await readdir(backupDir);
+    assert.deepEqual(left.filter((name) => name.endsWith(".partial")), [], "the rename consumed the partial");
+    assert.deepEqual(left.filter(isBackupArchive), ["pupkeep-20261029T120000Z.tar.gz.age"]);
+  } finally {
+    await rm(source.dir, { recursive: true, force: true });
+  }
+});
+
+test("a .partial left by a killed run is never the newest archive", async () => {
+  // The residue a SIGKILL leaves. `newestArchive` drives `--verify`'s default and
+  // a restore with no --archive, so a partial name must not be eligible at all.
+  const dir = await tempDir("pupkeep-backup-partial-");
+  try {
+    await writeFile(join(dir, "pupkeep-20261029T120000Z.tar.gz.age"), "complete", { mode: 0o600 });
+    await writeFile(join(dir, "pupkeep-20261029T130000Z.tar.gz.age.partial"), "truncated");
+    assert.equal(await newestArchive(dir), "pupkeep-20261029T120000Z.tar.gz.age");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

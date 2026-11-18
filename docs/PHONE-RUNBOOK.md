@@ -500,8 +500,24 @@ npm run backup -- --data ~/.pupkeep \
 - There is deliberately no default source for it: an unattended nightly run needs
   a vault read or an operator, never a key filed beside the archive.
 - The bundle is SQLite + `config.json` + `push.json`; `secrets.json` is excluded.
+- **The rclone target must verify the host key.** rclone's sftp backend does no
+  host-key validation unless you tell it to, and prints
+  `NOTICE: No host key validation is being performed` while connecting:
+
+  ```bash
+  rclone config update <remote> known_hosts_file "$HOME/.ssh/known_hosts"
+  ```
+
+  A stolen archive is still encrypted, so this is about integrity rather than
+  confidentiality - but a silent substitution fails a restore at the worst moment
+  (P5-02's drill).
 - Retention is 14 days and the newest archive is always kept; `--verify` decrypts
-  the newest local archive and checks it.
+  the newest local archive and checks it. An archive only carries its real name
+  once it has been decrypted and verified - a killed run leaves
+  `<name>.partial` and a `.staging-*` directory behind, never something `--verify`
+  or a restore would pick up. The staging directory holds the plaintext bundle
+  (including the VAPID keys) until the **next** run sweeps it, which is one more
+  reason to run this on a schedule (P5-04).
 - A restore **requires the server to be stopped** and refuses a live lock:
 
 ```bash
@@ -510,8 +526,9 @@ npm run restore -- --data ~/.pupkeep --archive ~/.pupkeep/backups/<name>.age
 
 A restore is not a merge: against a data directory that still has a database,
 config or `push.json`, it refuses unless you pass `--force`, and with `--force`
-it first moves the existing files into `restore-backup-<timestamp>/`, so a
-mistaken restore is itself recoverable. After a restore, re-enter provider keys
+it first moves the existing files into `restore-backup-<timestamp>-<pid>/`, so a
+mistaken restore is itself recoverable; if the run fails after that move, the
+error names the directory. After a restore, re-enter provider keys
 in Settings (they are not in the bundle). Keep the backup passphrase off the
 phone-host's backup destination.
 

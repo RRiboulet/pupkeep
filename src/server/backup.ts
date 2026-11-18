@@ -844,34 +844,43 @@ export async function backupDataDir(
   if (!remote) warnings.push("no rclone remote configured; only the local encrypted archive was written");
 
   const staging = await mkdtemp(join(backupDir, ".staging-"));
+  // The age output goes to a `.partial` name and is only renamed once it has been
+  // decrypted and verified. Writing the final name directly was P5-02's biggest
+  // finding (found by its own drill's reviewers, who SIGKILLed a real run): a
+  // killed job left a truncated file under the **newest** name, so the default
+  // `--verify` and a default restore both failed on it while older archives sat
+  // beside it waiting for retention to delete them.
+  const partial = `${archive}.partial`;
   let copy: DatabaseCopy;
-  let wroteArchive = false;
+  let wrotePartial = false;
   let verified = false;
   try {
     copy = await stageBundle(dataDir, staging);
     const tarPath = join(staging, "bundle.tar.gz");
     await createTar(run, staging, tarPath);
-    // age may create the output before failing; remember that so a partial file
-    // is removed rather than left to look like a backup.
-    wroteArchive = true;
-    await cipher.encrypt(tarPath, archive, options.passphrase);
-    await chmod(archive, 0o600);
-    await fsyncFile(archive);
+    wrotePartial = true;
+    await cipher.encrypt(tarPath, partial, options.passphrase);
 
     // Verify the archive by decrypting it again. If this fails, the archive is
-    // not a backup and must not be left where a later restore might pick it.
+    // not a backup and must not be renamed into place.
     let staged: StagedArchive | undefined;
     try {
-      staged = await stageArchive(archive, options.passphrase, { run, cipher }, copy.expectedSeq);
+      staged = await stageArchive(partial, options.passphrase, { run, cipher }, copy.expectedSeq);
       verified = true;
     } catch (error) {
       throw new Error(`the archive did not verify and was discarded: ${(error as Error).message}`);
     } finally {
       await staged?.cleanup();
     }
+
+    await chmod(partial, 0o600);
+    await fsyncFile(partial);
+    // The only rename in the backup path: after this the name means "verified".
+    await rename(partial, archive);
+    await fsyncDirectory(backupDir);
   } finally {
     await rm(staging, { recursive: true, force: true });
-    if (wroteArchive && !verified) await rm(archive, { force: true });
+    if (wrotePartial && !verified) await rm(partial, { force: true });
   }
 
   let uploaded = false;
@@ -977,8 +986,15 @@ export async function restoreDataDir(
     }
 
     if (hasData) {
-      movedAside = join(dataDir, `restore-backup-${archiveStamp(now)}-${process.pid}`);
-      await mkdir(movedAside, { mode: 0o700 });
+      // Assigned only once the directory exists: the failure path below tells the
+      // operator "the previous files are in <dir>", and a `mkdir` that failed (a
+      // read-only data directory, a full disk) would otherwise name a directory
+      // that was never created. Tried to catch this by timing during P5-02's
+      // drill and could not — the window is milliseconds — so the invariant is
+      // made structural instead.
+      const directory = join(dataDir, `restore-backup-${archiveStamp(now)}-${process.pid}`);
+      await mkdir(directory, { mode: 0o700 });
+      movedAside = directory;
       for (const name of present) {
         await rename(join(dataDir, name), join(movedAside, name));
       }
