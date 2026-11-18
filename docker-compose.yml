@@ -1,0 +1,27 @@
+# PLAN §6.9's VPS fallback: `docker compose up -d`, TLS in front, restore the
+# latest encrypted backup into the volume. The phone remains primary.
+#
+# Unverified as of v0.1.0 (no Docker daemon in the coding container); P5-02's
+# restore drill is where this is meant to be proven. See docs/DEPLOY.md.
+services:
+  pupkeep:
+    build: .
+    image: pupkeep:0.1.0
+    # Loopback only, by default: TLS and the public origin belong to whatever is
+    # in front (Caddy, or Tailscale serve). Publishing on 0.0.0.0 would say the
+    # opposite — plain HTTP with the sign-in screen on the internet.
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - pupkeep-data:/data
+    environment:
+      # The server's default is off; a backup passphrase here would be a secret
+      # in a file that may be committed. Use .env (git-ignored) for that.
+      PUPKEEP_PORT: "8787"
+    restart: unless-stopped
+    # Stop the launcher cleanly so its server child closes SQLite and removes the
+    # pid locks: one process per file is a property of this app, not of systemd.
+    stop_grace_period: 30s
+
+volumes:
+  pupkeep-data:

@@ -1,6 +1,7 @@
-# The Dockerfile only needs the build context for its own instructions; the repo
-# is mounted by Compose, not copied. Keep secrets, dependencies and local data
-# out of the build context so a rebuild does not upload a phone-sized tree.
+# One file, two build contexts: the devcontainer image (its Dockerfile uses `..`
+# as the context, and Compose mounts the repo rather than copying it) and the VPS
+# fallback image at the root, which *does* copy the checkout. Secrets,
+# dependencies and local data stay out of both (PLAN §14.4).
 .git
 node_modules
 data
@@ -14,5 +15,15 @@ data
 backups
 *.log
 .pupkeep
+.pi
 .pi/todos
 .devcontainer/.cache
+npm-debug.log*
+
+# The app image copies the checkout but needs none of these, and the devcontainer
+# reads the repo from its mount rather than from the context.
+test
+docs
+*.md
+!README.md
+!NOTICE.md

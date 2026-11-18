@@ -1,6 +1,6 @@
 {
   "name": "pupkeep",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "A shared, agent-operated puppy care app for two caregivers, hosted on a phone.",
