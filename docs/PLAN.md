@@ -4979,6 +4979,20 @@ changes nothing until confirmed.
       than assume. Battery and heat stay **P5-05**'s; nothing was tuned on these
       numbers.
 - [ ] **P5-08** Release: version, changelog, tag, deploy notes, VPS fallback.
+      **Artifacts landed (2026-11-17, host-side):** `package.json` is `0.1.0`,
+      `CHANGELOG.md` carries the first release with its task IDs and an explicit
+      **Not proven here** section (the partner's iPhone, the reboot recovery, the
+      clean-host restore, two clients, the day-long phone run),
+      [`DEPLOY.md`](DEPLOY.md) is the deploy note for both targets, and the
+      repository's layout is now complete: the root `Dockerfile` and
+      `docker-compose.yml` that §4 and §6.9 always specified exist, with a
+      `.dockerignore` that keeps `.env`, data, SQLite files and `.pi/todos` out of
+      the image (the existing `test/devcontainer.test.ts` assertion is what forced
+      that list to be real). **The image is unbuilt**: the coding container has no
+      Docker daemon, and `DEPLOY.md` says so in the operator's words instead of
+      implying a verified fallback — P5-02's drill is where it gets proven.
+      **Still open:** the `v0.1.0` tag (it goes on a commit that passed typecheck
+      and the suite, after review) and G5's three remaining device legs.
 - [ ] **P5-09** Final docs: README, AGENTS, plan updates, known limitations.
 - [ ] **P5-10** Real-browser render checks: a suite that lays the app out in a
       real browser at phone widths, so a CSS regression is caught before a phone
