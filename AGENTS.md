@@ -7,52 +7,60 @@ The plan is the source of truth for product and architecture; the guide explains
 how to pick a task, branch, verify and report. Do not build app code beyond the
 current approved phase.
 
-**Current phase: Phase 5** (host-side hardening, then release; Phase 4 is
-complete through P4-11). Phase 3 is
-complete on `main` through P3-08; Gate G3 is covered by
-`test/dual-path.test.ts`. Phase 1 is complete through P1-14 and Phase 2 through
-P2-09. **P4-01** (`app.calendar` and its service), **P4-02** (appointment HTTP,
-the calendar read tool and the Calendar UI), **P4-03** (appointment reminder
-tasks on the hidden system conversation), **P4-04** (the daily feed planner and
-boot reconciliation), **P4-05** (the notification outbox, Web Push and VAPID),
-**P4-06** (the notification centre, prefs, the badge, ntfy and the host's
-Termux:API), **P4-07** (`app.approvals`, the propose-only tools, the confirm and
-cancel routes), **P4-08** (`app.usage`, the monthly cap, the provider catalog
-from `secrets.json`, the allowlist probe, the picker and the Settings card) and
-**P4-09** (the caregivers' access and notification guide, plus the Settings
-invite card), **P4-10** (the Gate G4 test slice: a reminder across a real
-close/reopen, a cancelled one never firing, the dedupe key as the push tag) and
-**P4-11** (the Settings "Meal times" card, so the schedule can be edited after
-setup without reopening the wizard) are complete, so **Phase 4 is done and
-Gate G4's automated half is covered**; the
-next task is **P5-01**, split into **P5-01a** (host: the kill matrix as
-`test/kill-matrix.test.ts` plus the `--retry-parked` operator path, complete) and
-**P5-01b** (the phone walk and its recorded observations — `ssh phone` reaches the
-host phone from the devcontainer; the walk is recorded but its reboot and tunnel
-cells still need a re-run on the device, and its host-side follow-up — the tunnel
-URL parser, the tunnel restart line, minting the owner on the tunnel origin — is
-done). **P5-06** (the security review) is done too: `docs/security-review.md` and
-`test/security.test.ts`, including the agent-escape allowlist. The next host-side
-task is **P5-07**, whose host half is done: [`docs/data-growth.md`](docs/data-growth.md)
-records the measurements and chose the checkpoint policy (`CHECKPOINT_DELTAS`
-is 1: a document delta is the whole value here, so the old window of 100 cost
-100x the disk and cold start for nothing). The follow-up landed with it: feed
-events and closed walks older than the current and previous household month move
-on boot into one committed document per month (`app.feeding.archive`,
-`app.walks.archive`), so a care commit is flat in the household's age (11 ms at
-1 500 days against 159 unbounded). Growth stays whole. Its phone half stays open. What remains for Phase 5 otherwise needs the phone (P5-07's
-commit/WAL numbers, P5-01b's re-walk, P5-02, P5-05) or the release and docs
-passes (**P5-08**, **P5-09**), which are the next host-side tasks.
+**Current state: v0.1.0 is released** (annotated tag on a commit whose CI passed,
+GitHub release notes taken from `CHANGELOG.md`). Phases 0–4 are complete. Phase 5
+is complete except the device legs, which are listed below and in the README's
+**Known limitations** — that list, not this paragraph, is the honest statement of
+what is unproven.
 
-**P5-10** (real-browser render checks) landed beside them and needs no device:
-`test/browser-render.test.ts` lays the real app out in a pinned Chromium at
-320/360/390/430 px. Its first run found the bottom nav 459 px wide inside every
-phone viewport, so the sixth tab could never be reached; the notification tab now
-shows as "Alerts" (accessible name "Alerts, notifications, N unread", so WCAG
-Label-in-Name still holds) and the row shrinks with a scaled font instead of
-pushing a tab off the edge. `playwright` is a devDependency only, never part of
-the phone runtime; the suite skips where no browser is installed and fails
-instead on CI, which plus `postCreate.sh` installs one (PLAN §15.5).
+What Phase 5 landed, and where the record is:
+
+- **P5-01a/P5-01b — the kill/restart matrix.** `test/kill-matrix.test.ts` covers a
+  real `SIGKILL` mid-turn and right after four write acks, plus `--retry-parked`
+  (the operator's only way out of a task parked at the harness's restart limit).
+  The phone walk is [`docs/kill-restart-matrix.md`](docs/kill-restart-matrix.md):
+  server-kill, launcher-kill, Termux-kill and the operator tunnel pass; the reboot
+  cell has its boot line but still needs one reboot with Android **Always-on VPN**
+  on, and the tunnel cell's cloudflared/DNS half is unproven.
+- **P5-02 — the backup/restore drill**, [`docs/backup-drill.md`](docs/backup-drill.md):
+  a real bundle restored on a different machine and booted without `secrets.json`,
+  auth and VAPID survived, an off-device copy went over a real rclone sftp remote,
+  a truncated archive was refused, and rotation did not orphan the oldest. It
+  caught a real defect: the archive used to be encrypted to its **final** name, so
+  a killed run left a truncated file that `--verify` and a default restore would
+  pick. The cipher now writes `<name>.partial` and renames after verification. A
+  clean-host restore, the Docker/VPS leg and a schedule are still open.
+- **P5-04 — the phone scripts.** `scripts/termux-install.sh` upgrades the index
+  before installing, refuses a `node` that cannot link, pins cloudflared and
+  writes the boot wrapper and the optional supervised tunnel; `termux-boot.sh`
+  writes the boot line, takes a wake lock and **waits for the tailnet** (180 s,
+  `PUPKEEP_BOOT_TAILNET_WAIT`) instead of giving up at the first refusal;
+  `termux-sshd.sh` binds the tailnet address and loopback only; `termux-tunnel.sh`
+  refuses an alias that would starve it and prints the exit status of a dead
+  tunnel.
+- **P5-06 — the security review**, [`docs/security-review.md`](docs/security-review.md)
+  and `test/security.test.ts` (thirteen adversarial attempts, plus the
+  agent-escape allowlist over tools and named imports).
+- **P5-07 — performance and growth**, [`docs/data-growth.md`](docs/data-growth.md):
+  `CHECKPOINT_DELTAS` is 1, feeding and closed walks archive by month, a care
+  commit is flat in the household's age, and the phone's numbers exist (62.7 ms
+  median commit, 8 ms cold read, WAL 4.2 MiB, 110 KiB backup).
+- **P5-08 — the release**: `CHANGELOG.md`, [`docs/DEPLOY.md`](docs/DEPLOY.md), the
+  root `Dockerfile`/`docker-compose.yml` (unbuilt), and the `v0.1.0` tag.
+- **P5-09 — this documentation pass** (README, this file, the plan).
+- **P5-10 — real-browser render checks.** `test/browser-render.test.ts` lays the
+  real app out in a pinned Chromium at 320/360/390/430 px. Its first run found the
+  bottom nav 459 px wide inside every phone viewport, so the sixth tab could not be
+  reached; the notification tab now shows as "Alerts" (accessible name "Alerts,
+  notifications, N unread", so WCAG Label-in-Name still holds) and the row shrinks
+  with a scaled font instead of pushing a tab off the edge. `playwright` is a
+  devDependency only, never part of the phone runtime. The **device** half (a real
+  phone's fonts and font-size slider) is still open, as is the partner's iPhone
+  (P0-10).
+
+What is open is device-gated (P5-01b's reboot, P5-03's second client, P5-05's
+day-long run, P5-10's phone leg, P0-10's partner checks) or blocked on a host we
+do not have (P5-02's clean-host and Docker legs).
 
 The agent can only *propose* an appointment or meal-schedule change; a
 caregiver's confirmation route executes the stored action in one commit. The
@@ -73,8 +81,7 @@ baked path in the container's personal settings — never in this repo's
 Phase 0 is closed by the go/no-go in PLAN §2.3, except three device-gated checks
 on the partner's iPhone — P0-03's access ones, P0-08's notification ones — which
 are carried by **P0-10** and do not block Phase 2. App code goes under `src/`,
-`web/`, `bin/` and `scripts/` exactly as PLAN §4 lays out; directories that no
-task has filled yet hold a `.gitkeep` and nothing else.
+`web/`, `bin/` and `scripts/` exactly as PLAN §4 lays out.
 
 No pi package is declared in this repo. The devcontainer gets it from the image
 and records it in the container's own agent settings; declaring it here as well
@@ -125,14 +132,30 @@ the running image carries a different tag than the checkout pins.
 - Do not add native modules to the phone runtime. `node:sqlite` only.
 - Do not run SQLite on the Windows/9p workspace mount. Use `/tmp` or a volume in
   development, and the phone's internal storage in production.
+- A backup archive carries its real name only **after** it has been decrypted and
+  seq-checked: the job writes `<name>.partial` and renames. A killed run may leave
+  a `.partial` and a `.staging-*` directory holding the **plaintext** bundle
+  (including the VAPID private keys) until the next run sweeps it — which is one
+  reason the job needs a schedule (open, P5-04), and why that staging directory is
+  0700 inside a 0700 parent.
 - Keep Pi Pocket, Pi Durable and other upstream notices in `NOTICE.md` and
   beside copied files.
 
-## Branches
+## Branches and releases
 
 `main` is the integration branch. Work on a short-lived feature branch and merge
-back through a pull request. Tag releases; the phone deploys a tag or a commit
-from `main`.
+back through a pull request (`gh pr merge <n> --squash --delete-branch`). There is
+no `dev`: unlike the vendored skills' assumption, this repo merged to `main` from
+its first release and the history says so.
+
+A release is: set the version in `package.json`, turn `CHANGELOG.md`'s
+`## Unreleased` into `## vX.Y.Z — <date>` with a fresh empty `## Unreleased`
+above it, merge through a PR, let CI on `main` pass, then create an **annotated**
+tag on that commit and a GitHub release whose notes are the changelog section
+(`gh release create --notes-file`, never inline — inline markdown's backticks get
+executed by the shell). Deploy the **tag** to the phone (`docs/DEPLOY.md`), never
+a branch. A tag goes on a commit whose typecheck, suite and devcontainer build
+passed; `v0.1.0` did.
 
 ## Commands
 
@@ -143,15 +166,17 @@ npm test               # node --test runs the TypeScript directly
 npx playwright install --with-deps chromium
                        # once per container: the browser-render checks skip
                        # without it (CI and postCreate install it themselves)
-npm start              # launcher -> server; the HTTP routes arrive with P1-09/P1-10
+npm start              # launcher -> server; add --access/--port/--data
+npm run measure:growth -- --days 500   # P5-07's numbers, on a temp data dir
 npm run backup -- ...  # encrypted SQLite + config + push archive (P1-07)
 npm run restore -- ... # restore one archive; the server must be stopped
 ```
 
-`npm start` starts the launcher and the server. The server's listener is a
-scaffold until P1-09/P1-10: `/healthz` answers and every other route is 503. The
-client needs no build step: `web/vendor/` holds pinned Preact/htm ES modules that
-`test/vendor.test.ts` verifies against `NOTICE.md`.
+`npm start` starts the launcher and the server, which serves the API, the SSE
+stream and the PWA shell. The client needs no build step: `web/vendor/` holds
+pinned Preact/htm ES modules that `test/vendor.test.ts` verifies against
+`NOTICE.md`. `scripts/termux-install.sh` and `scripts/termux-boot.sh` are the
+phone's entry points; `docs/DEPLOY.md` is how a tag gets there.
 
 The development pi agent (the one reading this file) has shell and file tools.
 The **product** agent must never: it gets app tools only — no shell, filesystem,
@@ -160,10 +185,15 @@ browser, network or SQL. Adding a general-purpose tool to it is a security defec
 On the phone:
 
 ```bash
-pkg install nodejs git cloudflared termux-api
-termux-wake-lock
-npm start -- --access cloudflare --data ~/.pupkeep
+git clone <repo> ~/pupkeep && cd ~/pupkeep
+./scripts/termux-install.sh          # packages, cloudflared, npm ci, boot wrapper
+~/pupkeep-start.sh --access tailscale --port 8791
+# HTTPS/PWA/push testing only: npm start -- --access cloudflare --data ~/.pupkeep
 ```
+
+Deploying a release is `git checkout v0.1.0` + restart, not the installer (the
+installer upgrades the whole device); `docs/DEPLOY.md` has the exact sequence,
+including why the daily port is 8791 and not 8787.
 
 ## When in doubt
 

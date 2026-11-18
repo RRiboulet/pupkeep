@@ -3,26 +3,27 @@
 A shared, agent-operated puppy care app for two caregivers, built on
 [Pi Durable](https://github.com/earendil-works/pi).
 
-> **Status: Phase 4 complete — P4-01 to P4-10 are done, and Gate G4's automated
-> half is covered. Phases 1–3 are complete: the launcher, auth, data files,
-> the durable harness, encrypted backup, the devcontainer, the shared household
-> thread, the profile and setup wizard, feeding, walks, growth, milestones,
-> showers, the calendar with its reminder tasks, the notification outbox/centre,
-> approvals with a caregiver's confirmation, and the monthly budget with the
-> model picker. Every pull request typechecks and runs the full test suite
-> (`.github/workflows/ci.yml`). The source of truth is
-> [`docs/PLAN.md`](docs/PLAN.md); [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says
-> how to pick the next task.
+> **Status: v0.1.0 is released.** Phases 0–4 are complete and Phase 5's
+> hardening has landed: the kill/restart matrix (`test/kill-matrix.test.ts` plus a
+> recorded walk on the phone), the security review ([`docs/security-review.md`](docs/security-review.md)),
+> the data-growth measurements and the monthly archive, the backup/restore drill
+> ([`docs/backup-drill.md`](docs/backup-drill.md)), the release itself
+> ([`CHANGELOG.md`](CHANGELOG.md), tag `v0.1.0`) and the real-browser render
+> checks. Every pull request typechecks and runs the full suite
+> (`.github/workflows/ci.yml`).
 >
-> Two guides, on purpose: [`docs/PHONE-RUNBOOK.md`](docs/PHONE-RUNBOOK.md) is the
-> operator's copy for the host phone, and
+> **What is still unproven is listed in [Known limitations](#known-limitations),
+> not here.** The short version: the partner's iPhone, a phone reboot recovering
+> with no hands, a restore on a genuinely clean host, two real devices at once, a
+> day-long phone run, and no schedule yet runs the backup job.
+>
+> The source of truth is [`docs/PLAN.md`](docs/PLAN.md);
+> [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says how to pick the next task. Three
+> guides, on purpose: [`docs/PHONE-RUNBOOK.md`](docs/PHONE-RUNBOOK.md) is the
+> operator's copy for the host phone,
 > [`docs/access-and-notifications.md`](docs/access-and-notifications.md) is the
-> caregivers' copy (daily access, invites, ntfy notifications, the HTTPS test
-> path). Both stay **drafts** until P5-01/P5-04 walk them on a phone.
->
-> Three Phase 0 checks stay open because they need the partner's iPhone: the
-> partner reach, PWA/Web Push and ntfy receipts carried by **P0-10**
-> ([`docs/partner-ios-checklist.md`](docs/partner-ios-checklist.md)).
+> caregivers' copy, and [`docs/DEPLOY.md`](docs/DEPLOY.md) is how a version gets
+> onto the phone and onto the fallback.
 
 ## What it is
 
@@ -72,9 +73,24 @@ No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
   thread, models and budget, host runbook, phases, task breakdown, risks. §4 is
   the repository layout, §2.3 the Phase 0 go/no-go.
 - [`docs/PHONE-RUNBOOK.md`](docs/PHONE-RUNBOOK.md) — the host phone: install,
-  boot and supervision, on-demand SSH, access modes, notifications, backup.
+  boot and supervision, on-demand SSH, access modes, notifications, backup,
+  troubleshooting.
+- [`docs/DEPLOY.md`](docs/DEPLOY.md) — deploying a tag to the phone, and the
+  VPS/Docker fallback (which is unbuilt; the note says so).
+- [`docs/access-and-notifications.md`](docs/access-and-notifications.md) — the
+  caregivers' copy: daily access, the invite, ntfy, the HTTPS test path.
+- [`CHANGELOG.md`](CHANGELOG.md) — what each release shipped, with its task IDs,
+  and what that release does **not** prove.
+- [`docs/backup-drill.md`](docs/backup-drill.md) — the P5-02 drill: what a real
+  bundle survived, and the three things it caught.
+- [`docs/kill-restart-matrix.md`](docs/kill-restart-matrix.md) — the phone's
+  kill/reboot/tunnel matrix, with the observations and their timestamps.
+- [`docs/security-review.md`](docs/security-review.md) — the P5-06 record:
+  thirteen attempts, each naming the test that produced its evidence.
+- [`docs/data-growth.md`](docs/data-growth.md) — the P5-07 measurements (host and
+  phone) and the checkpoint/archive decisions behind them.
 - [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) — how to pick a task, branch/PR
-  rules, definition of done, and the 59-task index.
+  rules, definition of done.
 - [`docs/partner-ios-checklist.md`](docs/partner-ios-checklist.md) — the Phase 0
   checks that need the partner's iPhone (P0-10).
 - [`AGENTS.md`](AGENTS.md) — instructions for coding agents working in this repo.
@@ -85,8 +101,8 @@ No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
 [`docs/PLAN.md`](docs/PLAN.md) §4 is authoritative. In short: `src/` for the
 server, launcher and shared code; `web/` for the no-build browser client;
 `bin/` for the launcher entry point; `scripts/` for the Termux and backup
-scripts; `test/` for `node --test`. Directories that Phase 1 has not filled yet
-carry a `.gitkeep` and nothing else — no `android/`, no rootfs, no Gradle.
+scripts; `test/` for `node --test`; `Dockerfile` and `docker-compose.yml` for
+the VPS fallback. No `android/`, no rootfs, no Gradle.
 
 ## Development tooling
 
@@ -175,28 +191,101 @@ npm run typecheck      # tsc --noEmit; erasable-only syntax, so node can strip i
 npm test               # node --test, TypeScript directly, no build step
 npx playwright install --with-deps chromium
                        # once per container: the render checks skip without it
-npm start              # launcher -> server
+npm start              # launcher -> server (add --access and --port)
+npm run measure:growth -- --days 500   # P5-07's measurements, on a temp dir
 npm run backup -- --data ~/.pupkeep --remote <rclone:path>
 npm run restore -- --data ~/.pupkeep --archive <file.age> --force
 ```
 
-`npm start` starts the launcher and the server. The server's listener is a
-scaffold until P1-09/P1-10: `/healthz` answers and every other route is 503. The
-backup passphrase comes from `PUPKEEP_BACKUP_PASSPHRASE` or a `--passphrase-file`
-outside the data and backup directories; it is never stored beside the archive.
-The browser client needs no build step either: `web/vendor/` holds the pinned
+`npm start` starts the launcher and the server, and the server serves the whole
+app: the API, the SSE stream and the PWA shell. The backup passphrase comes from
+`PUPKEEP_BACKUP_PASSPHRASE` or a `--passphrase-file` outside the data and backup
+directories; it is never stored beside the archive, and a killed run leaves a
+`.partial` archive that nothing picks up (`docs/PHONE-RUNBOOK.md` §10).
+The browser client needs no build step: `web/vendor/` holds the pinned
 Preact/htm ES modules, checked against `NOTICE.md` by `test/vendor.test.ts`.
 
 ## On the phone
 
 ```bash
-pkg install nodejs git termux-api sqlite rclone age expect tar termux-services tmux
-# cloudflared is NOT in the Termux package repo (P0-03). Use the arm64 release
-# binary in ~/.pupkeep/bin, and run it only through the wrapper in PLAN §6.7.
-git clone <repo> ~/pupkeep
-cd ~/pupkeep && npm ci --omit=dev
-termux-wake-lock
-npm start -- --access tailscale --data ~/.pupkeep
+git clone <repo> ~/pupkeep && cd ~/pupkeep
+./scripts/termux-install.sh          # packages, cloudflared, npm ci, boot wrapper
+~/pupkeep-start.sh --access tailscale --port 8791
 # for HTTPS/PWA/push testing only:
-# npm start -- --access cloudflare --data ~/.pupkeep
+#   npm start -- --access cloudflare --data ~/.pupkeep
 ```
+
+`scripts/termux-install.sh` upgrades the package index first, refuses a `node`
+that cannot link, pins and checksums cloudflared (not in the Termux repo, P0-03)
+and writes the Termux:Boot wrapper. Deploying a released version is different:
+`git checkout v0.1.0` and restart — see [`docs/DEPLOY.md`](docs/DEPLOY.md).
+Port 8791 here because an operator's own `ssh` forward lands on 8787.
+
+## Known limitations
+
+Every line here is something that was **not** verified, not something that "should
+work". The guardrail is the same one P5-09 was given: honest about verification,
+silent about intent.
+
+**Device legs**
+
+- **The partner's iPhone (P0-10).** Reach over the tailnet, PWA install, Web Push
+  subscribe and re-subscribe after a tunnel restart, and ntfy receipts were never
+  run on the partner's device. The web client and the push path are covered by
+  tests and by the host phone; the *second device* is not.
+- **A phone reboot recovering by itself (P5-01b).** The boot wrapper, the boot
+  line and the 180 s tailnet wait are verified on the device, and the boot line was
+  written after a real reboot. The cell is still not a pass: it needs one reboot
+  with Android's **Always-on VPN** enabled, because Tailscale does not reconnect
+  by itself after a reboot and every boot-path step fails closed on that.
+- **Two real clients at once (P5-03).** The two-caregiver paths are covered by
+  tests with two sessions (feed races, 409s, the shared thread, approvals). Two
+  actual phones in one session were never part of a run.
+- **A day-long phone run (P5-05).** Battery, heat and the wake-lock effect are
+  unmeasured. A five-minute seeded run is not that.
+- **The phone's browser layout (P5-10's device half).** The render suite lays the
+  app out in a pinned Chromium at 320/360/390/430 px, including Android text
+  scale. A real panel with real fonts and Android's own font-size slider was not
+  the thing that passed.
+
+**Restore and the fallback**
+
+- **A restore on a genuinely clean host (P5-02).** A real household bundle was
+  restored on a *different* machine (this devcontainer, Node 24 against the
+  phone's 26) and on a fresh directory on the phone, and it booted with
+  `secrets.json` absent. Neither was a clean install.
+- **The Docker/VPS fallback is unbuilt.** `Dockerfile` and `docker-compose.yml`
+  exist because PLAN §4 and §6.9 always specified them; no daemon here has built
+  them, and `docs/DEPLOY.md` says so. Treat the phone as the only verified target.
+- **An interrupted restore is unproven.** The window between moving the old state
+  aside and installing the new one is milliseconds; twelve `SIGKILL` attempts
+  never landed in it. The error path names the leftover directory and the code is
+  read, but the drill did not observe it.
+- **No schedule runs the backup job.** There is no `crontab` and no `sv` unit on
+  the phone, so the job only runs when somebody runs it. An unattended run also
+  needs a passphrase source that is *not* beside the archive, which is an operator
+  decision, not a default this repo can pick for you.
+
+**Product limits, by decision**
+
+- **No domain.** Tailscale is the daily path over HTTP, so no PWA install and no
+  Web Push on the daily path; the Cloudflare quick tunnel is for HTTPS/PWA/push
+  *testing* only, and its URL changes on every restart. A named tunnel waits for a
+  domain.
+- **A quick tunnel cannot carry the live stream.** Cloudflare buffers a streaming
+  response on account-less quick tunnels, so the client falls back to polling
+  every 4 s and probes the stream again every 60 s (`web/live.js`). Live SSE is a
+  tailnet/local property.
+- **Member recovery is an operator procedure.** There is no self-service reset;
+  the procedure is documented and tested, and a `--reset-member` CLI is backlog.
+- **Agent proposals are limited to what it has tools for.** An appointment or meal
+  schedule change is propose-only and needs a caregiver's confirmation; a history
+  correction is not implemented at all.
+- **One household, two caregivers, one process.** No replicas, no multi-instance
+  deployment. A stale-lock takeover is read → unlink → exclusive create rather
+  than compare-and-swap, so two *simultaneous manual* starts on one stale lock can
+  in principle both clear it — the accepted Phase 1 residual (PLAN §3.2), since
+  `flock` would need a native module the phone runtime forbids.
+- **The partner's daily notifications are best-effort.** ntfy is a recommended
+  per-user topic, not a guaranteed delivery channel; the in-app centre is
+  authoritative.
