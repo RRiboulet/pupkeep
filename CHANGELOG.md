@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.1.1 — 2026-11-18
+
 Fixed:
 
 - **A backup kill could leave a truncated file wearing the newest name.** The job
