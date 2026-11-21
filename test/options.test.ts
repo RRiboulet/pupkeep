@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { resolveAccess, PUBLIC_ORIGIN_REQUIRED } from "../src/launcher/access.ts";
 import { parseOptions, expandHome, DEFAULT_PORT } from "../src/launcher/options.ts";
+import { TRUSTED_PROXY_REQUIRED } from "../src/shared/public-origin.ts";
 
 const HOME = "/home/owner";
 
@@ -153,13 +154,42 @@ test("public needs a valid configured origin, and the plaintext modes refuse one
 
   const ok = parseOptions(
     ["--access", "public"],
-    { PUPKEEP_PUBLIC_ORIGIN: "https://PUPPKEEP.example:443/" },
+    {
+      PUPKEEP_PUBLIC_ORIGIN: "https://PUPPKEEP.example:443/",
+      // Required with an origin (see the next test): without it the server would
+      // ignore Caddy's forwarded headers and every client would share one bucket.
+      PUPKEEP_TRUSTED_PROXY: "172.28.0.11",
+    },
     HOME,
   );
   assert.ok(ok.ok);
   // Lower-cased host, default port and trailing slash dropped: the exact string
   // `allowedOrigins` will compare against a browser's `Origin` header.
   assert.equal(ok.options.publicOrigin, "https://puppkeep.example");
+});
+
+test("an origin without the proxy's address is refused, naming the variable", () => {
+  // Both the launcher and the server call `resolveTrustedProxy`, so this sentence
+  // is the one the operator sees whichever process starts first (P6/R4).
+  const missing = parseOptions(["--access", "public"], { PUPKEEP_PUBLIC_ORIGIN: "https://pupkeep.example" }, HOME);
+  assert.ok(!missing.ok);
+  assert.equal(missing.error, TRUSTED_PROXY_REQUIRED);
+  assert.match(missing.error, /PUPKEEP_TRUSTED_PROXY/);
+  // The value, not just the variable, has to be nameable: the operator's next
+  // step is comparing it with Caddy's static address in docker-compose.yml.
+  assert.match(missing.error, /Caddy's ipv4_address/);
+
+  // Optional without an origin: the plaintext modes never read the headers.
+  const local = parseOptions([], {}, HOME);
+  assert.ok(local.ok, "local mode needs no proxy address");
+
+  // Present-but-malformed is refused in every mode: a hostname or host:port can
+  // never equal a peer address, which is a silently dead trust check.
+  for (const value of ["caddy", "172.28.0.11:443", "172.28.0.0/24", "not an address"]) {
+    const refused = parseOptions([], { PUPKEEP_TRUSTED_PROXY: value }, HOME);
+    assert.ok(!refused.ok, `${value} is not a proxy address`);
+    assert.match(refused.error, /must be one IP address/);
+  }
 });
 
 test("the CLI path refuses public without an origin in exactly one message", () => {

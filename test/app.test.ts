@@ -11,6 +11,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Harness, HarnessInspection, ReportInfo, SessionEnd, TaskId } from "@earendil-works/pi-durable";
 import { startApp, type AppDeps, type ParkedTask } from "../src/server/app.ts";
 import { main, parseServerEnvironment } from "../src/server/main.ts";
+import { TRUSTED_PROXY_REQUIRED } from "../src/shared/public-origin.ts";
 import { dataStores } from "../src/server/config.ts";
 import { createLogger } from "../src/server/log.ts";
 import { lockPath, SERVER_LOCK_FILE } from "../src/server/lock.ts";
@@ -506,7 +507,44 @@ test("the server entry learns the configured origin and the proxy address", () =
       PUPKEEP_PORT: "8787",
       PUPKEEP_DATA_DIR: "/data",
       PUPKEEP_PUBLIC_ORIGIN: origin,
+      // Present so the refusal is the origin's, not the missing proxy's.
+      PUPKEEP_TRUSTED_PROXY: "172.28.0.11",
     });
     assert.equal(refused.ok, false, `${origin} is not a bare HTTPS origin`);
+  }
+});
+
+test("the server entry refuses an origin without the proxy's address, and a malformed address anywhere", () => {
+  // The compose file always sets both; a directly spawned server must not start
+  // with half the pair. Without the address the forwarded headers are silently
+  // ignored, so every client collapses into one rate-limit bucket (P6/R4).
+  const missing = parseServerEnvironment({
+    PUPKEEP_BIND_HOST: "0.0.0.0",
+    PUPKEEP_PORT: "8787",
+    PUPKEEP_DATA_DIR: "/data",
+    PUPKEEP_PUBLIC_ORIGIN: "https://pupkeep.example",
+  });
+  assert.equal(missing.ok, false);
+  assert.match(missing.ok === false ? missing.error : "", /PUPKEEP_TRUSTED_PROXY/);
+  assert.equal(missing.ok === false ? missing.error : "", TRUSTED_PROXY_REQUIRED);
+
+  // Absent is fine without an origin: `local`/`lan` ignore forwarded headers.
+  const local = parseServerEnvironment({
+    PUPKEEP_BIND_HOST: "127.0.0.1",
+    PUPKEEP_PORT: "8787",
+    PUPKEEP_DATA_DIR: "/data",
+  });
+  assert.equal(local.ok && local.environment.trustedProxy, undefined);
+
+  // A hostname or host:port would never equal a peer address, so it is a typo
+  // rather than a value: refuse it in every mode instead of ignoring it.
+  for (const value of ["caddy", "172.28.0.11:443", "172.28.0.0/24"]) {
+    const refused = parseServerEnvironment({
+      PUPKEEP_BIND_HOST: "127.0.0.1",
+      PUPKEEP_PORT: "8787",
+      PUPKEEP_DATA_DIR: "/data",
+      PUPKEEP_TRUSTED_PROXY: value,
+    });
+    assert.equal(refused.ok, false, `${value} is not a proxy address`);
   }
 });

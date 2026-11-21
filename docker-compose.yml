@@ -44,10 +44,14 @@ services:
       # not here, so the checkout stays clean for tag updates.
       PUPKEEP_PUBLIC_ORIGIN: "${PUPKEEP_PUBLIC_ORIGIN:-https://pupkeep.duckdns.org}"
       # R4: forwarded headers are trusted from this exact address and no other.
-      # It is Caddy's static address on the network declared at the bottom of
-      # this file; changing one without the other breaks sign-in behind the
-      # proxy (the app refuses a scheme that contradicts the origin).
-      PUPKEEP_TRUSTED_PROXY: "172.28.0.11"
+      # The app refuses to start in public mode without it (every client would
+      # otherwise share one rate-limit bucket), so the value is load-bearing and
+      # lives in exactly one place: the same substitution also sets Caddy's
+      # `ipv4_address` below, which is what the app must match. Change the
+      # default in both places at once — or, better, set the variable in
+      # /srv/pupkeep/.env and change neither. test/compose.test.ts pins that both
+      # services read the same variable with the same default.
+      PUPKEEP_TRUSTED_PROXY: "${PUPKEEP_TRUSTED_PROXY:-172.28.0.11}"
       # R10: the wizard's zone seed reads the runtime zone, so the container has
       # to have one. The household's zone itself is confirmed in the wizard.
       TZ: "Europe/Berlin"
@@ -75,9 +79,19 @@ services:
       - rclone-conf
       - known-hosts
 
+    # No static address on the attachment below, deliberately, and it is
+    # load-bearing in the other direction: `docker compose run --no-deps pupkeep
+    # …` (the nightly backup) creates a one-off container from *this* service
+    # definition and inherits its `networks:` config, static address included
+    # (compose does this even though it omits the service-name alias). A
+    # `ipv4_address` on the app therefore makes the one-shot request the address
+    # the running app already holds, and Docker refuses it with "Address already
+    # in use" — the nightly job would never start. Only Caddy needs a pinned
+    # address, because only its address is compared by `PUPKEEP_TRUSTED_PROXY`;
+    # Caddy reaches the app by DNS name (`pupkeep:8787` in deploy/Caddyfile), and
+    # a one-off gets a free address and its own container-name alias.
     networks:
       pupkeep:
-        ipv4_address: 172.28.0.10
 
     # No `ports:` at all (R1). A published port would hand the plaintext listener
     # straight to the internet and bypass Caddy's origin and HSTS. `compose ps`
@@ -115,7 +129,11 @@ services:
 
     networks:
       pupkeep:
-        ipv4_address: 172.28.0.11
+        # The same substitution the app's PUPKEEP_TRUSTED_PROXY uses, so an
+        # override in .env moves both sides and the pair cannot drift. The app
+        # compares the peer address exactly; a fixed literal here plus an
+        # overridden env value would be the silent mismatch this guards against.
+        ipv4_address: "${PUPKEEP_TRUSTED_PROXY:-172.28.0.11}"
 
     restart: unless-stopped
     # R8: a healthcheck so "both healthy" is a state `compose ps` can actually

@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createLogger } from "./log.ts";
 import { startApp, EXIT_BAD_CONFIG } from "./app.ts";
+import { parsePublicOrigin, resolveTrustedProxy } from "../shared/public-origin.ts";
 
 export interface ServerEnvironment {
   dataDir: string;
@@ -29,31 +30,12 @@ export interface ServerEnvironment {
 }
 
 /**
- * The launcher validates this first; the server validates again so a directly
- * spawned process cannot start with an origin that is not a bare HTTPS origin.
+ * The launcher validates this first; the server validates again with the same
+ * functions so a directly spawned process cannot start with an origin that is
+ * not a bare HTTPS origin, or with an origin and no proxy address. Both calls
+ * live in `src/shared/public-origin.ts`: two parsers, one of them weaker, was
+ * the defect this guards against.
  */
-function parseServerOrigin(value: string): { ok: true; origin: string } | { ok: false; error: string } {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN is not a URL: ${value}` };
-  }
-  if (url.protocol !== "https:") {
-    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must be https://, got ${value}` };
-  }
-  if (url.username !== "" || url.password !== "") {
-    return { ok: false, error: "PUPKEEP_PUBLIC_ORIGIN must not carry credentials" };
-  }
-  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
-    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must be a bare origin, got ${value}` };
-  }
-  if (url.hostname === "") {
-    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN has no host: ${value}` };
-  }
-  return { ok: true, origin: url.origin };
-}
-
 export type ParseServerEnvironment =
   | { ok: true; environment: ServerEnvironment }
   | { ok: false; error: string };
@@ -88,12 +70,17 @@ export function parseServerEnvironment(
   const rawOrigin = env.PUPKEEP_PUBLIC_ORIGIN;
   let publicOrigin: string | undefined;
   if (rawOrigin !== undefined && rawOrigin !== "") {
-    const parsedOrigin = parseServerOrigin(rawOrigin);
+    const parsedOrigin = parsePublicOrigin(rawOrigin);
     if (!parsedOrigin.ok) return parsedOrigin;
     publicOrigin = parsedOrigin.origin;
   }
-  const rawProxy = env.PUPKEEP_TRUSTED_PROXY;
-  const trustedProxy = rawProxy !== undefined && rawProxy.trim() !== "" ? rawProxy.trim() : undefined;
+  // Required once an origin is set (fail closed): a missing address does not
+  // fail, it silently stops reading the rightmost forwarded header, so every
+  // client behind Caddy would share one rate-limit bucket (P6/R4). Optional
+  // without an origin, where forwarded headers are ignored anyway.
+  const proxy = resolveTrustedProxy(publicOrigin, env.PUPKEEP_TRUSTED_PROXY);
+  if (!proxy.ok) return proxy;
+  const trustedProxy = proxy.trustedProxy;
 
   const expanded = rawData === "~" ? home : rawData.startsWith("~/") ? join(home, rawData.slice(2)) : rawData;
   return {

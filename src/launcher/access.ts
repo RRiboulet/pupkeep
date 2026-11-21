@@ -7,6 +7,14 @@
 //     proved why: the LAN address is reachable, the tailnet one is private).
 //   * only an explicit `lan` opens every interface, and it says so.
 
+import { isCgnatAddress, isPrivateAddress } from "../shared/public-origin.ts";
+
+// The two address predicates moved to `shared/public-origin.ts` when the origin
+// parser they serve became shared with the server. Re-exported rather than
+// deleted: they are address facts, not access-mode facts, and callers that only
+// need "is this RFC1918?" should not have to import the deployment contract.
+export { isCgnatAddress, isPrivateAddress };
+
 export const ACCESS_MODES = ["local", "lan", "public", "tailscale", "cloudflare"] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
 
@@ -83,15 +91,6 @@ export function lanAddress(interfaces: readonly InterfaceAddress[]): string | un
   return undefined;
 }
 
-/** 100.64.0.0/10, the shared address space Tailscale and carrier NAT use. */
-export function isCgnatAddress(address: string): boolean {
-  const raw = address.split(".");
-  if (raw.length !== 4) return false;
-  const first = /^\d{1,3}$/.test(raw[0]!) ? Number(raw[0]) : Number.NaN;
-  const second = /^\d{1,3}$/.test(raw[1]!) ? Number(raw[1]) : Number.NaN;
-  return first === 100 && second >= 64 && second <= 127;
-}
-
 /**
  * True for the exact shape `parsePublicOrigin` emits and the server compares
  * against a browser's `Origin` header: `https://host[:port]` with a lower-case
@@ -106,16 +105,6 @@ function isNormalisedHttpsOrigin(value: string): boolean {
     return false;
   }
   return url.protocol === "https:" && url.origin === value;
-}
-
-/** RFC1918 and loopback: what "the LAN" means for the fail-closed checks below. */
-export function isPrivateAddress(address: string): boolean {
-  const raw = address.split(".");
-  if (raw.length !== 4) return false;
-  const parts = raw.map((part) => (/^\d{1,3}$/.test(part) ? Number(part) : Number.NaN));
-  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  const [a, b] = parts as [number, number];
-  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
 export function resolveAccess(

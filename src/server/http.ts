@@ -389,7 +389,17 @@ function peerAddress(deps: HttpDeps, req: IncomingMessage): string {
   return deps.remoteAddress?.(req) ?? req.socket.remoteAddress ?? "";
 }
 
-/** Forwarded headers exist only in public mode, and only from the proxy peer. */
+/**
+ * Forwarded headers exist only in public mode, and only from the proxy peer.
+ *
+ * The address is not optional in a real deployment: `resolveTrustedProxy`
+ * (`src/shared/public-origin.ts`) refuses an origin without it in both the
+ * launcher and the server's environment parser, so a process that reads this
+ * code with `publicOrigin` set always has one. The check stays defensive for a
+ * directly constructed `AppOptions` (tests); when it fails, `clientIp` falls
+ * back to the peer address, which is why *every* client behind a proxy shares
+ * one rate-limit bucket — the silent failure the parser now prevents.
+ */
 function trustedForwarder(deps: HttpDeps, req: IncomingMessage): boolean {
   return deps.publicOrigin !== undefined && trustedPeer(peerAddress(deps, req), deps.trustedProxy);
 }

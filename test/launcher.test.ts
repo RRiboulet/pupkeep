@@ -174,7 +174,12 @@ test("with a server program the child is spawned with the resolved bind address"
 test("public mode forwards the normalised origin to the server environment", async () => {
   const parsed = parseOptions(
     ["--access", "public", "--port", "9000"],
-    { PUPKEEP_PUBLIC_ORIGIN: "https://PUPPKEEP.example:443/" },
+    {
+      PUPKEEP_PUBLIC_ORIGIN: "https://PUPPKEEP.example:443/",
+      // Public mode requires the proxy address too; it reaches the server through
+      // the inherited environment, not through `serverEnv` (P6/R4).
+      PUPKEEP_TRUSTED_PROXY: "172.28.0.11",
+    },
     HOME,
   );
   assert.ok(parsed.ok);
