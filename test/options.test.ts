@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { resolveAccess, PUBLIC_ORIGIN_REQUIRED } from "../src/launcher/access.ts";
 import { parseOptions, expandHome, DEFAULT_PORT } from "../src/launcher/options.ts";
 
 const HOME = "/home/owner";
@@ -69,7 +70,7 @@ test("environment fills the defaults, and flags win over it", () => {
 
 test("bad input is refused with a message naming the problem", () => {
   const cases: Array<[string[], RegExp]> = [
-    [["--access", "public"], /--access must be one of local, lan, tailscale, cloudflare/],
+    [["--access", "bogus"], /--access must be one of local, lan, public, tailscale, cloudflare/],
     [["--access"], /--access needs a mode/],
     [["--port", "0"], /--port must be an integer 1\.\.65535/],
     [["--port", "70000"], /--port must be an integer/],
@@ -139,6 +140,76 @@ test("an empty or attached value on the wrong kind of flag is refused", () => {
   ] as Array<[string[], RegExp]>) {
     const parsed = parseOptions(argv, {}, HOME);
     assert.ok(!parsed.ok, JSON.stringify(argv));
+    assert.match(parsed.error, expected);
+  }
+});
+
+test("public needs a valid configured origin, and the plaintext modes refuse one", () => {
+  // The origin is the trust anchor (P6): without it there is nothing to mint a
+  // link on, and with it a plaintext mode is a contradiction.
+  const missing = parseOptions(["--access", "public"], {}, HOME);
+  assert.ok(!missing.ok);
+  assert.match(missing.error, /public mode needs PUPKEEP_PUBLIC_ORIGIN/);
+
+  const ok = parseOptions(
+    ["--access", "public"],
+    { PUPKEEP_PUBLIC_ORIGIN: "https://PUPPKEEP.example:443/" },
+    HOME,
+  );
+  assert.ok(ok.ok);
+  // Lower-cased host, default port and trailing slash dropped: the exact string
+  // `allowedOrigins` will compare against a browser's `Origin` header.
+  assert.equal(ok.options.publicOrigin, "https://puppkeep.example");
+});
+
+test("the CLI path refuses public without an origin in exactly one message", () => {
+  // The parser is the authority: the launcher never gets as far as planning, so
+  // this is the only sentence an operator sees. `resolveAccess` keeps the same
+  // check only for a caller that skips parsing, and must repeat the constant
+  // rather than invent a second explanation of the same problem (P6/R2).
+  const parsed = parseOptions(["--access", "public"], {}, HOME);
+  assert.ok(!parsed.ok);
+  assert.equal(parsed.error, PUBLIC_ORIGIN_REQUIRED);
+  assert.equal(parsed.error.match(/public mode needs PUPKEEP_PUBLIC_ORIGIN/g)?.length, 1);
+
+  const planned = resolveAccess("public", [], DEFAULT_PORT);
+  assert.ok(!planned.ok);
+  assert.equal(planned.reason, PUBLIC_ORIGIN_REQUIRED);
+});
+
+test("a malformed configured origin is refused by name", () => {
+  const cases: Array<[string, RegExp]> = [
+    ["http://pupkeep.example", /must be https:\/\//],
+    ["not a url", /is not a URL/],
+    // `new URL` accepts both of these as a host; the raw text does not make
+    // them an origin the operator could have meant.
+    ["https:example.com", /must be https:\/\//],
+    ["https://pupkeep.example:0", /must not use port 0/],
+    // The parser resolves `%2e%2e` to `/`, so a path can look "bare" after
+    // normalisation. The written path is what decides.
+    ["https://pupkeep.example/a/%2e%2e/", /bare origin/],
+    ["https://pupkeep.example/login", /bare origin/],
+    ["https://pupkeep.example?x=1", /bare origin/],
+    ["https://user:pw@pupkeep.example", /must not carry credentials/],
+  ];
+  for (const [value, expected] of cases) {
+    const parsed = parseOptions([], { PUPKEEP_PUBLIC_ORIGIN: value }, HOME);
+    assert.ok(!parsed.ok, `expected ${value} to fail`);
+    assert.match(parsed.error, expected);
+  }
+});
+
+test("a 'public' origin that is a loopback, private or dotted host is refused", () => {
+  const cases: Array<[string, RegExp]> = [
+    ["https://127.0.0.1", /must be a public host/],
+    ["https://localhost", /must be a public host/],
+    ["https://192.168.1.9", /must be a public host/],
+    ["https://100.90.202.61", /must be a public host/],
+    ["https://pupkeep.example.", /must not end its host with a dot/],
+  ];
+  for (const [value, expected] of cases) {
+    const parsed = parseOptions([], { PUPKEEP_PUBLIC_ORIGIN: value }, HOME);
+    assert.ok(!parsed.ok, `expected ${value} to fail`);
     assert.match(parsed.error, expected);
   }
 });

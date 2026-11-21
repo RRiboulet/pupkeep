@@ -201,7 +201,7 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
   async function startInternal(): Promise<StartResult> {
     const mode: AccessMode = options.mode;
     const interfaces = (deps.interfaces ?? networkInterfacesList)();
-    const access = resolveAccess(mode, interfaces, options.port);
+    const access = resolveAccess(mode, interfaces, options.port, options.publicOrigin);
     if (!access.ok) {
       log(`refusing to start: ${access.reason}`);
       return { ok: false, code: EXIT_ACCESS, message: access.reason };
@@ -304,7 +304,7 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
       // The origin the owner will actually open. Minting before the tunnel exists
       // would otherwise print a loopback URL nobody can reach, and the cookie is
       // origin-scoped, so it cannot be corrected later.
-      let origin = tunnelUrl ?? plan.displayUrl;
+      let origin = tunnelUrl ?? plan.origin ?? plan.displayUrl;
       let minted = await mint(dataDir.path, origin, options.reissueOwner);
       if (minted === "no-origin" && mode === "cloudflare") {
         // A fresh `cloudflare` start has no origin at all, so this used to be an
@@ -347,7 +347,10 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
         ownerLink = await announceOwnerLink({
           link: minted.link,
           path: ownerLinkPath(dataDir.path),
-          interactive: options.interactive,
+          // R10: a public deployment never prints the trust root, even on a TTY.
+          // `docker compose run --reissue-owner` allocates one, so a TTY is not
+          // evidence that the operator wants the token on screen.
+          interactive: options.interactive && mode !== "public",
           writeFile: minted.minted,
           writeOut: out,
           log,
@@ -385,7 +388,13 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
         // standing policy: a task that was parked for crashing the process would
         // otherwise be retried on every supervisor restart, which is exactly the
         // crash loop the harness's `restartLimit` exists to stop.
-        const env = serverEnv(plan.bindHost, options.port, dataDir.path, options.retryParked && firstSpawn);
+        const env = serverEnv(
+          plan.bindHost,
+          options.port,
+          dataDir.path,
+          options.retryParked && firstSpawn,
+          options.publicOrigin,
+        );
         firstSpawn = false;
         return spawnChild(entry.command, entry.args, env);
       },
@@ -458,7 +467,13 @@ function describeExit(name: string, info: ExitInfo): string {
   );
 }
 
-function serverEnv(bindHost: string, port: number, dataDir: string, retryParked = false): Record<string, string> {
+function serverEnv(
+  bindHost: string,
+  port: number,
+  dataDir: string,
+  retryParked = false,
+  publicOrigin?: string,
+): Record<string, string> {
   // The server must own the same directory the launcher took the lock in; it
   // is passed rather than re-derived from a default that could drift.
   return {
@@ -468,6 +483,9 @@ function serverEnv(bindHost: string, port: number, dataDir: string, retryParked 
     // Absent, not "0": the server's default is off, and an env var that says
     // "off" would be one more thing to keep in step.
     ...(retryParked ? { PUPKEEP_RETRY_PARKED: "1" } : {}),
+    // The origin is validated once by `parseOptions`; the server receives the
+    // normalised form and never re-derives it from a request.
+    ...(publicOrigin !== undefined ? { PUPKEEP_PUBLIC_ORIGIN: publicOrigin } : {}),
   };
 }
 

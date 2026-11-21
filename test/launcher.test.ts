@@ -171,6 +171,32 @@ test("with a server program the child is spawned with the resolved bind address"
   await launcher.stop();
 });
 
+test("public mode forwards the normalised origin to the server environment", async () => {
+  const parsed = parseOptions(
+    ["--access", "public", "--port", "9000"],
+    { PUPKEEP_PUBLIC_ORIGIN: "https://PUPPKEEP.example:443/" },
+    HOME,
+  );
+  assert.ok(parsed.ok);
+  const spawned: Array<Record<string, string>> = [];
+  const launcher = createLauncher(
+    parsed.options,
+    deps({
+      serverEntry: { command: "node", args: ["server.ts"] },
+      spawnChild: (_command, _args, env) => {
+        spawned.push(env);
+        return new StoppableChild();
+      },
+    }),
+  );
+
+  const result = await launcher.start();
+  assert.equal(result.ok, true);
+  assert.equal(spawned[0]?.PUPKEEP_PUBLIC_ORIGIN, "https://puppkeep.example");
+  assert.equal(result.plan?.origin, "https://puppkeep.example");
+  await launcher.stop();
+});
+
 test("--retry-parked reaches the first spawn only, never a supervisor restart", async () => {
   // A task parked for crashing the process must not be retried by every restart:
   // that is the crash loop the harness's `restartLimit` exists to stop. The

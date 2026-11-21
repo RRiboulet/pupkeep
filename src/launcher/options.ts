@@ -5,10 +5,16 @@
 
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { ACCESS_MODES, type AccessMode } from "./access.ts";
+import { ACCESS_MODES, PUBLIC_ORIGIN_REQUIRED, isCgnatAddress, isPrivateAddress, type AccessMode } from "./access.ts";
 
 export interface LauncherOptions {
   mode: AccessMode;
+  /**
+   * `PUPKEEP_PUBLIC_ORIGIN`, normalised to `scheme://host[:port]`. Required by
+   * `public` (which refuses to start without it) and refused by the plaintext
+   * modes, because its presence declares that this process is served publicly.
+   */
+  publicOrigin?: string;
   dataDir: string;
   port: number;
   /** Non-interactive (boot script, systemd-ish): never print the owner link. */
@@ -42,7 +48,7 @@ export const USAGE = `pupkeep — a shared, agent-operated puppy care app
 
 Usage: npm start -- [options]
 
-  --access <mode>     local | lan | tailscale | cloudflare   (default: local)
+  --access <mode>     local | lan | public | tailscale | cloudflare   (default: local)
   --port <n>          HTTP port                              (default: ${DEFAULT_PORT})
   --data <dir>        data directory                         (default: ~/.pupkeep)
   --boot              non-interactive: write the owner link, never print it
@@ -51,13 +57,72 @@ Usage: npm start -- [options]
   -h, --help          show this help
 
 Environment (development only): PUPKEEP_ACCESS, PUPKEEP_PORT, PUPKEEP_DATA_DIR.
+Environment (deployment): PUPKEEP_PUBLIC_ORIGIN — required by --access public, and
+  refused by every other mode.
 
 Access modes:
   local       bind 127.0.0.1 — this device only
   lan         bind 0.0.0.0  — explicit opt-in, plain HTTP on the whole network
   tailscale   bind the tailnet address; refuses to start if Tailscale is down
   cloudflare  bind 127.0.0.1 and run a quick tunnel for HTTPS/PWA testing
+  public      bind every interface inside a container, behind a TLS proxy;
+              requires PUPKEEP_PUBLIC_ORIGIN and is the only mode that uses it
 `;
+
+/**
+ * The configured public origin, normalised. It is the trust anchor for the whole
+ * deployment: the owner link is minted on it, mutations are accepted only from
+ * it, and its scheme decides `Secure` cookies and HSTS. So it is parsed once,
+ * strictly, and never re-derived later from a request.
+ */
+export function parsePublicOrigin(
+  value: string,
+): { ok: true; origin: string } | { ok: false; error: string } {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN is not a URL: ${value}` };
+  }
+  // `new URL` reads `https:example.com` as the same host as `https://example.com`
+  // and normalises `%2e%2e` away, so the raw text is the only thing that can say
+  // whether the operator wrote a bare origin. Requiring the `//` also keeps the
+  // accepted spellings to ones a browser would send in an `Origin` header.
+  if (!/^https:\/\//i.test(value)) {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must be https://, got ${value}` };
+  }
+  if (url.username !== "" || url.password !== "") {
+    return { ok: false, error: "PUPKEEP_PUBLIC_ORIGIN must not carry credentials" };
+  }
+  // Compare the path as written, not `url.pathname`: the parser resolves
+  // `/a/%2e%2e/` to `/`, which would let a real path look like a bare origin.
+  const afterScheme = value.slice("https://".length);
+  const pathStart = afterScheme.search(/[/?#]/);
+  const rawPath = pathStart === -1 ? "" : afterScheme.slice(pathStart);
+  if (rawPath !== "" && rawPath !== "/") {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must be a bare origin, got ${value}` };
+  }
+  if (url.hostname === "") {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN has no host: ${value}` };
+  }
+  // Port 0 survives `URL` (unlike the default :443) and is not an origin a
+  // browser or a proxy can reach: it asks each bind for a fresh ephemeral port.
+  if (url.port === "0") {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must not use port 0: ${value}` };
+  }
+  if (url.hostname.endsWith(".")) {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must not end its host with a dot: ${value}` };
+  }
+  // A "public" origin that is a loopback, private, link-local or CGNAT literal
+  // is a typo that fails at sign-in time with no diagnostic, so refuse it here.
+  const literal = url.hostname.replace(/^\[|\]$/g, "");
+  if (literal === "localhost" || literal.includes(":") || isPrivateAddress(literal) || isCgnatAddress(literal)) {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must be a public host, got ${url.hostname}` };
+  }
+  // `URL.origin` lower-cases the host, drops a default :443 and the trailing
+  // slash, which is exactly the comparison form `allowedOrigins` needs.
+  return { ok: true, origin: url.origin };
+}
 
 function isMode(value: string): value is AccessMode {
   return (ACCESS_MODES as readonly string[]).includes(value);
@@ -81,6 +146,14 @@ export function parseOptions(
   if (access !== undefined && access !== "") {
     if (!isMode(access)) return { ok: false, error: `PUPKEEP_ACCESS is not an access mode: ${access}` };
     mode = access;
+  }
+
+  const envPublicOrigin = env.PUPKEEP_PUBLIC_ORIGIN;
+  let publicOrigin: string | undefined;
+  if (envPublicOrigin !== undefined && envPublicOrigin !== "") {
+    const parsedOrigin = parsePublicOrigin(envPublicOrigin);
+    if (!parsedOrigin.ok) return { ok: false, error: parsedOrigin.error };
+    publicOrigin = parsedOrigin.origin;
   }
 
   const envPort = env.PUPKEEP_PORT;
@@ -171,11 +244,20 @@ export function parseOptions(
     }
   }
 
+  // Fail in the parser, not after the lock: `public` without an origin has no
+  // owner link to mint and no origin to trust, so there is nothing to start.
+  // This is the authoritative refusal; `resolveAccess` repeats the same
+  // constant only for callers that bypass the parser (P6/R2).
+  if (mode === "public" && publicOrigin === undefined) {
+    return { ok: false, error: PUBLIC_ORIGIN_REQUIRED };
+  }
+
   const expanded = expandHome(dataDir, home);
   return {
     ok: true,
     options: {
       mode,
+      ...(publicOrigin !== undefined ? { publicOrigin } : {}),
       port,
       boot,
       reissueOwner,
