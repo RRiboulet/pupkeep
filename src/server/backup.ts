@@ -30,6 +30,18 @@
 // it from an environment variable or an explicit file outside the data and
 // backup directories; §7.5's "off the backup host" is an operational rule the
 // job enforces where it can and documents where it cannot.
+//
+// Cleanup has one window that cannot be closed, and it is worth stating next to
+// the `.staging-*` note in `verifyRemoteArchive`: a run SIGKILLed between
+// creating a staging directory and removing it leaves the **plaintext** bundle
+// on the backup host — including `push.json`, whose VAPID private keys ride in
+// the archive by design — until `sweepStaging` catches it. Nothing can catch a
+// SIGKILL, so this is design, not an oversight: `sweepStaging` removes a
+// `.staging-*` or `restore-staging-*` directory whose mtime is more than an hour
+// old (3_600_000 ms), and it runs at the *start* of each backup, so the bytes
+// live until the next run and never less than an hour. The directory is 0700
+// inside a 0700 backup directory, which is all that stands between that window
+// and another local user; a schedule (P5-04) is what bounds it in practice.
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -549,7 +561,12 @@ async function verifyRemoteArchive(
       );
     }
   } finally {
-    await rm(work, { recursive: true, force: true });
+    // Never throw here: this `finally` runs while a digest mismatch or a failed
+    // `copyto` is unwinding, and an `rm` rejection would replace that error with
+    // "could not remove <one-time directory>". The operator needs the reason the
+    // off-device copy is unverified, not the state of a scratch directory that
+    // `sweepStaging` will collect anyway.
+    await rm(work, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

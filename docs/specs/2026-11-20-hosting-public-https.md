@@ -9,8 +9,8 @@ probe. The substantive corrections are listed at the end under *Review changes*.
 
 Revision 3 (2026-11-21): implementation notes only — what this slice does and
 does not do, the DNS timer's real cadence, the backup invocation the unit
-actually runs, and the restore advice that no longer names a flag the restore
-script rejects.
+actually runs, the restore advice that no longer names a flag the restore
+script rejects, and the off-box upload check as shipped.
 
 **This change is part one.** It adds `public` mode and makes every other mode
 refuse to start once an origin is configured; it does **not** delete `tailscale`
@@ -19,10 +19,12 @@ deletion is a later slice (`P6-08` in the plan), and until it lands both modes
 still parse and the fallback host still starts `tailscale`.
 
 Two limits stated where they are load-bearing rather than discovered later:
-**the off-box upload is verified by size, not by digest** (the archive is
-`stat`-ed and its length compared — a hash check is tracked as `P6-11`), and no
-step in this repository has been executed against a Docker daemon or a public
-name, so R0/R1/R9 are the operator's legs on the box.
+**the off-box copy is proved by a size gate and then a sha256 of the object read
+back into the job's staging directory** (a corrupted upload of the right length
+is refused — the remaining gap is `--rotate`'s re-upload, which still trusts
+`rclone copyto`'s exit code), and no step in this repository has been executed
+against a Docker daemon or a public name, so R0/R1/R9 are the operator's legs on
+the box.
 
 ## Objective
 
@@ -203,6 +205,15 @@ R7. **Backups run unattended, off-box, and cannot leak auth.** The image carries
    — only a fresh archive from a scrubbing build, or removing those fields by
    hand, does. A failed run exits non-zero and leaves the previous archive and
    the status file intact.
+
+   The off-box copy is verified, not assumed. The uploaded object's reported
+   size is compared with the local archive's first — cheap, one round trip, and
+   it is what catches a truncated upload — then the object is copied back into
+   the job's private staging directory and both files are hashed with sha256, so
+   corruption that keeps the length is found too; a mismatch fails the run and
+   names which copy is intact and where the other one is, and the read-back copy
+   is removed on both paths. A re-upload after `--rotate` still trusts
+   `rclone copyto`'s exit code, which is the remaining gap.
 
 R8. **The box reports on itself, and the report is measurable.** A daily host
    timer pushes one line to a deployment-level ntfy topic named in
@@ -451,9 +462,10 @@ transport, R13's rewritten scripts and R14's rewritten docs assertions — are
   the in-app centre and a Web Push subscription with ntfy absent; an ntfy topic
   below 128 bits of entropy is refused.
 - [ ] R7 — the unit's command produces a new `.age` archive, its `config.json`
-  has a null `ownerTokenHash` and empty `sessions`/`invites`, the rclone copy is
-  present, and a run with a wrong passphrase exits non-zero leaving the previous
-  archive and status intact.
+  has a null `ownerTokenHash` and empty `sessions`/`invites`, the off-box copy's
+  sha256 matches the local archive's (the size gate, then the read-back digest;
+  a same-size corrupt object is refused), and a run with a wrong passphrase
+  exits non-zero leaving the previous archive and status intact.
 - [ ] R8 — the daily report arrives with cert days, disk, container health,
   archive age and 24 h auth-failure counts; a stopped database is *not* reported
   healthy by `/healthz`; an outside probe alerts after two misses; logs are

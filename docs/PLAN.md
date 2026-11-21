@@ -756,9 +756,14 @@ The **data** is durable. The **service** is a server's now, not a phone's.
 - The off-device target is OCI Object Storage over the `rclone` S3 backend,
   drilled 2026-11-20 ([`backup-drill.md`](backup-drill.md)). The **clean-host**
   leg is still open and is drilled on the box (`P6-09`).
-- Upload verification is a **size check** today, not a digest: the freshly
-  uploaded archive is `stat`-ed and its length compared. The hash upgrade is
-  tracked as `P6-11`.
+- Upload verification is a **size gate, then a digest**: the freshly uploaded
+  archive is `stat`-ed and its length compared (one round trip, and it is what
+  catches a truncated upload), then the object is copied back into the job's
+  private `.staging-` directory and both copies are hashed with sha256, so a
+  same-size corruption fails the run and the failure names which copy is intact
+  and where the other one is. The read-back copy is removed on both paths. The
+  cost is stated rather than hidden: every run now pulls the whole archive back
+  (`P6-11`), and `--rotate`'s re-upload still trusts `copyto`'s exit code.
 
 **The daily report.** 08:00, after the 03:30 backup, posts one line to a
 deployment-level ntfy topic named in `/etc/pupkeep/report.env`: certificate days
@@ -5128,20 +5133,21 @@ changes nothing until confirmed.
       degrades honestly: a quick tunnel cannot stream SSE, so the client polls
       (P5-01b's 2026-11-12 note) and the `--access cloudflare` test step is still
       the supported way to check HTTPS, the PWA and Web Push.
-- [ ] **P5-05** Daily-phone battery/heat/phantom-process notes and checks, plus
+- [x] **P5-05** Daily-phone battery/heat/phantom-process notes and checks, plus
       the two Phase 0 deferrals: **`termux-wake-lock` effectiveness** (not
       observable from Termux, P0-06) and a **kill/restart re-test with the
       force-stop timestamp captured** (P0-06 recorded a user-confirmed restart
       without one).
-      **Retired (Phase 6, 2026-11-21), not rewritten.** The question was "can
-      this phone stay the host", and Phase 6 answered it by moving the host
-      (§2.1). Battery, heat and wake-lock behaviour now describe the offline
-      fallback (§6.3), which is best-effort by design and carries the stop rule
-      in §6.10; the long-run measurement the item implied is **P6-10** (7 days of
-      CPU, memory, disk and reclamation on the box). The two Phase 0 deferrals
-      close with it: the wake-lock effect is no longer on the critical path, and
-      the force-stop re-test would measure a process the product no longer runs
-      as its service.
+      **Retired (Phase 6, 2026-11-21), not rewritten, and closed without being
+      run** — the checkbox records that the item will not be done, not that it
+      passed. The question was "can this phone stay the host", and Phase 6
+      answered it by moving the host (§2.1). Battery, heat and wake-lock
+      behaviour now describe the offline fallback (§6.3), which is best-effort
+      by design and carries the stop rule in §6.10; the long-run measurement the
+      item implied is **P6-10** (7 days of CPU, memory, disk and reclamation on
+      the box). The two Phase 0 deferrals close with it: the wake-lock effect is
+      no longer on the critical path, and the force-stop re-test would measure a
+      process the product no longer runs as its service.
 - [x] **P5-06** Security review: owner reissue, invites, hashed sessions, authz
       matrix, origin checks, log scrub, tunnel, secrets, no agent escape, backup
       encryption.
@@ -5325,12 +5331,12 @@ the absence of the old path as a defect.
 
 - [x] **P6-01** `public` access mode and one configured origin.
       **Landed:** the strict origin parser (`parsePublicOrigin` in
-      `src/launcher/options.ts` at this commit: `https://` only, an absolute bare
-      origin, no credentials, no path/query/fragment, no trailing dot, no port 0,
-      and a host that is not loopback, private or CGNAT), so
-      `PUPKEEP_PUBLIC_ORIGIN` is parsed once, before the lock, and normalised to
-      the exact string a browser's `Origin` carries; and `src/launcher/access.ts`
-      (`public` in `ACCESS_MODES`;
+      `src/shared/public-origin.ts`, one module imported by both the launcher and
+      the server: `https://` only, an absolute bare origin, no credentials, no
+      path/query/fragment, no trailing dot, no port 0, and a host that is not
+      loopback, private or CGNAT), so `PUPKEEP_PUBLIC_ORIGIN` is parsed once,
+      before the lock, and normalised to the exact string a browser's `Origin`
+      carries; and `src/launcher/access.ts` (`public` in `ACCESS_MODES`;
       `resolveAccess` binds every interface *inside* the container and mints on
       the configured origin; `local`/`lan`/`tailscale`/`cloudflare` refuse when
       an origin is set; `lan` refuses any interface it would expose that is not
@@ -5391,7 +5397,8 @@ the absence of the old path as a defect.
       **refuses** a pre-scrub archive before touching the data directory, and its
       success report names the launcher command that mints a link
       (`npm start -- --reissue-owner`) instead of the bare flag its own parser
-      rejects. The uploaded archive is `stat`-ed and size-checked. Pinned by
+      rejects. The uploaded archive is `stat`-ed and its length compared, then
+      read back and hashed (`P6-11`). Pinned by
       `test/backup.test.ts` and `test/restore-message.test.ts`. PLAN §14.4's
       false claim ("the backup can restore auth without becoming a credential")
       is corrected, and `docs/backup-drill.md` marks which older observations no
@@ -5458,11 +5465,23 @@ the absence of the old path as a defect.
       and Oracle's idle-reclamation metrics against the rule in §6.8. The spec's
       measurements (~3 MiB launcher, ~95 MiB server child, 62.7 ms median commit,
       8 ms cold read) are one host's numbers, not a week's. **Open.**
-- [ ] **P6-11** Hash verification for the off-box upload. Today the job
-      `stat`s the uploaded object and compares its **size**, which catches a
-      truncated upload but not a corrupted one. Track the digest (the archive's
-      own sha256) and compare it after the copy. **Open, and stated as a limit
-      wherever the job is described** (§6.9, spec R7).
+- [x] **P6-11** Hash verification for the off-box upload.
+      **Landed (2026-11-21):** the size gate stays as the cheap first check — one
+      `lsjson --stat`, and a wrong length never pays for the download — then
+      `verifyRemoteArchive` copies the object back with `rclone copyto` into a
+      `mkdtemp` `.staging-` directory under the backup directory (0700 inside a
+      0700 parent, swept like any other staging leftover) and streams a sha256 of
+      both files. A same-size corruption fails with the remote and local digests
+      and which copy is intact and where the other one is; a failed `copyto`
+      says the off-device copy is unverified rather than uploaded; the read-back
+      copy is removed on the failure path too. Pinned by `test/backup.test.ts`:
+      the truncated upload never reaches the read-back, the same-size corrupt
+      object is refused by its digest, and no `.staging-` directory is left
+      behind. **Costs, stated:** every run downloads the whole archive back (a
+      1 MB archive costs 1 MB of bandwidth per run), and `--rotate`'s re-upload
+      still trusts `copyto`'s exit code — the same gap, still open. **Not
+      verified:** the read-back runs through the injected `CommandRunner`, not
+      against a real rclone remote.
 
 **Gate G5** stands as re-cut in §15.6: restore on the box, TLS/HSTS/`__Host-` on
 the public origin, two-client E2E, security review, release. Nothing in this
