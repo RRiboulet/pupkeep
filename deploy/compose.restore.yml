@@ -1,0 +1,78 @@
+# The restore drill's Compose override (R7, P5-02). Not loaded by production:
+# `docker compose up` in /srv/pupkeep reads docker-compose.yml plus the hostname
+# override installed from deploy/compose.hostname.yml (README step 4). This file
+# is never automatic: every command below passes it with `-f`, which also makes
+# Compose skip docker-compose.override.yml — intended, because the drill is a
+# loopback `lan` instance and needs no public name.
+#
+# It adds a second instance on a throwaway copy of the household, bound to
+# loopback only, so an archive can be restored and booted without touching
+# /srv/pupkeep/data.
+#
+# The sequence (deploy/README.md step 8 has the whole thing):
+#
+#   sudo install -d -o 10001 -g 10001 -m 0700 /srv/pupkeep/restore-test/backups
+#   sudo cp /srv/pupkeep/data/backups/<newest>.age /srv/pupkeep/restore-test/backups/
+#   sudo chown 10001:10001 /srv/pupkeep/restore-test/backups/<newest>.age
+#   cd /srv/pupkeep
+#   F="-f docker-compose.yml -f deploy/compose.restore.yml"
+#   docker compose $F run --rm -T --entrypoint node --no-deps pupkeep-restore \
+#     scripts/restore.ts --data /data --passphrase-file /run/secrets/backup-passphrase
+#   docker compose $F up -d pupkeep-restore          # boots on the restored copy
+#   curl -sf http://127.0.0.1:8792/healthz
+#
+# The second instance must be STOPPED whenever `restore.ts` runs (on a repeat
+# drill: `docker compose $F stop pupkeep-restore`, then add `--force`, which
+# moves the previous copy aside). The one-shot refuses a live
+# launcher.pid/server.pid anyway, and two processes must never write one SQLite
+# file — the constraint the whole design rests on. The production instance keeps
+# running: it owns a different directory.
+
+name: pupkeep
+
+services:
+  pupkeep-restore:
+    # Same fixed reference as the base service (R11); bump both together.
+    image: ghcr.io/rriboulet/pupkeep:0.1.1
+
+    # `lan` binds every interface *inside* the container, which is what a
+    # published port needs; the outer scope is loopback-only below. The port
+    # stays 8787 inside the container so the published side can be 8792.
+    command: ["--access", "lan", "--port", "8787", "--data", "/data"]
+
+    environment:
+      # Explicitly empty, and deliberate: R2b makes `lan` refuse to start while
+      # PUPKEEP_PUBLIC_ORIGIN is set, and the drill must never be started against
+      # the public origin. Empty is "unset" to the option parser. (A new service
+      # does not inherit the base service's environment; the line is here so a
+      # later `${PUPKEEP_PUBLIC_ORIGIN}` interpolation cannot silently turn the
+      # drill into a second public instance.)
+      PUPKEEP_PUBLIC_ORIGIN: ""
+      TZ: "Europe/Berlin"
+
+    volumes:
+      - /srv/pupkeep/restore-test:/data
+
+    ports:
+      # Loopback only, and 8792 rather than 8787: the coding devcontainer on the
+      # same host already owns 127.0.0.1:8787.
+      - "127.0.0.1:8792:8787"
+
+    # `restore.ts` reads the passphrase from the Compose secret, not from the
+    # environment: the drill must not need the nightly job's systemd credential.
+    secrets:
+      - backup-passphrase
+
+    networks:
+      pupkeep:
+        ipv4_address: 172.28.0.12
+
+    # A drill instance that dies stays dead: a restart loop would hide the
+    # failure the drill exists to find.
+    restart: "no"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,51 @@
+# Pupkeep's public front door (R1, R3, R4, R8).
+#
+# The app listens on the compose network at `pupkeep:8787` and publishes no host
+# port; this container owns 80/443 and is the only thing with a public address.
+# The name is `PUPKEEP_HOSTNAME`, with `pupkeep.duckdns.org` as the documented
+# default (deploy/README.md step 4). It is a DuckDNS A record kept pointed at the
+# box by `pupkeep-dns-update.timer` (R9) — not by anything here.
+#
+# Automatic HTTPS: Caddy obtains one certificate for the name below and renews
+# it in the background. Nothing in this file names an issuer or a challenge, and
+# that is the decision: Caddy's ACME issuer tries HTTP-01 first (on :80, which
+# this container publishes) and also offers TLS-ALPN-01 (on :443), so a host
+# whose cloud firewall blocks 80 but allows 443 can still issue and renew
+# without a custom build. Neither challenge helps a host behind CGNAT, where
+# nothing inbound arrives on either port: only R0's preflight can tell the
+# difference, and it runs before this stack is created.
+{
+	# Caddy's admin API stays on loopback inside this container. The compose
+	# healthcheck asks it for the running config, and nothing publishes it.
+	admin localhost:2019
+
+	# No `email`: the ACME account is created without a contact address. DuckDNS
+	# issuance does not need one, and an invented address would only be somewhere
+	# Let's Encrypt's expiry notices go to die.
+}
+
+{$PUPKEEP_HOSTNAME:pupkeep.duckdns.org} {
+	# No access log (R8): one household, and the app's own log is the trail that
+	# the daily report reads. Caddy writes no access log unless a site asks for
+	# one, and this site does not ask — the absence is deliberate, not an
+	# oversight to "fix" later.
+
+	# Caddy's defaults here are exactly the contract R3 and R4 assume, so they
+	# are stated rather than reconfigured:
+	#   * `Host` is forwarded unchanged, so the app's origin check sees the
+	#     configured name and minted links carry the configured origin;
+	#   * `X-Forwarded-Proto` is *set* from the request Caddy actually received,
+	#     so a client-supplied value cannot downgrade the app's scheme;
+	#   * `X-Forwarded-For` is appended with Caddy's view of the peer, so the
+	#     app's rightmost read is the real client address.
+	# The app trusts those headers only from Caddy's static address
+	# (`PUPKEEP_TRUSTED_PROXY` in docker-compose.yml), not from "any private
+	# peer". No `header_up` overrides are used: each one would be a chance to
+	# break that contract silently.
+	#
+	# No response buffering is configured, so the app's long-lived
+	# `text/event-stream` (live state) is flushed as it is written. No `encode`
+	# either: compressing a stream this deployment keeps open is a buffering risk
+	# for no gain on a two-person app.
+	reverse_proxy pupkeep:8787
+}

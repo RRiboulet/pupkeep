@@ -1,0 +1,144 @@
+# The deployment image (Phase 6, R11). A workflow of its own rather than a job in
+# `ci.yml`, because writing a container package is a different privilege from
+# running the test suite: `packages: write` must not be a property of the gate
+# every pull request passes. `ci.yml` keeps `contents: read` only, and
+# `test/ci.test.ts` pins that.
+#
+# Triggers, deliberately three:
+#   pull_request       build, never push. A fork's run gets a read-only
+#                      GITHUB_TOKEN and no secrets, and this workflow attempts
+#                      no registry write on a pull request at all.
+#   push tags v*       build and push. The tags are derived from the git ref:
+#                      `v0.1.1` yields the semver tag `0.1.1` — exactly the
+#                      reference `docker-compose.yml` names — plus `sha-<short>`
+#                      so every build is addressable without a release.
+#   workflow_dispatch  build only: a probe that never writes to the registry.
+#
+# The host is an Oracle `VM.Standard.A1.Flex` — arm64 — and every GitHub-hosted
+# runner is amd64, so an ordinary `docker build` produces an image that dies on
+# the box with `exec format error`. The build is `linux/arm64` through buildx
+# with QEMU registering the foreign architecture, and the last step pulls the
+# pushed tag back out of the registry and reads the platform it resolves to,
+# because R11's claim is about the manifest, not about the flag we passed in.
+name: image
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Minimal at the top: everything this workflow *reads* needs the checkout and
+# nothing more. `packages: write` is granted on the job below, where it cannot
+# be inherited by a future job that merely exists. There is no
+# `pull_request_target` anywhere — that trigger would hand the base
+# repository's token and secrets to code a fork controls.
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Build the linux/arm64 image
+    runs-on: ubuntu-latest
+    # A cold run installs every dependency and three apt packages under arm64
+    # emulation; the cap is generous on purpose and a warm run is minutes.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # GHCR's repository names must be lower case and `github.repository`
+      # keeps the owner's spelling (`RRiboulet/pupkeep`), so the reference is
+      # lower-cased once here and every step below uses this output. It has to
+      # be this exact string, too: `docker-compose.yml` names
+      # `ghcr.io/rriboulet/pupkeep`, and a push to a differently-cased path is
+      # a different (or a rejected) package.
+      - name: Compute the image reference
+        id: image
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      # QEMU is the mechanism: the runner is amd64, the digest-pinned base is a
+      # multi-arch index with an arm64 entry, and `binfmt` is what lets the
+      # arm64 `npm ci` and `apt-get` actually execute. It is the slow part of
+      # this job and the accepted cost of building exactly one platform.
+      - name: Register the arm64 emulator
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Tags come from the ref, not from a hand-typed string. `type=semver`
+      # strips the leading `v`, so `v0.1.1` pushes `0.1.1`, which is what
+      # `docker-compose.yml` names and `deploy/README.md` checks out. `type=sha`
+      # adds `sha-<short>`. The action also sets
+      # `org.opencontainers.image.source`, the label that links the package to
+      # this repository on GHCR.
+      - name: Derive the image tags from the git ref
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.ref }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+
+      # Gated, not merely pointless: on a pull request from a fork the token is
+      # read-only, so a login that ran anyway would fail a build with nothing to
+      # push. `github.ref_type` is never `tag` on a pull request.
+      - name: Log in to GHCR (tag pushes only)
+        if: github.ref_type == 'tag'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build, and push on a tag
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: ${{ github.ref_type == 'tag' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # A pull request restores the base branch's layers (`cache-from`) but
+          # never writes them. GitHub already scopes a PR's cache to its merge
+          # ref; the explicit gate means a fork cannot put a layer into the
+          # cache an authenticated tag push builds from (`cache-to`). `mode=max`
+          # keeps the intermediate `deps` stage, which holds the expensive
+          # `npm ci`.
+          cache-from: type=gha
+          cache-to: ${{ github.ref_type == 'tag' && 'type=gha,mode=max' || '' }}
+          # Buildx's own provenance attestation, attached to the image index on
+          # push. It needs no secret and no extra permission — unlike
+          # `actions/attest-build-provenance`, which would add `id-token: write`
+          # and `attestations: write` to a job this file keeps at
+          # `contents: read` + `packages: write` on purpose.
+          provenance: mode=max
+
+      # R11's wording is that the *pushed manifest* is really arm64. The input
+      # above is a claim; this step is the check: pull the tag back from the
+      # registry and read the platform Docker resolved. A missing or wrong arm64
+      # entry fails here, on the tag, instead of on the box with `exec format
+      # error` after `compose up`.
+      - name: Prove the pushed image is linux/arm64
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          ref="${{ steps.image.outputs.ref }}:${{ steps.meta.outputs.version }}"
+          docker pull --platform linux/arm64 "$ref"
+          arch="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$ref")"
+          test "$arch" = "linux/arm64"
+          echo "pushed $ref resolves to $arch"

@@ -1,0 +1,49 @@
+# The nightly encrypted backup and off-device copy (R7).
+#
+# Install: see deploy/README.md step 7 (this file, its timer and the host's
+# /etc/pupkeep files). Nothing here is loaded by `docker compose up`.
+#
+# `docker compose run` appends its arguments to the image's ENTRYPOINT, and that
+# entrypoint is the launcher (`node bin/pupkeep.js`). `--entrypoint node` is
+# load-bearing: without it the job would start a second launcher against the
+# same SQLite file, which is the one thing the design forbids.
+
+[Unit]
+Description=Pupkeep encrypted backup and off-device copy
+Documentation=file:///srv/pupkeep/deploy/README.md
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+
+# The rclone destination is host-specific and not a secret:
+#   PUPKEEP_BACKUP_REMOTE=sftp:pupkeep-backups
+# mode 0644, root (deploy/README.md step 3).
+EnvironmentFile=/etc/pupkeep/backup.env
+WorkingDirectory=/srv/pupkeep
+
+# systemd-creds(1): the passphrase, encrypted at rest for this host, root-only.
+# One passphrase, two encodings — the plaintext 0400 file is what Compose mounts
+# for the app, and this .cred is the copy that is not readable while idle. The
+# value is handed to the one-shot through the environment, never through argv,
+# so it appears in neither `ps` nor the journal.
+LoadCredentialEncrypted=backup-passphrase:/etc/pupkeep/backup-passphrase.cred
+
+# The lock is the real serialiser. A timer does not overlap itself, but a manual
+# `systemctl start` during a run would, and two runs writing one archive
+# directory is exactly what R7 rules out. Exit 75 means "someone already holds
+# the lock", which is a skipped run rather than a failure.
+#
+# INVARIANT: this command is R7's, verbatim apart from the destination:
+#   docker compose run --rm -T --entrypoint node --no-deps pupkeep \
+#     scripts/backup.ts --data /data --remote <remote>:<path> --require-remote
+ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 75 /run/pupkeep-backup.lock /bin/sh -c 'set -eu; PUPKEEP_BACKUP_PASSPHRASE="$$(cat $${CREDENTIALS_DIRECTORY}/backup-passphrase)"; export PUPKEEP_BACKUP_PASSPHRASE; exec /usr/bin/docker compose -f /srv/pupkeep/docker-compose.yml run --rm -T --entrypoint node --no-deps -e PUPKEEP_BACKUP_PASSPHRASE pupkeep scripts/backup.ts --data /data --remote "$$PUPKEEP_BACKUP_REMOTE" --require-remote'
+SuccessExitStatus=75
+
+# A one-shot that copies over rclone can outlast the default 90 s start timeout.
+TimeoutStartSec=30min
+
+# Deliberately not sandboxed: the job has to drive the host's Docker socket,
+# which ProtectSystem=/NoNewPrivileges= would break. Its blast radius is the
+# docker socket it needs; the confinement that matters is the container's.

@@ -1,27 +1,156 @@
-# PLAN §6.9's VPS fallback: `docker compose up -d`, TLS in front, restore the
-# latest encrypted backup into the volume. The phone remains primary.
+# Pupkeep, public deployment (Phase 6, R1/R7/R8/R11).
 #
-# Unverified as of v0.1.0 (no Docker daemon in the coding container); P5-02's
-# restore drill is where this is meant to be proven. See docs/DEPLOY.md.
+# The spec is docs/specs/2026-11-20-hosting-public-https.md; the operator runbook
+# is deploy/README.md. Two services, one ordinary bridge network:
+#
+#   pupkeep  the app. Publishes NOTHING on the host; it needs outbound access to
+#            the model provider, Web Push, ntfy and rclone, which is why the
+#            network below is deliberately not `internal: true` (R1).
+#   caddy    the only thing bound to host 80/443; automatic HTTPS for the name.
+#
+# On the host: `cd /srv/pupkeep && docker compose pull && docker compose up -d`.
+# Compose interpolates ${...} from `/srv/pupkeep/.env` when it exists
+# (git-ignored); the defaults here are the working values for this box.
+
+name: pupkeep
+
+x-logging: &logging
+  driver: json-file
+  options:
+    # R8: capped at 10 MB x 3 per container. The daily report counts sign-in
+    # failures by reading these logs, so the cap is also the report's horizon.
+    max-size: "10m"
+    max-file: "3"
+
 services:
   pupkeep:
-    build: .
-    image: pupkeep:0.1.0
-    # Loopback only, by default: TLS and the public origin belong to whatever is
-    # in front (Caddy, or Tailscale serve). Publishing on 0.0.0.0 would say the
-    # opposite — plain HTTP with the sign-in screen on the internet.
-    ports:
-      - "127.0.0.1:8787:8787"
-    volumes:
-      - pupkeep-data:/data
+    # No `build:` stanza (R11): `compose pull` must fail loudly rather than build
+    # locally or fall back to Docker Hub. Until the `image.yml` workflow has
+    # pushed its first tag, the host builds this exact reference once from the
+    # checkout — `docker build --platform linux/arm64 -t <this image> .`, step 1
+    # of deploy/README.md — and skips `pull` on the first run.
+    image: ghcr.io/rriboulet/pupkeep:0.1.1
+
+    # Explicit, and load-bearing (R2): a flag beats `PUPKEEP_ACCESS`, so a stray
+    # environment variable cannot put the process back on the plaintext `lan`
+    # mode it shipped with at v0.1.x. `public` refuses to start without a valid
+    # origin, which is the next key.
+    command: ["--access", "public", "--data", "/data"]
+
     environment:
-      # The server's default is off; a backup passphrase here would be a secret
-      # in a file that may be committed. Use .env (git-ignored) for that.
-      PUPKEEP_PORT: "8787"
+      # R2/R3: the configured origin is the whole identity — it is the only
+      # allowed origin, the owner link's origin, and where `Secure`, HSTS and
+      # the `__Host-` cookie name come from. Override it in /srv/pupkeep/.env,
+      # not here, so the checkout stays clean for tag updates.
+      PUPKEEP_PUBLIC_ORIGIN: "${PUPKEEP_PUBLIC_ORIGIN:-https://pupkeep.duckdns.org}"
+      # R4: forwarded headers are trusted from this exact address and no other.
+      # It is Caddy's static address on the network declared at the bottom of
+      # this file; changing one without the other breaks sign-in behind the
+      # proxy (the app refuses a scheme that contradicts the origin).
+      PUPKEEP_TRUSTED_PROXY: "172.28.0.11"
+      # R10: the wizard's zone seed reads the runtime zone, so the container has
+      # to have one. The household's zone itself is confirmed in the wizard.
+      TZ: "Europe/Berlin"
+      # R7: rclone reads its remote list and the sftp host key from the secrets
+      # below, never from a root-owned bind mount the container cannot read.
+      # A non-sftp remote ignores the second one.
+      RCLONE_CONFIG: "/run/secrets/rclone-conf"
+      RCLONE_SFTP_KNOWN_HOSTS_FILE: "/run/secrets/known-hosts"
+
+    volumes:
+      # R1: the household. The host directory is pre-created by the operator with
+      # `install -d -o 10001 -g 10001 -m 0700`, because this mount hides the
+      # image's own /data ownership. Without it every redeploy is a new household
+      # and every push subscription is gone. If the directory is missing, Docker
+      # creates it root-owned and the app cannot write — step 2 of the runbook is
+      # not optional.
+      - /srv/pupkeep/data:/data
+
+    # The secrets are mounted for this service because the nightly job is a
+    # `compose run pupkeep …` one-shot (R7): `run` inherits the service config.
+    # They are files (`/run/secrets/<name>`), readable because the operator makes
+    # them 0400 and owned by uid 10001 — a root 0600 file would not be.
+    secrets:
+      - backup-passphrase
+      - rclone-conf
+      - known-hosts
+
+    networks:
+      pupkeep:
+        ipv4_address: 172.28.0.10
+
+    # No `ports:` at all (R1). A published port would hand the plaintext listener
+    # straight to the internet and bypass Caddy's origin and HSTS. `compose ps`
+    # must show no host port for this service.
+
     restart: unless-stopped
-    # Stop the launcher cleanly so its server child closes SQLite and removes the
-    # pid locks: one process per file is a property of this app, not of systemd.
+    # The launcher must be allowed to stop its server child and release both pid
+    # locks: one process owns the SQLite file (measured: 2 s close, 3 s
+    # TERM->KILL; R1's constraint keeps 30 s).
     stop_grace_period: 30s
+    logging: *logging
+
+  caddy:
+    # Pinned by digest as well as tag: TLS termination is the one place where a
+    # silently different binary would be hard to notice.
+    image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+
+    # The upstream in deploy/Caddyfile is `pupkeep:8787`, the app image's default
+    # PUPKEEP_PORT. The port is stated in exactly two places, the image and the
+    # Caddyfile; changing one without the other is a 502, so leave it alone.
+
+    ports:
+      - "80:80"        # ACME HTTP-01 (and the redirect to HTTPS)
+      - "443:443"      # HTTPS
+      - "443:443/udp"  # HTTP/3; browsers fall back to TCP if the cloud firewall
+                       # drops UDP, so this is additive rather than required
+
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # ACME state must outlive the container (R1): without caddy-data a
+      # `down && up` re-issues at every restart and burns the rate limit.
+      - caddy-data:/data
+      - caddy-config:/config
+
+    networks:
+      pupkeep:
+        ipv4_address: 172.28.0.11
+
+    restart: unless-stopped
+    # R8: a healthcheck so "both healthy" is a state `compose ps` can actually
+    # report. It asks Caddy's admin API (loopback inside this container, never
+    # published) for the running config — a live process, not just a live port.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *logging
+
+networks:
+  pupkeep:
+    driver: bridge
+    # Deliberately NOT `internal: true` (R1): the app needs egress to the model
+    # provider, Web Push, ntfy and rclone, and Caddy needs it for ACME. An
+    # internal network would break all of them while looking safer.
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
-  pupkeep-data:
+  caddy-data:
+  caddy-config:
+
+secrets:
+  # Compose mounts each file at /run/secrets/<name> with the source's owner and
+  # mode. The host copies are 0400, 10001:10001 (deploy/README.md step 3) — that
+  # ownership is what makes them readable inside the container, and it is why a
+  # root-owned 0600 bind mount was rejected (R7).
+  backup-passphrase:
+    file: /etc/pupkeep/backup-passphrase
+  rclone-conf:
+    file: /etc/pupkeep/rclone.conf
+  known-hosts:
+    file: /etc/pupkeep/known_hosts

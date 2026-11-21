@@ -1,0 +1,24 @@
+# The DuckDNS update schedule (R9).
+#
+# Five minutes, not R9's fifteen: the hand-installed timer on the box already
+# runs at this cadence, and this unit replaces it rather than silently widening
+# the window in which an ephemeral address change leaves the name stale.
+#
+# `OnBootSec=2min` is what gets a rebooted box re-pointed promptly. The
+# `Persistent=true` below is copied from the host's timer for shape, but it is
+# inert beside OnUnitActiveSec — systemd only persists OnCalendar timers — so
+# the first post-boot run is OnBootSec's doing, not its.
+
+[Unit]
+Description=Pupkeep DuckDNS record update timer (R9)
+Documentation=file:///srv/pupkeep/deploy/README.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+AccuracySec=1min
+Unit=pupkeep-dns-update.service
+
+[Install]
+WantedBy=timers.target

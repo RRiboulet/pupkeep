@@ -1,0 +1,40 @@
+# The DuckDNS A record, kept pointed at this box (R9).
+#
+# Install: deploy/README.md step 7. This unit replaces the timer the box carried
+# from the hand-install; the updater itself stays /usr/local/bin/pupkeep-dns-update.
+# That script is not in this repository, so the contract below is the whole of
+# what the unit can guarantee about it.
+#
+# The token is a systemd credential, never an argument. ExecStart is copied into
+# the journal, and every process's argv is readable in `ps`; a credential under
+# /run/credentials/<unit> is readable by this service alone. The script must
+# therefore read ${CREDENTIALS_DIRECTORY}/duckdns-token itself. The hand-installed
+# copy predates this unit and may read /etc/pupkeep/duckdns.token directly (still
+# out of argv) or take the token as $1 (not out of argv). Neither can be checked
+# from here: before enabling the timer, read the installed script. If it takes an
+# argument, change it to read the credential — this unit deliberately passes none.
+#
+# The credential only closes this unit's argv. A DuckDNS update is a GET whose
+# URL carries the token as a query parameter, so the script must hand that URL
+# to curl on stdin (`-K -` or `--data @-`); a URL in curl's argv is back in `ps`
+# for every local user, and curl's error output can put it in the journal. R9's
+# "token appears nowhere in ps or the journal" is a check on the running script,
+# not on this file.
+
+[Unit]
+Description=Pupkeep DuckDNS record update
+Documentation=file:///srv/pupkeep/deploy/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+LoadCredential=duckdns-token:/etc/pupkeep/duckdns.token
+ExecStart=/usr/local/bin/pupkeep-dns-update
+TimeoutStartSec=30s
+
+# Deliberately not sandboxed: the updater is the host's script, and this
+# repository cannot know where it writes (a cache, an IP state file) or which
+# helpers it calls. ProtectSystem=strict without a proved writable state
+# directory would turn a working update into a failed one. The secret's
+# confinement is the credential above.

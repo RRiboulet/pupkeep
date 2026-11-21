@@ -1,0 +1,19 @@
+# The schedule for the nightly backup (R7).
+#
+# `Persistent=true` is the point: a box that was off or suspended at 03:30 still
+# takes a backup when it comes back, rather than silently skipping the night.
+# The calendar carries its own zone so the run does not depend on the host's
+# timezone; that is independent of TZ=Europe/Berlin on the container (R10).
+
+[Unit]
+Description=Nightly Pupkeep backup (R7)
+Documentation=file:///srv/pupkeep/deploy/README.md
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Europe/Berlin
+Persistent=true
+AccuracySec=1min
+Unit=pupkeep-backup.service
+
+[Install]
+WantedBy=timers.target

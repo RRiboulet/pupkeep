@@ -1,0 +1,18 @@
+# The daily report's schedule (R8).
+#
+# After the 03:30 backup, so "the age of the newest archive" describes last
+# night's run rather than the one before it. `Persistent=true` catches up after
+# downtime, which is when a report matters most.
+
+[Unit]
+Description=Daily Pupkeep report (R8)
+Documentation=file:///srv/pupkeep/deploy/README.md
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Europe/Berlin
+Persistent=true
+AccuracySec=1min
+Unit=pupkeep-report.service
+
+[Install]
+WantedBy=timers.target

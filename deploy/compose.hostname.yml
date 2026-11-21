@@ -1,0 +1,31 @@
+# The one name (R3, R9). Install this as /srv/pupkeep/docker-compose.override.yml
+# (deploy/README.md step 4): Compose merges that file beside docker-compose.yml
+# automatically whenever it runs without an explicit `-f`. It lives here rather
+# than at the repository root because the checkout is replaced by `git checkout`
+# and this copy is the operator's — re-install it if it changes.
+#
+# The one-shots that do pass `-f` (the backup unit, the restore drill) therefore
+# do not load this file. None of them needs the name: they run one container
+# against the data directory and never mint a link.
+#
+# Why an override at all: Compose only injects the variables a service declares,
+# and the base file declares neither of these on `caddy`. Without this wire the
+# Caddyfile's `{$PUPKEEP_HOSTNAME:…}` could only ever be its default while the
+# app was told a different origin in `.env` — exactly the two-name disagreement
+# this file makes impossible. The app's origin is *built from the name* here, so
+# an operator sets one value and cannot set only half of it.
+
+services:
+  caddy:
+    environment:
+      # `:?` is a check, not a default: an unset (or empty) name stops
+      # `compose up` with this message instead of serving the Caddyfile default
+      # silently while the app mints links on something else.
+      PUPKEEP_HOSTNAME: "${PUPKEEP_HOSTNAME:?set PUPKEEP_HOSTNAME in /srv/pupkeep/.env (deploy/README.md step 4)}"
+
+  pupkeep:
+    environment:
+      # Replaces the base file's independent default. Renaming the deployment
+      # moves Caddy and the app together; a half-renamed deployment is not a
+      # state this file can produce.
+      PUPKEEP_PUBLIC_ORIGIN: "https://${PUPKEEP_HOSTNAME:?set PUPKEEP_HOSTNAME in /srv/pupkeep/.env (deploy/README.md step 4)}"

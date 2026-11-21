@@ -1,0 +1,33 @@
+# Pupkeep's daily self-report to ntfy (R8).
+#
+# The report is one line: certificate days remaining, free disk, container
+# health, the age of the newest archive, and the last 24 h's sign-in failures
+# and 429s. It is produced by `/usr/local/bin/pupkeep-report` — the host copy of
+# deploy/pupkeep-report.sh, installed by deploy/README.md step 7 — because the
+# certificate has to be probed with the host's `openssl`: the Caddy image ships
+# none, and probing the name from inside a container that terminates TLS would
+# prove the wrong thing.
+#
+# The DuckDNS updater has its own unit and timer (pupkeep-dns-update.service and
+# .timer). It is not started from here: two writers for one A record is the
+# thing those units exist to prevent.
+
+[Unit]
+Description=Pupkeep daily report to ntfy
+Documentation=file:///srv/pupkeep/deploy/README.md
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+
+# The script reads /etc/pupkeep/report.env (root, 0600) for the deployment-level
+# ntfy topic and the origin. The topic is a bearer secret for the report channel,
+# so the script refuses a file group or others can read, reads the key from that
+# file rather than from this unit's argv, and hands the topic's URL to curl on
+# stdin — `ps` and this unit's journal show arguments, and neither may show it.
+ExecStart=/usr/local/bin/pupkeep-report
+
+# Five probes and one HTTPS POST; a slow certificate handshake must not hang the
+# timer for the default start timeout.
+TimeoutStartSec=2min
