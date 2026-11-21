@@ -35,9 +35,19 @@ LoadCredentialEncrypted=backup-passphrase:/etc/pupkeep/backup-passphrase.cred
 # directory is exactly what R7 rules out. Exit 75 means "someone already holds
 # the lock", which is a skipped run rather than a failure.
 #
-# INVARIANT: this command is R7's, verbatim apart from the destination:
-#   docker compose run --rm -T --entrypoint node --no-deps pupkeep \
-#     scripts/backup.ts --data /data --remote <remote>:<path> --require-remote
+# The invocation, as the shell below builds it (R7 states the same command):
+#
+#   docker compose run --rm -T --entrypoint node --no-deps \
+#     -e PUPKEEP_BACKUP_PASSPHRASE \
+#     pupkeep scripts/backup.ts --data /data \
+#     --remote "$PUPKEEP_BACKUP_REMOTE" --require-remote
+#
+# `-e` without a value names the variable, so compose forwards the value from
+# this unit's own environment — which the shell below fills from the
+# systemd-creds copy — instead of taking it from argv. That is why the R7 command
+# has the flag: the passphrase reaches the one-shot as an environment variable,
+# never as an argument, and the destination comes from backup.env rather than
+# from this line.
 ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 75 /run/pupkeep-backup.lock /bin/sh -c 'set -eu; PUPKEEP_BACKUP_PASSPHRASE="$$(cat $${CREDENTIALS_DIRECTORY}/backup-passphrase)"; export PUPKEEP_BACKUP_PASSPHRASE; exec /usr/bin/docker compose -f /srv/pupkeep/docker-compose.yml run --rm -T --entrypoint node --no-deps -e PUPKEEP_BACKUP_PASSPHRASE pupkeep scripts/backup.ts --data /data --remote "$$PUPKEEP_BACKUP_REMOTE" --require-remote'
 SuccessExitStatus=75
 

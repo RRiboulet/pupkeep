@@ -7,6 +7,23 @@ and everything that was only true because the host was a phone.
 Revision 2 (2026-11-20): rewritten after three adversarial reviews and a host
 probe. The substantive corrections are listed at the end under *Review changes*.
 
+Revision 3 (2026-11-21): implementation notes only — what this slice does and
+does not do, the DNS timer's real cadence, the backup invocation the unit
+actually runs, and the restore advice that no longer names a flag the restore
+script rejects.
+
+**This change is part one.** It adds `public` mode and makes every other mode
+refuse to start once an origin is configured; it does **not** delete `tailscale`
+and `cloudflare`, retire the Termux transport or rewrite the phone scripts. That
+deletion is a later slice (`P6-08` in the plan), and until it lands both modes
+still parse and the fallback host still starts `tailscale`.
+
+Two limits stated where they are load-bearing rather than discovered later:
+**the off-box upload is verified by size, not by digest** (the archive is
+`stat`-ed and its length compared — a hash check is tracked as `P6-11`), and no
+step in this repository has been executed against a Docker daemon or a public
+name, so R0/R1/R9 are the operator's legs on the box.
+
 ## Objective
 
 Pupkeep is hosted on the host phone (Termux, wake lock, Termux:Boot), and the
@@ -20,7 +37,8 @@ disappeared on a Wi-Fi → 5G switch while the process stayed up.
 
 After this phase: the household runs on the server behind a public HTTPS origin
 (`pupkeep.duckdns.org`), the phone is a browser, Web Push is the daily
-notification channel, and the Tailscale and Cloudflare access modes are gone.
+notification channel, and the Tailscale and Cloudflare access modes are retired —
+refused at runtime by part one, deleted from the code by `P6-08`.
 
 The host is the existing Oracle Cloud `VM.Standard.A1.Flex` instance (2 OCPU,
 12 GB, `eu-frankfurt-1`) that already runs the coding container. It is free, and
@@ -86,7 +104,9 @@ R1. **Deployment shape.** Two containers on the host, `pupkeep` and `caddy`, on
    hides the image's own `/data` ownership.
 
 R2. **`public` access mode.** `--access` accepts `local`, `lan`, `public`;
-   `tailscale` and `cloudflare` are rejected as unknown modes. `public` refuses
+   `tailscale` and `cloudflare` are rejected as unknown modes — that half is the
+   deletion slice (`P6-08`), and until it lands a configured origin makes both
+   refuse to start rather than parse into a listener. `public` refuses
    to start when `PUPKEEP_PUBLIC_ORIGIN` is absent, is not an absolute `https://`
    URL, or carries a path, query or fragment. The published image's command is
    `--access public --data /data`; a Compose `command:` states it explicitly
@@ -129,7 +149,10 @@ R5. **Sessions sized for the internet.** Sessions last 30 days; a member's
    sessions **and** removes that member's push subscriptions, so a revoked device
    stops being notified; the owner may revoke either member, a member only
    themselves. The owner *token* is not a session and survives revocation —
-   `--reissue-owner` on the host is the stated repair, and the docs say so.
+   `npm start -- --reissue-owner` (or the container's entrypoint with the same
+   flag, production stopped first) is the stated repair, and the docs say so.
+   The flag belongs to the launcher, not to `restore.ts`, whose parser rejects
+   it.
 
 R5b. **The sign-in limiter cannot be a lockout lever.** Credentials are
    validated before the limiter is charged; a successful sign-in resets the
@@ -150,18 +173,36 @@ R7. **Backups run unattended, off-box, and cannot leak auth.** The image carries
    `After=docker.service`, plus a lock):
 
    ```
-   docker compose run --rm -T --entrypoint node --no-deps pupkeep \
-     scripts/backup.ts --data /data --remote <remote>:<path> --require-remote
+   docker compose run --rm -T --entrypoint node --no-deps \
+     -e PUPKEEP_BACKUP_PASSPHRASE \
+     pupkeep scripts/backup.ts --data /data --remote <remote>:<path> --require-remote
    ```
 
-   The passphrase, `rclone.conf` and `known_hosts` arrive as Compose secrets
-   readable by uid 10001 — not as root-owned 0600 bind mounts, which the
-   container cannot read. The archived `config.json` has `ownerTokenHash` set to
-   null, `sessions` and `invites` emptied, so a restored archive can never
-   re-arm an old owner link or session; the restore procedure then requires
-   `--reissue-owner` before the first sign-in, and PLAN §14.4's claim is
-   corrected to match. A failed run exits non-zero and leaves the previous
-   archive and the status file intact.
+   That is the invocation, `-e` included: systemd decrypts a `systemd-creds`
+   copy of the passphrase into `${CREDENTIALS_DIRECTORY}`, a one-line shell
+   reads it into an exported variable and `exec`s compose, and `-e` names the
+   variable so compose forwards that value. The passphrase is therefore in
+   neither `ps` nor the journal; it is in the one-shot's environment, which is
+   readable by the same uid — acceptable on a single-tenant box (§6.10). The destination comes from
+   `/etc/pupkeep/backup.env`. `--entrypoint node` is load-bearing because
+   `compose run` appends to the image's `ENTRYPOINT`, which is the launcher.
+
+   The nightly passphrase arrives from the `systemd-creds` copy through `-e`,
+   and the Compose secret of the same name is what the restore drill mounts;
+   `rclone.conf` and `known_hosts` arrive as Compose secrets. All of them are
+   readable by uid 10001 — never a root-owned 0600 bind mount, which the
+   container cannot read (the failure R7 names).
+
+   The archived `config.json` has `ownerTokenHash` set to null, `sessions` and
+   `invites` emptied, so a restored archive can never re-arm an old owner link or
+   session; the restore procedure then requires `npm start -- --reissue-owner`
+   (the launcher's flag) before the first sign-in, and PLAN §14.4's claim is
+   corrected to match. A pre-scrub archive is **refused** before the data
+   directory is touched: rotating the passphrase does not repair it, because
+   rotation re-encrypts the same `config.json` with the credentials still inside
+   — only a fresh archive from a scrubbing build, or removing those fields by
+   hand, does. A failed run exits non-zero and leaves the previous archive and
+   the status file intact.
 
 R8. **The box reports on itself, and the report is measurable.** A daily host
    timer pushes one line to a deployment-level ntfy topic named in
@@ -177,9 +218,16 @@ R8. **The box reports on itself, and the report is measurable.** A daily host
    a healthy answer) and alerts after two consecutive failures. Container logs
    are capped at 10 MB × 3; Caddy's access log stays off.
 
-R9. **The name stays pointed at the box.** A `pupkeep-duckdns` timer updates the
-   record every 15 minutes, with the token supplied as a systemd credential so it
-   never appears in `ps` or the journal. The deploy preflight verifies the record
+R9. **The name stays pointed at the box.** A `pupkeep-dns-update.timer` updates
+   the record every **5 minutes** (`OnUnitActiveSec=5min`, plus `OnBootSec=2min`
+   so a rebooted box is re-pointed promptly), with the token supplied as a
+   systemd credential so it never appears in `ps` or the journal. Five, not
+   fifteen: the box's public address is ephemeral — a stop/start of the instance
+   can hand it a different one — and the name is the identity every cookie and
+   push subscription is scoped to, so the stale window after an address change is
+   kept short rather than widened. The hand-installed timer on the box already
+   ran at five minutes, and the shipped unit replaces it at the same cadence
+   instead of quietly loosening it. The deploy preflight verifies the record
    resolves to the box's public IP. The name is the identity: the incident note
    for a lost or repointed name is re-mint plus revoke-all, because every cookie
    is origin-scoped.
@@ -361,6 +409,14 @@ places there. The plan update records the addition.
 
 ## Acceptance criteria
 
+**Two kinds of box are unticked for different reasons, and part one does not
+close them.** Everything that needs the box (R0, R1, R7's unattended run, R8's
+report, R9, R10, R11's host pull, the restore drill) is the operator's leg and
+has not been run from this repository. The items that need the **deletion**
+slice — R2's rejection of `tailscale`/`cloudflare`, R6's removal of the Termux
+transport, R13's rewritten scripts and R14's rewritten docs assertions — are
+`P6-08`'s and are not met here; part one retires the modes at runtime instead.
+
 - [ ] R0 — a page served by a temporary listener on 80 and on 443 arrived on a
   phone using mobile data; the listeners were removed. If it did not, no other
   criterion here was attempted.
@@ -464,7 +520,8 @@ sudo systemctl start pupkeep-backup.service
 rclone lsl <remote>:<path> | tail -3
 docker compose -f docker-compose.yml -f deploy/compose.restore.yml up -d
 #    restore into /srv/pupkeep/restore-test on 127.0.0.1:8792, compare the seq,
-#    confirm sign-in is refused until --reissue-owner
+#    confirm sign-in is refused until a link is minted (the boot mints one, or
+#    run the launcher with --reissue-owner; restore.ts rejects the bare flag)
 
 # 6. the report and the certificate
 sudo systemctl start pupkeep-report.service   # a report line arrives in ntfy

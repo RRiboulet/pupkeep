@@ -122,6 +122,13 @@ sudo systemd-creds encrypt --name=backup-passphrase \
 sudo chmod 0400 /etc/pupkeep/backup-passphrase.cred
 ```
 
+Rotation **re-encrypts the archives that already exist**; it does not re-scrub
+their contents. That distinction matters after a restore refusal: an archive
+taken before the scrub still carries the owner token hash and session hashes
+inside, and rotating it only changes the key that opens them. Take a **fresh**
+archive with this build's job (which scrubs `config.json`), or remove those
+fields from that one `config.json` by hand — do not rotate and retry.
+
 **rclone config and SSH host key** (build them where the remote is reachable,
 then copy in):
 
@@ -248,6 +255,21 @@ sudo docker compose logs --tail=50 caddy pupkeep
 
 The owner link is **not** printed: in `public` mode it is written `0600` only
 (R10). `docker compose logs pupkeep | grep -c token=` must be `0`.
+
+**If the owner link is lost, or the token must be rotated:** the flag belongs to
+the launcher, which is the image's entrypoint, and `restore.ts`'s parser rejects
+it. Stop production first — two launchers on one SQLite file is the thing the
+whole design forbids — then run one with the service's own flags plus the flag:
+
+```bash
+sudo docker compose stop pupkeep
+sudo docker compose run --rm -T --no-deps pupkeep \
+  --access public --data /data --reissue-owner
+```
+
+It rotates the owner token, writes `/srv/pupkeep/data/owner-link.txt` (0600) and
+keeps serving; Ctrl-C once the file exists, then `sudo docker compose start
+pupkeep`. Read the link from the file, never from a log.
 
 ## 6. Verify (R1, R3, R8)
 
@@ -378,10 +400,20 @@ Checks:
   `LINK=$(sudo cat /srv/pupkeep/data/owner-link.txt); curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:8792/login?token=${LINK##*token=}"`
   is `401`/`403`, never `303` (R7: the archive carries no live credential);
 - a fresh link exists at `/srv/pupkeep/restore-test/owner-link.txt` after the
-  drill boots (the boot mints one because the restored hash is null), or mint it
-  deliberately with `… run --rm … pupkeep-restore --reissue-owner`. In `lan` mode
-  the link names the drill container's own address, so it is for a `curl` on the
-  box, not a browser elsewhere;
+  drill boots (the boot mints one because the restored hash is null). Minting one
+  deliberately is the **launcher's** job, not `restore.ts`'s: that script's own
+  parser rejects a bare `--reissue-owner`, so run the image's entrypoint with the
+  drill's flags and the flag added, stopping the drill instance first —
+
+  ```bash
+  sudo docker compose $F stop pupkeep-restore
+  sudo docker compose $F run --rm -T --no-deps pupkeep-restore \
+    --access lan --port 8787 --data /data --reissue-owner
+  ```
+
+  It mints, writes `owner-link.txt` (0600) and then serves, so stop it (Ctrl-C)
+  once the file exists. In `lan` mode the link names the drill container's own
+  address, so it is for a `curl` on the box, not a browser elsewhere;
 - the household's care log is present in the drill instance.
 
 Clean up — the copy holds a live database and the push keys:

@@ -1,8 +1,11 @@
 # The DuckDNS update schedule (R9).
 #
-# Five minutes, not R9's fifteen: the hand-installed timer on the box already
-# runs at this cadence, and this unit replaces it rather than silently widening
-# the window in which an ephemeral address change leaves the name stale.
+# Five minutes, and R9 says five: the box's public address is ephemeral, so
+# stopping and starting the instance can hand it a different one, and the name is
+# the identity every cookie and push subscription is scoped to. The hand-installed
+# timer on the box already ran at this cadence and this unit replaces it at the
+# same one rather than silently widening the window in which an address change
+# leaves the name stale.
 #
 # `OnBootSec=2min` is what gets a rebooted box re-pointed promptly. The
 # `Persistent=true` below is copied from the host's timer for shape, but it is
