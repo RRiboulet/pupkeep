@@ -11,9 +11,12 @@
 //     missing the newest commit);
 //   * the archive is decrypted and checked again after encryption, so a wrong
 //     passphrase is found now rather than at restore time, and when a remote is
-//     configured the uploaded object is stat-ed and its size compared with the
-//     local archive, so a truncated upload is found now too (P5-02's drill found
-//     this was claimed here but never done);
+//     configured the uploaded object is stat-ed, then read back to a temporary
+//     file and hashed, so the off-device copy is compared with the local archive
+//     byte for byte: a truncated upload and a corrupt one are both found now
+//     (P5-02's drill found the size check was claimed here but never done; an
+//     adversarial review then asked why the shipped check was weaker than the
+//     sha256 re-read that drill itself used);
 //   * the archived `config.json` is a scrub of the live one: no owner token hash,
 //     no session hash, no invite. An archive is the most-copied object in the
 //     system and its passphrase deliberately leaves the backup host, so carrying
@@ -29,6 +32,8 @@
 // job enforces where it can and documents where it cannot.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -471,15 +476,25 @@ async function listRemoteArchives(run: CommandRunner, remote: string): Promise<s
 /**
  * Check the object that actually landed off-device, not just the local file.
  * `rclone lsf` proves the *name* exists; it says nothing about a truncated
- * upload, which is what a killed connection leaves behind. The module header
- * claimed this check long before it existed (P5-02's drill found the gap), so it
- * compares the remote object's reported size with the local archive's.
+ * upload, which is what a killed connection leaves behind. The size gate is the
+ * cheap check and stays first: one round trip, and it is what catches the common
+ * failure. Size alone cannot see corruption, though, and the drill that produced
+ * this code proved its copy by re-reading and hashing it, so the shipped check
+ * has to be at least that strong — otherwise the header (and the operator) is
+ * told more than the code did.
+ *
+ * The re-read is a `copyto` into a private staging directory plus a sha256 of
+ * both files: `rclone cat` would put the archive on stdout, which is neither
+ * bounded nor binary-safe, and a shell would mean quoting an object key. The
+ * price is one extra download per backup — the whole archive back down the wire,
+ * so a 1 MB archive costs 1 MB of bandwidth every run.
  *
  * A stat that cannot be read is a failure, not a warning: "uploaded, maybe" is
  * how a household discovers its only off-device copy is 0 bytes.
  */
 async function verifyRemoteArchive(
   run: CommandRunner,
+  backupDir: string,
   remote: string,
   name: string,
   localArchive: string,
@@ -510,6 +525,42 @@ async function verifyRemoteArchive(
         `the local copy is intact and the remote object at ${target} is incomplete`,
     );
   }
+
+  // `.staging-` so a killed run leaves something the next run's sweep collects;
+  // mkdtemp makes it 0700 inside a 0700 parent, and the finally removes it on
+  // both paths so the archive-shaped bytes do not linger on the backup host.
+  const work = await mkdtemp(join(backupDir, ".staging-"));
+  const readBack = join(work, name);
+  try {
+    const copy = await run("rclone", ["copyto", target, readBack]);
+    if (copy.code !== 0) {
+      throw new Error(
+        `rclone could not copy ${target} back for the digest check (exit ${copy.code}); ` +
+          `the local archive is intact but the off-device copy is unverified`,
+      );
+    }
+    const remoteDigest = await sha256File(readBack);
+    const localDigest = await sha256File(localArchive);
+    if (remoteDigest !== localDigest) {
+      throw new Error(
+        `the off-device archive matches the local archive's ${size} bytes but not its sha256 ` +
+          `(remote ${remoteDigest}, local ${localDigest}); the local copy is intact and the ` +
+          `remote object at ${target} is corrupt`,
+      );
+    }
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Hash a file by streaming it, so a large archive never sits in memory and the
+ * comparison never depends on anything rclone prints.
+ */
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
 }
 
 // --- filesystem helpers ----------------------------------------------------
@@ -1018,7 +1069,7 @@ export async function backupDataDir(
     if (result.code !== 0) {
       throw new Error(`rclone could not copy the archive to ${remote} (exit ${result.code}); the local archive is intact`);
     }
-    await verifyRemoteArchive(run, remote, name, archive);
+    await verifyRemoteArchive(run, backupDir, remote, name, archive);
     uploaded = true;
   }
 

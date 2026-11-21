@@ -391,6 +391,7 @@ test("a configured remote receives the archive and retention deletes only old re
   const source = await seedDataDir("remote");
   try {
     const calls: string[] = [];
+    let uploaded: string | undefined;
     let uploadedSize: number | undefined;
     const remoteRun: CommandRunner = async (command, args, options) => {
       if (command === "rclone") {
@@ -402,8 +403,15 @@ test("a configured remote receives the archive and retention deletes only old re
             stderr: "",
           };
         }
+        if (args[0] === "copyto" && args[1]!.startsWith("test:")) {
+          // The read-back half of the check: answer with the bytes that were
+          // "uploaded", so the digest comparison is real.
+          await copyFile(uploaded!, args[2]!);
+          return { code: 0, stdout: "", stderr: "" };
+        }
         if (args[0] === "copyto") {
-          uploadedSize = (await stat(args[1]!)).size;
+          uploaded = args[1]!;
+          uploadedSize = (await stat(uploaded)).size;
           return { code: 0, stdout: "", stderr: "" };
         }
         if (args[0] === "lsjson") {
@@ -433,11 +441,16 @@ test("a configured remote receives the archive and retention deletes only old re
     );
     assert.equal(result.remoteConfigured, true);
     assert.equal(result.uploaded, true);
-    assert.equal(calls.some((call) => call.startsWith("copyto ")), true);
+    assert.equal(calls.some((call) => call.startsWith("copyto ") && !call.startsWith("copyto test:")), true);
     // The object that landed off-device is stat-ed, not just assumed (P5-02 drill).
     assert.equal(calls.some((call) => call.startsWith("lsjson --stat ")), true);
+    // ...and then read back and hashed, not trusted on its size alone.
+    assert.equal(calls.some((call) => call.startsWith("copyto test:pupkeep/")), true);
     assert.deepEqual(result.deletedRemote, ["pupkeep-20200101T000000Z.tar.gz.age"]);
     assert.equal(calls.some((call) => call.includes("pupkeep-20261028T000000Z")), false);
+    // The read-back copy does not stay behind on the backup host.
+    const leftover = (await readdir(join(source.dir, "backups"))).filter((entry) => entry.startsWith(".staging-"));
+    assert.deepEqual(leftover, []);
   } finally {
     await source.close();
     await rm(source.dir, { recursive: true, force: true });
@@ -832,8 +845,10 @@ test("a truncated upload is refused instead of being called uploaded", async () 
   // the job decrypted its own local archive and never looked at the object.
   const source = await seedDataDir("truncated");
   try {
+    const calls: string[] = [];
     const remoteRun: CommandRunner = async (command, args, options) => {
       if (command === "rclone") {
+        calls.push(args.join(" "));
         if (args[0] === "lsf") return { code: 0, stdout: "", stderr: "" };
         if (args[0] === "lsjson") return { code: 0, stdout: JSON.stringify({ Size: 12 }), stderr: "" };
         return { code: 0, stdout: "", stderr: "" };
@@ -852,6 +867,54 @@ test("a truncated upload is refused instead of being called uploaded", async () 
       ),
       /uploaded archive is 12 bytes but the local archive/,
     );
+    // The size gate is the cheap one: a wrong size never pays for the download.
+    assert.equal(calls.some((call) => call.startsWith("copyto test:pupkeep/")), false);
+  } finally {
+    await source.close();
+    await rm(source.dir, { recursive: true, force: true });
+  }
+});
+
+test("a same-size but corrupt off-device object is refused by its digest", async () => {
+  // Size alone cannot tell a flipped byte from a good upload; the drill proved
+  // its own copy by re-reading it, so the shipped check does too.
+  const source = await seedDataDir("corrupt");
+  try {
+    let uploadedSize: number | undefined;
+    const remoteRun: CommandRunner = async (command, args, options) => {
+      if (command === "rclone") {
+        if (args[0] === "lsf") return { code: 0, stdout: "", stderr: "" };
+        if (args[0] === "copyto" && args[1]!.startsWith("test:")) {
+          // Same length, different bytes: damage that a size check calls fine.
+          await writeFile(args[2]!, Buffer.alloc(uploadedSize!, 0x41));
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "copyto") {
+          uploadedSize = (await stat(args[1]!)).size;
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "lsjson") {
+          return { code: 0, stdout: JSON.stringify({ Size: uploadedSize }), stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return runCommand(command, args, options);
+    };
+    await assert.rejects(
+      backupDataDir(
+        {
+          dataDir: source.dir,
+          passphrase: PASSPHRASE,
+          remote: "test:pupkeep",
+          now: new Date("2026-10-29T12:05:00Z"),
+        },
+        { cipher: identityCipher, run: remoteRun },
+      ),
+      /matches the local archive's \d+ bytes but not its sha256 \(remote [0-9a-f]{64}, local [0-9a-f]{64}\); the local copy is intact and the remote object at test:pupkeep\//,
+    );
+    // The read-back copy is removed on the failure path too.
+    const leftover = (await readdir(join(source.dir, "backups"))).filter((entry) => entry.startsWith(".staging-"));
+    assert.deepEqual(leftover, []);
   } finally {
     await source.close();
     await rm(source.dir, { recursive: true, force: true });
