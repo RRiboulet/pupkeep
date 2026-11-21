@@ -53,5 +53,8 @@ jobs:
       - name: Typecheck (erasable syntax only)
         run: npm run typecheck
 
+      - name: Rule table (AGENTS.md)
+        run: npm run check:rules
+
       - name: Test (node --test, real SQLite on a temp directory)
         run: npm test

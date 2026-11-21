@@ -1,0 +1,3 @@
+rule-table contract version 1
+sha256 9ab0994ddab7d256f654791fb6d89a8f315d577b092ceae83a82887d90645822
+vendored from my-agent-setup exp/prevent-recurrence a2d56b0, .pi/skills/prevent-recurrence/scripts/rule-table.mjs

@@ -163,6 +163,7 @@ passed; `v0.1.0` did.
 npm ci
 npm run typecheck      # tsc --noEmit; only erasable syntax, so node strips it
 npm test               # node --test runs the TypeScript directly
+npm run check:rules    # validates AGENTS.md's Rules and enforcement table
 npx playwright install --with-deps chromium
                        # once per container: the browser-render checks skip
                        # without it (CI and postCreate install it themselves)
@@ -200,3 +201,9 @@ including why the daily port is 8791 and not 8787.
 Prefer the plan’s task IDs (`P0-01`, `P1-03`, …) in commit messages and PR
 descriptions. If a change alters a decision in the plan, update the plan in the
 same change.
+
+## Rules and enforcement
+
+| Rule | Level | Enforced by | Proof |
+|---|---|---|---|
+| Pupkeep's devcontainer advertises truecolor to pi in `containerEnv` and inside tmux, so pi does not fall back to 256 colours | test | `node --test test/devcontainer-truecolor.test.ts` | `docs/proof/devcontainer-truecolor.md` |

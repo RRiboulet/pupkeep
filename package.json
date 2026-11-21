@@ -11,6 +11,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env bin/pupkeep.js",
     "test": "node --test \"test/**/*.test.ts\" \"test/**/*.test.js\"",
+    "check:rules": "node tools/rule-table.mjs check AGENTS.md",
     "typecheck": "tsc --noEmit",
     "backup": "node scripts/backup.ts",
     "restore": "node scripts/restore.ts",
