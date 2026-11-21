@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+Fixed:
+
+- **The encrypted archive no longer carries a live credential, and a restore now
+  needs a fresh owner mint.** `config.json` inside a bundle is the household's
+  identities and nothing that authenticates: `ownerTokenHash` is null, every
+  member's `sessions` is empty and `invites` is empty, built field by field rather
+  than by deleting keys from a copy so a credential added to `MemberRecord` later
+  is not carried into every archive until someone allows it. The reason is that
+  the passphrase deliberately leaves the backup host (PLAN §7.5), so whoever can
+  open an archive could otherwise sign in as a caregiver — and since a restore
+  usually lands on a new origin, an old owner link or cookie would hand out trust
+  minted for an address the household no longer uses (R7, P5-02 and P6). `restore`
+  refuses a pre-scrub archive before touching the data directory, naming what it
+  found; a restored copy prints that nobody can sign in until an owner token is
+  minted, which the next launcher start does (`owner-link.txt`, 0600) and
+  `--reissue-owner` does explicitly. Cookies and sessions from before the restore
+  are dead; push subscriptions still ride in `push.json`, which is the deliberate
+  exception that lets them survive. The drills in `docs/backup-drill.md` predate
+  the scrub, and that file marks which of their observations no longer reproduce;
+  a full drill of a scrubbed archive is still open.
+
 ## v0.1.1 — 2026-11-18
 
 Fixed:

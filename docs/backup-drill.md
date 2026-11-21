@@ -114,7 +114,7 @@ existed before the snapshot:
 | Check | Result |
 |---|---|
 | `healthz` on 8793 | **200** |
-| `/api/session`, `/api/puppy`, `/api/walks` with the pre-restore cookie | **200, 200, 200** |
+| `/api/session`, `/api/puppy`, `/api/walks` with the pre-restore cookie | **200, 200, 200**[^scrub] |
 | the same routes with no cookie | **401** |
 | `secrets.json` in the restored directory | **absent**, and it boots |
 | `push.json` | `ntfy`, `prefs`, `schemaVersion`, `subscriptions`, `vapid` — VAPID keys and subscriptions survive |
@@ -127,7 +127,7 @@ Both are worth more than the pass, because both will fool the next person:
 1. **A session minted after the snapshot is not in it.** The first attempt signed
    in *after* taking the backup and then reported 401 against the restored copy.
    That is not a restore defect: sessions live in `config.json`, the bundle is a
-   snapshot, and a cookie created afterwards cannot be inside it. The fix is the
+   snapshot, and a cookie created afterwards cannot be inside it.[^scrub] The fix is the
    order — sign in, *then* back up, *then* restore.
 2. **A stray instance on the same port serves the old data directory.** Two of
    the first attempts left a launcher from an earlier try holding port 8793. The
@@ -295,3 +295,293 @@ schedule, no passphrase source), and "the next operator will want it" must not b
 read as "backups are running".
 
 The drill passphrases were removed from this host with `/tmp/p5-02`.
+
+## S3 target (OCI Object Storage) — drilled 2026-11-20
+
+The 2026-11-18 drill above left one row of its own table open: "a network remote
+other than sftp; no S3/WebDAV/B2 target was configured". This section closes that
+row against a real S3-compatible bucket, and records what it still does not prove.
+
+| | |
+|---|---|
+| Host | this coding host, Ubuntu 24.04 arm64, Node `v24.22.2`, `age 1.1.1`, `rclone v1.60.1`, `expect 5.45.4` |
+| Target | rclone remote `pupkeep-oci`, bucket `pupkeep-backups` (OCI Object Storage, S3-compatible), `RCLONE_CONFIG=/etc/pupkeep/rclone.conf` |
+| Config | `/etc/pupkeep/rclone.conf` is `root:root 0600`, so **the job ran under `sudo -n`**: the app's own user cannot read the copy target's credentials |
+| Data | a data directory the **app itself created** (`node bin/pupkeep.js --access local --port 8798 --data …/hh`): 23 documents, 1 task, durable `next_seq` 8, plus a **fake** `secrets.json` and a `server.log` |
+| Archives | 7 392 B (`pupkeep-20261120T152959Z.tar.gz.age`, taken while the server was running) and 7 391 B (`…153021Z`) |
+
+### What this proves, and what it does not
+
+| Proves | Does not prove |
+|---|---|
+| An encrypted bundle uploads to an S3-compatible object store and the object is **byte-identical** to the local archive (sha256 compared) | Another S3 vendor, a slow or lossy link, or a bucket in a different region: this bucket is beside the host |
+| The object at rest is age ciphertext — `file` says `age encrypted file, scrypt recipient (N=2**18)` and the first two bytes are `61 67` (`ag`), not the gzip magic `1f 8b` | That the bucket's own policy is right for a household: the drill did not audit OCI IAM, versioning or lifecycle rules, and the object is only as private as the key's scope |
+| `secrets.json` and `server.log` are **absent** from a bundle taken from a data dir that contains both | That no *other* copy of them exists anywhere: the drill only inspects the bundle |
+| `PRAGMA integrity_check` runs on the copy, and a corrupt database is **refused** (`… failed integrity_check`, exit 1, no archive written, `status.json` carries the message) | Corruption in a page's **free space**: a first attempt garbled 32 unused bytes and the job (correctly) still said `ok` — the check validates structure, not the whole file |
+| A restore from the object **downloaded out of the bucket** yields a bootable data dir: `healthz` 200, 401 without the cookie, `next_seq` and the 23 documents identical | A restore on a clean host: this is the same machine that took the backup |
+| 14-day retention prunes expired archives **locally and remotely** and keeps everything inside the window; the never-delete-the-newest rule holds | The newest-keep rule with a **real clock** where the newest archive is itself expired — impossible against `new Date()`, so that one case was checked against `expiredArchives()` in isolation |
+| A passphrase file inside `<data>` or `<data>/backups` is refused, in both places | PLAN §7.5's strong form: the drill key sat on this host (outside the data dir, 0600) for the length of the run |
+
+### 1. A missing helper, and what the job said about it
+
+`expect` was **not installed** on this host, although `checkBackupTools` requires
+it:
+
+```bash
+sudo -n env RCLONE_CONFIG=… npm run backup -- --data …/hh --remote pupkeep-oci:pupkeep-backups/drill-<UTCSTAMP> \
+  --passphrase-file /tmp/pupkeep-drill/pass --retention-days 14 --require-remote
+```
+
+```
+ERROR [backup] could not run expect: spawn expect ENOENT
+```
+
+Exit 1 before anything was written — correct behaviour, wrong sentence. See
+defect 1 below. `sudo -n apt-get install -y expect` (5.45.4, plus automatic
+`tcl-expect`) made the rest of this section possible; **that package is left
+installed on this host** and is the only host change the drill made.
+
+### 2. One encrypted bundle, and what is not in it
+
+Two runs, both with `--require-remote`:
+
+```
+backup /tmp/pupkeep-drill/hh/backups/pupkeep-20261120T152959Z.tar.gz.age (7392 bytes, seq 8->8, uploaded)
+backup /tmp/pupkeep-drill/hh/backups/pupkeep-20261120T153021Z.tar.gz.age (7391 bytes, seq 8->8, uploaded)
+```
+
+`seq 8->8` is the watermark check described in §1 above; the first run was taken
+with the server **live** on port 8798, so this also re-confirms that the SQLite
+online-backup path is safe against a running app.
+
+The object was pulled back out of the bucket, decrypted with the drill
+passphrase over a PTY (`expect`, as the job does), and its members listed:
+
+```bash
+sudo -n rclone copyto pupkeep-oci:pupkeep-backups/drill-<UTCSTAMP>/pupkeep-20261120T153021Z.tar.gz.age /tmp/…/
+sudo -n expect -c '…spawn age -d -o $env(OUT) $env(IN)…'
+sudo -n tar -tzvf /tmp/…/bundle.tar.gz
+```
+
+```
+-rw------- root/root  122880 2026-11-20 15:30 pupkeep.sqlite
+-rw------- root/root     304 2026-11-20 15:30 config.json
+-rw------- root/root     408 2026-11-20 15:30 push.json
+```
+
+**Three members and no others.**[^scrub] `secrets.json` and `server.log` were present in
+the source directory at the time of the run (fake provider keys, `0600`) and both
+are absent from the bundle; the job builds the tarball from the `BACKUP_FILES`
+list, not from a directory walk, and `stageArchive` refuses a bundle whose member
+set differs from that list.
+
+### 3. The object in the bucket is ciphertext, and it is the same bytes
+
+```bash
+rclone lsjson pupkeep-oci:pupkeep-backups/drill-<UTCSTAMP>
+rclone cat …/pupkeep-20261120T152959Z.tar.gz.age | head -c 4096 | file -
+rclone cat …/pupkeep-20261120T152959Z.tar.gz.age | head -c 2 | xxd -p
+sha256sum <local archive>                     # and the same over `rclone cat`
+```
+
+| Check | Observed |
+|---|---|
+| `lsjson` | `{"Path":"pupkeep-20261120T152959Z.tar.gz.age","Size":7392,…,"Tier":"STANDARD"}` — size matches the local archive exactly |
+| `file -` on the remote bytes | `age encrypted file, scrypt recipient (N=2**18)` |
+| first two bytes | `6167` (`ag`), **not** `1f8b` — rclone is moving opaque bytes, as intended |
+| sha256 local vs `rclone cat` of the object | identical (`e84addf6…57f3` for run A, `bad8d38b…57f3` for run B) |
+
+So "encrypted before it leaves the host" is not an assumption here: the bytes at
+rest in the bucket are age output, and no rclone crypt remote is involved.
+
+### 4. The integrity check, both ways
+
+The job prints nothing when `PRAGMA integrity_check` says `ok` — it only speaks
+when the copy is bad. The positive side is visible in the restored copy (§5) and
+in a direct read of the decrypted bundle (`integrity_check: ok`, `next_seq 8`).
+The check is live, not decorative:
+
+```bash
+# a copy of the same database with one b-tree cell pointer overwritten (page 3, +8)
+printf "\xff\xff" | dd of=…/pupkeep.sqlite bs=1 seek=$((2*4096+8)) conv=notrunc
+```
+
+```
+ERROR [backup] the database copy failed integrity_check: *** in database main ***
+Tree 3 page 3 cell 0: Offset 65535 out of range 3881..4092
+```
+
+Exit 1, **no archive written**, and `backups/status.json` carries that text in
+`lastError` while `lastArchive` stays `null` — which is exactly the signal the app
+needs to show a failed backup rather than a stale success.
+
+### 5. Restore from the bucket object
+
+```bash
+sudo -n rclone copyto pupkeep-oci:pupkeep-backups/drill-<UTCSTAMP>/pupkeep-20261120T153021Z.tar.gz.age /tmp/…/from-remote/
+sudo -n npm run restore -- --data /tmp/…/restore-live --archive /tmp/…/from-remote/pupkeep-20261120T153021Z.tar.gz.age \
+  --passphrase-file /tmp/pupkeep-drill/pass
+```
+
+```
+restored pupkeep.sqlite, config.json, push.json from /tmp/…/pupkeep-20261120T153021Z.tar.gz.age (durable seq 8)
+secrets.json is absent (it is excluded from backups); re-enter the provider keys before use.
+```
+
+| Check | Result |
+|---|---|
+| `config.json`, `push.json` vs the source directory | **byte-identical** (`cmp`)[^scrub] |
+| `PRAGMA integrity_check` on the restored copy | `ok` |
+| durable `next_seq`, documents, tasks | 8 / 23 / 1 — identical to the source |
+| `secrets.json` in the restored directory | absent, and the app does not care |
+| the app booted from it (`--access local --port 8799`) | `healthz` **200**, `/api/puppy` and `/api/walks` without the cookie **401**, `session bootstrap created=false` (it recognised the restored owner)[^scrub], `listening url=http://127.0.0.1:8799` |
+| `integrity_check` after that boot | still `ok` |
+
+Nothing was deployed: one process on `127.0.0.1:8799`, stopped after the check.
+
+### 6. Retention, with the counters
+
+Four dummy objects with archive-shaped names (512 random bytes each — never
+decrypted, they exist only to be listed and pruned) were seeded **both** in
+`<data>/backups` and in the remote prefix, dated `20260901`, `20261001`,
+`20261030` (all older than the 14-day window at 2026-11-20T15:30Z) and `20261119`
+(inside it). The next run:
+
+```
+backup /tmp/pupkeep-drill/hh/backups/pupkeep-20261120T153021Z.tar.gz.age (7391 bytes, seq 8->8, uploaded)
+retention removed locally: pupkeep-20260901T030000Z.tar.gz.age, pupkeep-20261001T030000Z.tar.gz.age, pupkeep-20261030T030000Z.tar.gz.age
+retention removed remotely: pupkeep-20260901T030000Z.tar.gz.age, pupkeep-20261001T030000Z.tar.gz.age, pupkeep-20261030T030000Z.tar.gz.age
+```
+
+| Seeded name | Age at 15:30Z | Local | Remote |
+|---|---|---|---|
+| `pupkeep-20260901T030000Z` | 80 days | deleted | deleted |
+| `pupkeep-20261001T030000Z` | 50 days | deleted | deleted |
+| `pupkeep-20261030T030000Z` | 21 days | deleted | deleted |
+| `pupkeep-20261119T030000Z` | 1 day | **kept** | **kept** |
+| both real archives of this drill | 0 | **kept** | **kept** |
+
+Remote pruning is `rclone lsf` + `rclone delete` per expired name, and it reports
+what it deleted rather than doing it silently. The **never-delete-the-newest**
+rule cannot be exercised by a live run, because the run's own archive is always
+freshest; it was checked against `expiredArchives()` with the drill's choice of
+clock, importing the module read-only and touching no archive:
+
+```
+all four archives older than the window (the newest is expired too)
+  deletes: ["pupkeep-20260901T030000Z.tar.gz.age","pupkeep-20261001T030000Z.tar.gz.age","pupkeep-20261030T030000Z.tar.gz.age"]
+a single archive, months old — a host that was off
+  deletes: []
+boundary: exactly 14 days old is kept, one second older is not
+  deletes: ["pupkeep-20261106T152959Z.tar.gz.age"]
+```
+
+The newest of an all-expired set survives, a lone old archive survives, and the
+cutoff is exact (`entry.time < cutoff`, so 14 days old exactly is kept).
+
+### 7. Two ways this drill was wrong before it was right
+
+1. **A hand-built fixture is not a household.** The first bundle in this drill was
+   made from a synthetic SQLite file with a table *named* `pi_durable_metadata`
+   but not the harness schema. It backed up, uploaded, restored and passed
+   `integrity_check` — and then refused to boot: `refusing to start
+   error=could not open the harness: table pi_durable_metadata already exists`.
+   That is the fixture's fault, not the job's, and it is why the bundle recorded
+   above is one the **app itself** created. The bundle is only as good as the data
+   directory; "restored" and "bootable" are two checks, and only the second one
+   would have caught this.
+2. **`integrity_check` is structural.** The first corruption attempt overwrote 32
+   bytes of free space inside a page; the job said `ok` and produced a perfectly
+   valid archive — correctly. A database can be damaged in ways that check cannot
+   see, so the drill also keeps a restore-and-boot, which is the check that
+   matters.
+
+### 8. Defects found
+
+| # | Severity | Defect | File that would need the fix |
+|---|---|---|---|
+| 1 | low (diagnostics) | A missing `expect` reaches the operator as `could not run expect: spawn expect ENOENT`. `checkBackupTools`' own sentence — "expect is not available (exit N); install it before backing up" — is **unreachable** for a binary that is absent, because the runner rejects the promise on `ENOENT` before it can return an exit code. The run still fails safe (nothing written). | `src/server/backup.ts` — `runCommand` (turn a spawn error into `{code: -1}`) or `checkBackupTools` (catch the rejection) |
+| 2 | low (cosmetic) | With no passphrase source the message reads `no backup passphrase: set [redacted] or pass --passphrase-file …` — the log scrubber redacts the **environment variable name**, which is not a secret, so the operator loses the one word that tells them what to set. | `src/server/backup.ts` (`readPassphrase` message) and the rule in `src/shared/redact.ts` |
+| 3 | informational | The module's header claims a truncated **upload** "is found now rather than at restore time"; the job verifies the local archive by decrypting it, then runs `rclone copyto` and never re-reads the object. rclone's own checks cover a botched transfer, but nothing re-checks the object at rest. This drill verified size and sha256 by hand. | `src/server/backup.ts` (comment and `backupDataDir`, if the claim is to hold) |
+
+No defect was found in the retention, exclusion, encryption, upload or restore
+paths themselves.
+
+### 9. Cleanup
+
+```bash
+sudo -n rclone purge pupkeep-oci:pupkeep-backups/drill-<UTCSTAMP>   # both drill prefixes
+sudo -n rclone size pupkeep-oci:pupkeep-backups                     # Total objects: 0 (0) / Total size: 0 B
+shred -u /tmp/pupkeep-drill/pass ; rm -rf /tmp/pupkeep-drill
+```
+
+The bucket is back to `0 objects / 0 B`, the drill passphrase is shredded (it was
+generated into a `0600` file outside the data dir and never printed or passed on a
+command line), the scratch tree and every archive are gone, no process or port is
+left, and `/etc/pupkeep/rclone.conf` was not touched. The one thing that remains
+is the `expect` package, recorded in §1.
+
+### What the scrub changed (2026-11-20)
+
+This drill was taken before the backup job began scrubbing the archived
+`config.json`, and everything above is kept as it was observed. From 2026-11-20
+the encrypted archive carries the household's **identities** — `schemaVersion`, and
+for each member the `id`, `role`, `displayName`, `createdAt` and `removedAt` — and
+**no credential at all**: `ownerTokenHash` is `null`, every member's `sessions` is
+`[]`, and `invites` is `[]`. `push.json` is unchanged: its `vapid` keys and
+`subscriptions` are the deliberate exception that lets push survive a restore.
+`secrets.json` and `server.log` are still excluded.
+
+The reason is not hygiene. The passphrase deliberately leaves the backup host
+(PLAN §7.5), so whoever can open an archive can read everything in it, and an
+owner token hash plus a session hash would let them sign in as a caregiver. Worse,
+a restore usually lands on a **new** origin: re-arming an owner link or a cookie
+taken before the move would hand out trust minted for an address the household no
+longer uses (R7, `docs/specs/2026-11-20-hosting-public-https.md`). So the restore
+refuses such an archive before it touches the data directory, naming what it found:
+
+```
+the archive still carries <what it found>: restoring it would re-arm an old sign-in, so it was refused.
+```
+
+A drill against this build must expect:
+
+- **`cmp` on `config.json` fails, by design.** The restored file is the scrubbed
+  one; only `pupkeep.sqlite` and `push.json` can be compared byte-wise with the
+  source. Member ids, roles and the durable data still match.
+- **A fresh owner mint before any sign-in.** `npm run restore` prints that nobody
+  can sign in until one is minted. The next launcher start mints one and writes
+  `owner-link.txt` (0600); the launcher's `--reissue-owner` mints one explicitly.
+  That flag belongs to `bin/pupkeep.js` / `npm start`, **not** to `npm run
+  restore`, whose parser rejects it even though its own message names it.
+- **Cookies from before the restore are dead**, and so is every session: a
+  pre-restore cookie gets 401, and each caregiver signs in again from a new invite.
+- **Push subscriptions are the one thing the archive still has and the devices may
+  not.** `push.json` survives, but a subscription belongs to the origin it was made
+  on; after a restore onto the new origin each device must subscribe again. This
+  drill never exercised push after a restore, so read the earlier "subscriptions
+  survive" as surviving *in the file*, not as delivering notifications.
+- **An archive written by the builds drilled above is refused.** It must be
+  rewritten by this build, or its `config.json` credentials removed by hand,
+  before `restore` accepts it.
+
+Observations above that no longer reproduce, and why:
+
+| Above | Now |
+|---|---|
+| §3, the pre-restore cookie → **200, 200, 200** | 401 on all three: the archive carries no sessions |
+| §3, "the fix is the order — sign in, then back up, then restore" | no ordering helps: no archive carries a session |
+| §5, `config.json` vs the source **byte-identical** (`cmp`) | identical for `push.json` and the database only |
+| §5, `session bootstrap created=false` — "it recognised the restored owner" | no restored owner exists; the boot mints a new one |
+| §2, the `config.json` 304-byte member, and the archive sizes and sha256s | different bytes: the config is smaller, so every archive is new |
+
+What still holds: the three-member bundle, the age ciphertext, the integrity
+check, the durable sequence and the document and task counts, 401 without a
+cookie, and retention. **None of this subsection was observed by a run.** It was
+read on 2026-11-20 out of `scrubArchivedConfig`, `archivedCredentials`, the
+refusal in `restoreDataDir` and the restore CLI's output; a full drill of a
+scrubbed archive is still open (P5-02).
+
+[^scrub]: Footnote added 2026-11-20, after the archive scrub. The observation was
+    true of the build drilled here and is not what a restored household shows
+    now; **What the scrub changed (2026-11-20)** above says what holds.
