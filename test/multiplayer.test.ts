@@ -83,7 +83,14 @@ async function startMultiplayerApp(options: {
         role: "member",
         displayName: "Sam",
         createdAt,
-        sessions: [{ tokenHash: hashToken(samToken), createdAt, expiresAt: expires }],
+        sessions: [
+          {
+            tokenHash: hashToken(samToken),
+            createdAt,
+            lastSeenAt: new Date().toISOString(),
+            expiresAt: expires,
+          },
+        ],
       },
     ],
   }));
@@ -455,14 +462,28 @@ test("a walk committed before a SIGKILL survives, and so does the end after it",
         role: "owner",
         displayName: "Alex",
         createdAt,
-        sessions: [{ tokenHash: hashToken(alexToken), createdAt, expiresAt: expires }],
+        sessions: [
+          {
+            tokenHash: hashToken(alexToken),
+            createdAt,
+            lastSeenAt: new Date().toISOString(),
+            expiresAt: expires,
+          },
+        ],
       },
       {
         id: "partner",
         role: "member",
         displayName: "Sam",
         createdAt,
-        sessions: [{ tokenHash: hashToken(samToken), createdAt, expiresAt: expires }],
+        sessions: [
+          {
+            tokenHash: hashToken(samToken),
+            createdAt,
+            lastSeenAt: new Date().toISOString(),
+            expiresAt: expires,
+          },
+        ],
       },
     ],
   }));

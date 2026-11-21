@@ -28,8 +28,18 @@ import { test } from "node:test";
 import { createRegistry } from "@earendil-works/pi-durable";
 import { installAppExtensions } from "../src/server/app.ts";
 import { SHARED_THREAD_INSTRUCTIONS } from "../src/server/agent/model.ts";
-import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
-import { SESSION_COOKIE } from "../src/server/auth.ts";
+import {
+  HSTS_MAX_AGE_SECONDS,
+  INVITE_REDEEM_LIMIT,
+  REQUEST_HEADER,
+  bindOrigins,
+  REQUEST_HEADER_VALUE,
+  SIGNIN_LIMIT,
+  forwardedValue,
+  trustedPeer,
+} from "../src/server/http.ts";
+import { Auth, HOST_SESSION_COOKIE, SESSION_COOKIE } from "../src/server/auth.ts";
+import { dataStores } from "../src/server/config.ts";
 import { startTestApp } from "./support/app.ts";
 
 /**
@@ -379,6 +389,272 @@ test("a mutation is accepted from the quick tunnel only when Origin's host is th
       body: { displayName: "Forged" },
     });
     assert.equal(inviteForged.status, 403, "the invite route refuses a foreign Origin too");
+  } finally {
+    await app.stop();
+  }
+});
+
+// --- P6/R3-R5b: the public origin, the proxy address, and the limiter -------
+
+interface RawHttpResult {
+  status: number;
+  body: string;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+/** A request with an explicit `Host`/`Origin` and peer-visible headers. */
+function rawRequest(
+  url: string,
+  path: string,
+  init: {
+    method?: string;
+    host?: string;
+    origin?: string;
+    cookie?: string;
+    cookieName?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+  } = {},
+): Promise<RawHttpResult> {
+  const target = new URL(url);
+  const payload = init.body === undefined ? undefined : JSON.stringify(init.body);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port: Number(target.port),
+        path,
+        method: init.method ?? (payload === undefined ? "GET" : "POST"),
+        headers: {
+          Host: init.host ?? target.host,
+          ...(init.origin ? { Origin: init.origin } : {}),
+          ...(init.cookie ? { Cookie: `${init.cookieName ?? SESSION_COOKIE}=${init.cookie}` } : {}),
+          ...(payload === undefined
+            ? {}
+            : {
+                "Content-Type": "application/json",
+                [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+                "Content-Length": Buffer.byteLength(payload),
+              }),
+          ...init.headers,
+        },
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
+      },
+    );
+    req.on("error", reject);
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+}
+
+test("a configured public origin replaces the loopback origin list entirely", () => {
+  assert.deepEqual(bindOrigins("0.0.0.0", 8787, "https://pupkeep.example"), ["https://pupkeep.example"]);
+  assert.deepEqual(bindOrigins("0.0.0.0", 8787), ["http://localhost:8787", "http://127.0.0.1:8787"]);
+});
+
+test("peer trust is by normalised address, and forwarded values are read from the right", () => {
+  assert.equal(trustedPeer("::ffff:10.0.0.2", "10.0.0.2"), true, "IPv4-mapped peer");
+  assert.equal(trustedPeer("10.0.0.2", "::ffff:10.0.0.2"), true, "IPv4-mapped proxy");
+  assert.equal(trustedPeer("10.0.0.3", "10.0.0.2"), false, "a sibling is not the proxy");
+  assert.equal(trustedPeer(undefined, "10.0.0.2"), false);
+  assert.equal(trustedPeer("10.0.0.2", undefined), false, "no configured proxy trusts nobody");
+  assert.equal(forwardedValue("203.0.113.9, 198.51.100.7", "rightmost"), "198.51.100.7");
+  assert.equal(forwardedValue("203.0.113.9, 198.51.100.7", "leftmost"), "203.0.113.9");
+  assert.equal(forwardedValue("https, http", "rightmost"), "http");
+  assert.equal(forwardedValue(["a, b", "c"], "rightmost"), "c");
+  assert.equal(forwardedValue("a, ", "rightmost"), undefined, "a trailing empty value is not trusted");
+});
+
+test("the configured public origin is the only origin, and its scheme owns the cookie, HSTS and invite link", async () => {
+  const origin = "https://pupkeep.example";
+  const app = await startTestApp({ prefix: "pupkeep-public-origin-", publicOrigin: origin });
+  try {
+    const login = await rawRequest(app.url, `/login?token=${encodeURIComponent(app.cookies.owner)}`, {
+      host: "pupkeep.example",
+    });
+    assert.equal(login.status, 303);
+    const setCookie = String(login.headers["set-cookie"] ?? "");
+    assert.match(setCookie, new RegExp(`^${HOST_SESSION_COOKIE}=`), "public HTTPS uses the __Host- name");
+    assert.match(setCookie, /;\s*Secure/);
+    assert.match(setCookie, /Max-Age=2592000/);
+    assert.equal(
+      login.headers["strict-transport-security"],
+      `max-age=${HSTS_MAX_AGE_SECONDS}`,
+      "the stated HSTS policy rides every response",
+    );
+    const cookie = /=([^;]*)/.exec(setCookie)?.[1];
+    assert.ok(cookie);
+
+    const invite = await rawRequest(app.url, "/api/invites", {
+      host: "pupkeep.example",
+      origin,
+      cookie,
+      cookieName: HOST_SESSION_COOKIE,
+      body: { displayName: "Sam" },
+    });
+    assert.equal(invite.status, 200, invite.body);
+    const inviteBody = JSON.parse(invite.body) as { code: string; link: string };
+    assert.equal(inviteBody.link, `${origin}/invite?code=${encodeURIComponent(inviteBody.code)}`);
+
+    const wrongHost = await rawRequest(app.url, "/healthz", { host: "evil.example" });
+    assert.equal(wrongHost.status, 403, "even a read on another Host is refused");
+
+    const wrongOrigin = await rawRequest(app.url, "/api/invites", {
+      host: "pupkeep.example",
+      origin: "https://evil.example",
+      cookie,
+      cookieName: HOST_SESSION_COOKIE,
+      body: { displayName: "Eve" },
+    });
+    assert.equal(wrongOrigin.status, 403);
+
+    // `sameOrigin` would accept this (host and Host agree); the configured
+    // origin is compared exactly, so the fallback is gone in public mode.
+    const fallback = await rawRequest(app.url, "/api/invites", {
+      host: "pupkeep.example",
+      origin: "https://pupkeep.example:443",
+      cookie,
+      cookieName: HOST_SESSION_COOKIE,
+      body: { displayName: "Mallory" },
+    });
+    assert.equal(fallback.status, 403, "the configured origin is the only accepted Origin string");
+  } finally {
+    await app.stop();
+  }
+});
+
+test("forwarded headers are honoured only from the configured proxy, rightmost value only", async () => {
+  const origin = "https://pupkeep.example";
+  const app = await startTestApp({
+    prefix: "pupkeep-trusted-proxy-",
+    publicOrigin: origin,
+    trustedProxy: "::ffff:10.9.8.7",
+    remoteAddress: "10.9.8.7",
+  });
+  try {
+    const invalid = (xf?: string, cf?: string) =>
+      rawRequest(app.url, "/login?token=guess", {
+        host: "pupkeep.example",
+        headers: {
+          ...(xf === undefined ? {} : { "X-Forwarded-For": xf }),
+          ...(cf === undefined ? {} : { "CF-Connecting-IP": cf }),
+        },
+      });
+
+    // The rightmost entry is the proxy's own view; the forged left side changes
+    // every attempt but the limiter key does not.
+    for (let attempt = 0; attempt < SIGNIN_LIMIT; attempt += 1) {
+      const response = await invalid(`198.51.100.${attempt}, 203.0.113.9`);
+      assert.equal(response.status, 401, `attempt ${attempt} is a normal refusal`);
+    }
+    const limited = await invalid("192.0.2.1, 203.0.113.9");
+    assert.equal(limited.status, 429, "the rightmost client address is the bucket");
+    const other = await invalid("203.0.113.9, 198.51.100.7");
+    assert.equal(other.status, 401, "a different rightmost client is not locked out");
+
+    // CF-Connecting-IP is deleted: distinct values do not create distinct keys.
+    for (let attempt = 0; attempt < SIGNIN_LIMIT; attempt += 1) {
+      const response = await invalid(undefined, `198.51.100.${attempt}`);
+      assert.equal(response.status, 401);
+    }
+    const cfLimited = await invalid(undefined, "198.51.100.250");
+    assert.equal(cfLimited.status, 429, "CF-Connecting-IP no longer names the client");
+
+    const acceptedScheme = await rawRequest(app.url, "/healthz", {
+      host: "pupkeep.example",
+      headers: { "X-Forwarded-Proto": "https" },
+    });
+    assert.equal(acceptedScheme.status, 200);
+    const contradiction = await rawRequest(app.url, "/healthz", {
+      host: "pupkeep.example",
+      headers: { "X-Forwarded-Proto": "http" },
+    });
+    assert.equal(contradiction.status, 400, "a proxy scheme that contradicts the origin is refused");
+  } finally {
+    await app.stop();
+  }
+});
+
+test("forwarded headers from any other peer change nothing", async () => {
+  const app = await startTestApp({
+    prefix: "pupkeep-untrusted-proxy-",
+    publicOrigin: "https://pupkeep.example",
+    trustedProxy: "10.0.0.9",
+    remoteAddress: "10.9.8.7",
+  });
+  try {
+    // The same contradiction from a non-proxy peer is ignored, not refused.
+    const health = await rawRequest(app.url, "/healthz", {
+      host: "pupkeep.example",
+      headers: { "X-Forwarded-Proto": "http" },
+    });
+    assert.equal(health.status, 200);
+
+    for (let attempt = 0; attempt < SIGNIN_LIMIT; attempt += 1) {
+      const response = await rawRequest(app.url, "/login?token=guess", {
+        host: "pupkeep.example",
+        headers: {
+          "X-Forwarded-For": `203.0.113.${attempt}`,
+          "CF-Connecting-IP": `198.51.100.${attempt}`,
+        },
+      });
+      assert.equal(response.status, 401);
+    }
+    const limited = await rawRequest(app.url, "/login?token=guess", {
+      host: "pupkeep.example",
+      headers: {
+        "X-Forwarded-For": "203.0.113.250",
+        "CF-Connecting-IP": "198.51.100.250",
+      },
+    });
+    assert.equal(limited.status, 429, "the peer address, not either header, is the key");
+  } finally {
+    await app.stop();
+  }
+});
+
+test("failed sign-ins do not block invite redemption, and a correct sign-in resets its bucket", async () => {
+  const app = await startTestApp({
+    prefix: "pupkeep-limiter-",
+    publicOrigin: "https://pupkeep.example",
+    trustedProxy: "10.9.8.7",
+    remoteAddress: "10.9.8.7",
+  });
+  try {
+    assert.ok(INVITE_REDEEM_LIMIT > SIGNIN_LIMIT, "redemption has the higher ceiling");
+    const auth = new Auth({ config: dataStores(app.dir).config });
+    const owner = await auth.authenticate(app.cookies.owner);
+    const code = await auth.createInvite(owner, "Sam");
+
+    for (let attempt = 0; attempt < SIGNIN_LIMIT; attempt += 1) {
+      const response = await rawRequest(app.url, "/login?token=guess", { host: "pupkeep.example" });
+      assert.equal(response.status, 401);
+    }
+    const limited = await rawRequest(app.url, "/login?token=guess", { host: "pupkeep.example" });
+    assert.equal(limited.status, 429, "sign-in is throttled");
+
+    // The stranger cannot block the household's door: the invite bucket is
+    // separate and higher, so redemption is still tried after sign-ins are out.
+    for (let attempt = 0; attempt < SIGNIN_LIMIT + 1; attempt += 1) {
+      const response = await rawRequest(app.url, "/invite?code=guess", { host: "pupkeep.example" });
+      assert.equal(response.status, 401, `invite attempt ${attempt} is still validated`);
+    }
+    const accepted = await rawRequest(app.url, `/invite?code=${encodeURIComponent(code)}`, {
+      host: "pupkeep.example",
+    });
+    assert.equal(accepted.status, 303, "a valid invite still lands");
+
+    const good = await rawRequest(app.url, `/login?token=${encodeURIComponent(app.cookies.owner)}`, {
+      host: "pupkeep.example",
+    });
+    assert.equal(good.status, 303, "a correct credential is validated before the limiter");
+    const afterReset = await rawRequest(app.url, "/login?token=guess", { host: "pupkeep.example" });
+    assert.equal(afterReset.status, 401, "a success reset the bucket instead of consuming it");
   } finally {
     await app.stop();
   }

@@ -12,7 +12,8 @@
 //     what makes a log useful; callers mark those fields and `keepOpaque` lets
 //     them through the catch-all while the named rules still apply.
 
-const PARAM = "token|key|code|invite|secret|password|sig|signature|auth|apikey|api_key|topic";
+const PARAM =
+  "token|key|code|invite|secret|password|passphrase|sig|signature|auth|apikey|api_key|topic";
 
 const PATTERNS: Array<{ pattern: RegExp; replace: string }> = [
   // Headers whose whole value is a credential.
@@ -57,12 +58,30 @@ export interface ScrubOptions {
 
 /** Scrub secrets out of a single line. Idempotent. */
 export function scrub(text: string, options: ScrubOptions = {}): string {
+  // The named rules run first (they are what catches `NAME=value`), then the
+  // catch-all runs with environment-variable *names* masked: a name is not a
+  // secret, and the catch-all would otherwise turn `set PUPKEEP_BACKUP_PASSPHRASE`
+  // into `set [redacted]`, which is the one actionable word in the line (P5-02).
   let value = text;
-  for (const { pattern, replace } of options.keepOpaque ? NAMED_RULES : PATTERNS) {
+  for (const { pattern, replace } of NAMED_RULES) {
     value = value.replace(pattern, replace);
+  }
+  if (!options.keepOpaque) {
+    const names: string[] = [];
+    const masked = value.replace(ENV_NAME, (name) => {
+      names.push(name);
+      return `\u0000${names.length - 1}\u0000`;
+    });
+    const catchAll = PATTERNS[PATTERNS.length - 1]!;
+    value = masked
+      .replace(catchAll.pattern, catchAll.replace)
+      .replace(/\u0000(\d+)\u0000/g, (_match, index: string) => names[Number(index)] ?? "");
   }
   return value;
 }
+
+/** `PUPKEEP_BACKUP_PASSPHRASE`, `OPENROUTER_API_KEY`: a name, never a value. */
+const ENV_NAME = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g;
 
 /**
  * Bounded, scrubbed text for a recorded `detail` field. Keeps the first 200

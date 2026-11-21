@@ -169,3 +169,16 @@ test("an Error field keeps its message and stack, and a newline cannot forge a l
   assert.equal(lines.length, 1, "one event must be one line");
   assert.match(output, /a\\n2026-01-01 INFO forged/);
 });
+
+test("an environment variable name survives, because it is the instruction (P5-02)", () => {
+  // The drill hit `no backup passphrase: set PUPKEEP_BACKUP_PASSPHRASE` and the
+  // catch-all turned the name into `[redacted]`, removing the only actionable
+  // word from the line. A name is not a value.
+  assert.equal(
+    scrub("no backup passphrase: set PUPKEEP_BACKUP_PASSPHRASE"),
+    "no backup passphrase: set PUPKEEP_BACKUP_PASSPHRASE",
+  );
+  assert.equal(scrub("set OPENROUTER_API_KEY instead"), "set OPENROUTER_API_KEY instead");
+  // A value behind a name that looks like a secret is still scrubbed.
+  assert.match(scrub("PUPKEEP_BACKUP_PASSPHRASE=hunter2hunter2hunter2"), /PUPKEEP_BACKUP_PASSPHRASE=\[redacted\]/);
+});

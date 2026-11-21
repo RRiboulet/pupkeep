@@ -7,9 +7,13 @@ import {
   Auth,
   AuthError,
   ForbiddenError,
+  HOST_SESSION_COOKIE,
   MAX_MEMBERS,
+  MAX_SESSIONS_PER_MEMBER,
   RateLimiter,
   SESSION_COOKIE,
+  SESSION_IDLE_MS,
+  SESSION_TTL_MS,
   can,
   hashEquals,
   hashToken,
@@ -215,6 +219,124 @@ test("a mutation from an origin the launcher is not serving is refused", () => {
   assert.equal(originAllowed("http://100.90.202.61:8787/", allowed), true);
   assert.equal(originAllowed("https://evil.example", allowed), false);
   assert.equal(originAllowed(undefined, allowed), false);
+});
+
+test("login sessions last 30 days, and an HTTPS origin names the cookie __Host-", async () => {
+  assert.equal(SESSION_TTL_MS, 30 * 24 * 60 * 60 * 1000);
+  const { auth, stores, tick } = await setup();
+  const ownerToken = (await auth.mintOwner("https://pupkeep.example")).token;
+  const signedIn = await auth.login(ownerToken);
+  const owner = (await stores.config.read()).members.find((member) => member.id === "owner")!;
+  const row = owner.sessions.find((session) => session.tokenHash === hashToken(signedIn.token))!;
+  assert.equal(Date.parse(row.expiresAt!) - tick.now().getTime(), SESSION_TTL_MS);
+
+  const cookie = sessionCookie("t", { secure: true, hostPrefix: true });
+  assert.match(cookie, new RegExp(`^${HOST_SESSION_COOKIE}=t`));
+  assert.match(cookie, /;\s*Secure/);
+  assert.match(cookie, /Max-Age=2592000/);
+  assert.equal(parseSessionCookie(cookie), "t", "the prefixed cookie parses too");
+});
+
+test("login prunes expired rows and caps a member's sessions", async () => {
+  const { auth, stores, tick } = await setup();
+  const ownerToken = (await auth.mintOwner("http://127.0.0.1:8787")).token;
+  for (let index = 0; index < MAX_SESSIONS_PER_MEMBER + 3; index += 1) {
+    await auth.login(ownerToken);
+  }
+  let owner = (await stores.config.read()).members.find((member) => member.id === "owner")!;
+  assert.equal(owner.sessions.length, MAX_SESSIONS_PER_MEMBER, "the oldest devices are dropped");
+
+  const longAgo = new Date(tick.now().getTime() - SESSION_TTL_MS - 1).toISOString();
+  const idleLongAgo = new Date(tick.now().getTime() - SESSION_IDLE_MS - 1).toISOString();
+  await stores.config.update((current) => ({
+    ...current,
+    members: current.members.map((member) =>
+      member.id === "owner"
+        ? {
+            ...member,
+            sessions: [
+              ...member.sessions,
+              { tokenHash: "expired-row-0000000000", createdAt: longAgo, expiresAt: longAgo },
+              { tokenHash: "idle-row-00000000000", createdAt: longAgo, lastSeenAt: idleLongAgo, expiresAt: "2099-01-01T00:00:00.000Z" },
+            ],
+          }
+        : member,
+    ),
+  }));
+
+  await auth.login(ownerToken);
+  owner = (await stores.config.read()).members.find((member) => member.id === "owner")!;
+  assert.equal(owner.sessions.some((session) => session.tokenHash === "expired-row-0000000000"), false);
+  assert.equal(owner.sessions.some((session) => session.tokenHash === "idle-row-00000000000"), false);
+  assert.equal(owner.sessions.length, MAX_SESSIONS_PER_MEMBER);
+});
+
+test("lastSeenAt is written on use, and an idle session expires before its absolute limit", async () => {
+  const { auth, stores, tick } = await setup();
+  const ownerToken = (await auth.mintOwner("http://127.0.0.1:8787")).token;
+  const signedIn = await auth.login(ownerToken);
+  const tokenHash = hashToken(signedIn.token);
+
+  assert.equal((await auth.authenticate(signedIn.token)).role, "owner");
+  let owner = (await stores.config.read()).members.find((member) => member.id === "owner")!;
+  assert.equal(owner.sessions.find((session) => session.tokenHash === tokenHash)!.lastSeenAt, tick.now().toISOString());
+
+  tick.advance(24 * 60 * 60 * 1000);
+  await auth.authenticate(signedIn.token);
+  owner = (await stores.config.read()).members.find((member) => member.id === "owner")!;
+  assert.equal(owner.sessions.find((session) => session.tokenHash === tokenHash)!.lastSeenAt, tick.now().toISOString());
+
+  tick.advance(SESSION_IDLE_MS);
+  await assert.rejects(auth.authenticate(signedIn.token), AuthError, "the idle window has passed");
+  owner = (await stores.config.read()).members.find((member) => member.id === "owner")!;
+  assert.equal(owner.sessions.some((session) => session.tokenHash === tokenHash), false);
+});
+
+test("revokeMemberSessions empties that member's sessions and push subscriptions", async () => {
+  const { auth, stores, tick } = await setup(true);
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
+  const accepted = await auth.acceptInvite(await auth.createInvite(owner, "Partner"));
+  const memberId = accepted.session.memberId;
+  await stores.push!.update((current) => ({
+    ...current,
+    subscriptions: [
+      {
+        id: "s1",
+        memberId,
+        endpoint: "https://push.example/abc",
+        p256dh: "p".repeat(80),
+        auth: "a".repeat(22),
+        createdAt: tick.now().toISOString(),
+      },
+      {
+        id: "s2",
+        memberId: "someone-else",
+        endpoint: "https://push.example/def",
+        p256dh: "p".repeat(80),
+        auth: "a".repeat(22),
+        createdAt: tick.now().toISOString(),
+      },
+    ],
+  }));
+
+  await auth.revokeMemberSessions(memberId);
+  await assert.rejects(auth.authenticate(accepted.token), AuthError, "the revoked cookie is dead");
+  const config = await stores.config.read();
+  assert.deepEqual(config.members.find((member) => member.id === memberId)!.sessions, []);
+  const push = await stores.push!.read();
+  assert.deepEqual(push.subscriptions.map((subscription) => subscription.id), ["s2"], "only that member's push goes");
+  // Calling again is harmless: revocation is a state, not a one-shot event.
+  await auth.revokeMemberSessions(memberId);
+});
+
+test("validating an invite does not consume it", async () => {
+  const { auth } = await setup();
+  const owner = await auth.authenticate((await auth.mintOwner("http://127.0.0.1:8787")).token);
+  const code = await auth.createInvite(owner, "Partner");
+  await auth.validateInvite(code);
+  await auth.validateInvite(code);
+  assert.equal((await auth.acceptInvite(code)).session.role, "member");
+  await assert.rejects(auth.validateInvite(code), AuthError, "the accepted code is no longer valid");
 });
 
 test("login attempts are rate limited, and a success clears the count", () => {

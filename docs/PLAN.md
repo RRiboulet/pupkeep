@@ -1770,7 +1770,8 @@ Pi Pocket style, simplified for two caregivers:
   - member: care actions, agent use, approvals, personal notification settings.
   - every owner-only route returns 403 for a member; tested in §15.1.
 - Rotating the owner token signs out owner-linked devices and invalidates unused
-  owner invites; member sessions survive unless the member is removed.
+  owner invites; member sessions survive unless the member is removed or their
+  sessions are revoked (a member may revoke themselves, the owner either).
 
 ### 14.2 HTTP security
 
@@ -1831,8 +1832,13 @@ Pi Pocket style, simplified for two caregivers:
 
 - Data dir `~/.pupkeep` mode `0700`; `umask` set before opening the DB.
 - `secrets.json` mode `0600`; excluded from the backup bundle.
-- `config.json` holds owner/invite/session **hashes**, not raw tokens; the
-  backup can restore auth without becoming a credential.
+- `config.json` holds owner/invite/session **hashes**, not raw tokens — but a
+  hash is still a credential, so the archived copy is scrubbed: `ownerTokenHash`
+  is null and every `sessions` row, `invites` entry and member `inviteHash` is
+  removed (§7.5). A restore therefore restores identities and roles and no way in:
+  `restore` refuses an archive that still carries one, the next start mints a
+  fresh owner link (`--reissue-owner` mints one explicitly), and every caregiver
+  signs in again.
 - VAPID keys in `push.json`; the backup includes them so subscriptions survive a
   restore. Rotating VAPID invalidates every push subscription — document it.
 - Encrypted off-device backups; the passphrase stays **off the backup host**

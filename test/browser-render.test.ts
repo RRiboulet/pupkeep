@@ -325,8 +325,16 @@ test("every screen paints in a real browser and logs no console error", async (t
   for (const route of Object.keys(SCREENS)) {
     const opened = await openPage(route, 390, 844);
     try {
+      // The shell paints its default heading before the profile read settles;
+      // wait for the state-derived one rather than racing the fetch.
+      const expected = SCREENS[route]!;
+      await opened.page.waitForFunction(
+        ({ source, flags }) => new RegExp(source, flags).test(document.querySelector("main h1")?.textContent ?? ""),
+        { source: expected.source, flags: expected.flags },
+        { timeout: 5000 },
+      );
       const painted = await opened.page.locator("main h1").first().textContent({ timeout: 5000 });
-      assert.match(String(painted), SCREENS[route]!, `the ${route} screen painted its heading`);
+      assert.match(String(painted), expected, `the ${route} screen painted its heading`);
       assert.deepEqual(opened.errors, [], `the ${route} screen logged console errors`);
     } finally {
       await opened.context.close();

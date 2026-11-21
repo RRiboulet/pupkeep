@@ -40,6 +40,8 @@ import { bootstrapSession, type BootstrapResult } from "./domain/bootstrap.ts";
 import {
   bindOrigins,
   createAppHandler,
+  INVITE_REDEEM_LIMIT,
+  INVITE_REDEEM_WINDOW_MS,
   SIGNIN_LIMIT,
   SIGNIN_WINDOW_MS,
   SUBMIT_LIMIT,
@@ -107,6 +109,13 @@ export interface AppOptions {
   dataDir: string;
   host: string;
   port: number;
+  /**
+   * The one public origin (P6/R3). The launcher passes it from
+   * `PUPKEEP_PUBLIC_ORIGIN`; a server started directly must not guess it.
+   */
+  publicOrigin?: string;
+  /** The only peer allowed to supply `X-Forwarded-*` (P6/R4). */
+  trustedProxy?: string;
   /** Cap for `harness.close()`; see DEFAULT_CLOSE_TIMEOUT_MS. */
   closeTimeoutMs?: number;
   models?: Models | (() => Models);
@@ -205,6 +214,8 @@ export interface AppDeps {
   ensureDataDir?: (path: string) => Promise<DataDir>;
   listen?: (host: string, port: number, handler: RequestListener) => Promise<HttpListener>;
   logger?: Logger;
+  /** Test seam: the harness binds 127.0.0.1, so a route test can name the peer. */
+  remoteAddress?: (req: IncomingMessage) => string | undefined;
   /** Injected so tests can observe the 0700-before-open rule without racing it. */
   setUmask?: (mode: number) => void;
 }
@@ -714,7 +725,13 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
     // The auth authority owns session removal; giving it the push store means a
     // removed caregiver's subscriptions, prefs and ntfy topic go with them
     // (P4-05). The launcher already wires the same pair for owner reissue.
-    const auth = new Auth({ config: stores.config, push: stores.push });
+    const auth = new Auth({
+      config: stores.config,
+      push: stores.push,
+      // The server's HTTP session clock follows the app's pinned clock too:
+      // an idle window must be testable, and a test must not depend on wall time.
+      now: () => new Date(options.now?.() ?? Date.now()),
+    });
     const thread: ThreadRef = { harness: opened.harness, context };
 
     try {
@@ -822,10 +839,14 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
         modelCache: stores.models,
         submitLimiter: new RateLimiter(SUBMIT_LIMIT, SUBMIT_WINDOW_MS, options.now ?? Date.now),
         signInLimiter: new RateLimiter(SIGNIN_LIMIT, SIGNIN_WINDOW_MS, options.now ?? Date.now),
+        inviteLimiter: new RateLimiter(INVITE_REDEEM_LIMIT, INVITE_REDEEM_WINDOW_MS, options.now ?? Date.now),
         notificationLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),
         // A probe spends a provider call; a loop must not burn the budget.
         probeLimiter: new RateLimiter(5, 60_000, options.now ?? Date.now),
-        allowedOrigins: () => bindOrigins(options.host, boundPort),
+        allowedOrigins: () => bindOrigins(options.host, boundPort, options.publicOrigin),
+        ...(options.publicOrigin !== undefined ? { publicOrigin: options.publicOrigin } : {}),
+        ...(options.trustedProxy !== undefined ? { trustedProxy: options.trustedProxy } : {}),
+        ...(deps.remoteAddress !== undefined ? { remoteAddress: deps.remoteAddress } : {}),
         logger,
         push: stores.push,
         // The same clock the boot and the limiters use: a route's local date and

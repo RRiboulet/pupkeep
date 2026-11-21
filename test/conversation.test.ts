@@ -120,7 +120,14 @@ async function startThread(
             role: "member",
             displayName: "Sam",
             createdAt: now,
-            sessions: [{ tokenHash: hashToken(samToken), createdAt: now, expiresAt: expires }],
+            sessions: [
+          {
+            tokenHash: hashToken(samToken),
+            createdAt: now,
+            lastSeenAt: new Date().toISOString(),
+            expiresAt: expires,
+          },
+        ],
           },
         ],
   }));
@@ -1277,19 +1284,24 @@ test("every mutation refuses a missing custom header (403) and a non-JSON body (
   }
 });
 
-test("sign-in and invite guessing is rate-limited by client IP", async () => {
+test("guessing sign-in tokens is rate-limited per client IP, without closing the invite door", async () => {
   const fixture = await startThread();
   try {
     let hitLimit = false;
-    for (let attempt = 0; attempt < SIGNIN_LIMIT + 4; attempt += 1) {
-      const route = attempt % 2 === 0 ? "/login?token=guess" : "/invite?code=guess";
-      const response = await fetch(`${fixture.url}${route}`, { redirect: "manual" });
+    for (let attempt = 0; attempt < SIGNIN_LIMIT + 1; attempt += 1) {
+      const response = await fetch(`${fixture.url}/login?token=guess`, { redirect: "manual" });
       if (response.status === 429) {
         hitLimit = true;
         break;
       }
+      assert.equal(response.status, 401, "an invalid token is validated before the limiter is charged");
     }
-    assert.equal(hitLimit, true, "guessing tokens or codes meets the limiter within a window");
+    assert.equal(hitLimit, true, "guessing tokens meets the sign-in limiter within a window");
+
+    // Redemption has its own, higher bucket: a stranger exhausting sign-in must
+    // not prevent the household from onboarding (P6/R5b).
+    const invite = await fetch(`${fixture.url}/invite?code=guess`, { redirect: "manual" });
+    assert.equal(invite.status, 401, "the invite route is still validated, not throttled by sign-in");
   } finally {
     await stop(fixture);
   }

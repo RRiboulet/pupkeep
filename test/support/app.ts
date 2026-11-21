@@ -18,6 +18,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
@@ -52,6 +53,12 @@ export interface TestAppOptions {
   responses?: readonly ResponseStep[];
   /** Set the household zone after boot through the real `PATCH /api/household`. */
   timezone?: string;
+  /** The configured public origin (P6/R3); also makes `Secure`/HSTS apply. */
+  publicOrigin?: string;
+  /** The proxy peer allowed to supply forwarded headers (P6/R4). */
+  trustedProxy?: string;
+  /** Test seam: pretend the TCP peer is this address (the harness binds loopback). */
+  remoteAddress?: string;
 }
 
 export interface TestApp {
@@ -77,6 +84,53 @@ function cookieHeader(token: string): string {
   return `${SESSION_COOKIE}=${token}`;
 }
 
+interface TestResponse {
+  status: number;
+  body: string;
+}
+
+/** A fixture call with an explicit Host, which `fetch` cannot set. */
+function callApp(
+  baseUrl: string,
+  path: string,
+  init: { method?: string; host: string; origin: string; cookie: string; body?: unknown; headers?: Record<string, string> },
+): Promise<TestResponse> {
+  const target = new URL(path, baseUrl);
+  const payload = init.body === undefined ? undefined : JSON.stringify(init.body);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port: Number(target.port),
+        path: `${target.pathname}${target.search}`,
+        method: init.method ?? "GET",
+        headers: {
+          Host: init.host,
+          Origin: init.origin,
+          Cookie: cookieHeader(init.cookie),
+          ...(payload === undefined
+            ? {}
+            : {
+                "Content-Type": "application/json",
+                [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+                "Content-Length": Buffer.byteLength(payload),
+              }),
+          ...init.headers,
+        },
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+      },
+    );
+    req.on("error", reject);
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+}
+
 /**
  * Boot one app with the shared fixture: owner "Alex", an optional partner with
  * a pre-minted session, a faux provider, and a household zone (UTC unless the
@@ -84,6 +138,12 @@ function cookieHeader(token: string): string {
  */
 export async function startTestApp(options: TestAppOptions): Promise<TestApp> {
   const dir = await mkdtemp(join(tmpdir(), options.prefix));
+  const clock =
+    options.now === undefined
+      ? () => Date.now()
+      : typeof options.now === "number"
+        ? () => options.now as number
+        : options.now;
   const faux = fauxProvider({ provider: "opencode-go", models: [{ id: "mimo-v2.6-flash" }] });
   if (options.responses !== undefined) faux.setResponses([...options.responses]);
   const models = createModels();
@@ -92,6 +152,9 @@ export async function startTestApp(options: TestAppOptions): Promise<TestApp> {
   const partner = options.partner === undefined ? undefined : options.partner;
   const partnerName = typeof partner === "object" ? partner.name : "Sam";
   const partnerToken = partner === undefined ? undefined : newToken();
+  // Sessions are created on the fixture's pinned clock, not the wall clock: the
+  // idle window must not make an old fixture date expire mid-suite.
+  const sessionCreatedAt = new Date(clock()).toISOString();
 
   const stores = dataStores(dir);
   await stores.config.ensure();
@@ -108,28 +171,40 @@ export async function startTestApp(options: TestAppOptions): Promise<TestApp> {
               displayName: partnerName,
               createdAt: MEMBER_CREATED_AT,
               sessions: [
-                { tokenHash: hashToken(partnerToken), createdAt: MEMBER_CREATED_AT, expiresAt: SESSION_EXPIRES_AT },
+                {
+                  tokenHash: hashToken(partnerToken),
+                  createdAt: sessionCreatedAt,
+                  lastSeenAt: sessionCreatedAt,
+                  expiresAt: SESSION_EXPIRES_AT,
+                },
               ],
             },
           ]),
     ],
   }));
 
-  const clock =
-    options.now === undefined
-      ? () => Date.now()
-      : typeof options.now === "number"
-        ? () => options.now as number
-        : options.now;
   const result = await startApp(
-    { dataDir: dir, host: "127.0.0.1", port: 0, models, now: clock },
-    { logger: createLogger({ scope: "test", sink: () => undefined }) },
+    {
+      dataDir: dir,
+      host: "127.0.0.1",
+      port: 0,
+      models,
+      now: clock,
+      ...(options.publicOrigin !== undefined ? { publicOrigin: options.publicOrigin } : {}),
+      ...(options.trustedProxy !== undefined ? { trustedProxy: options.trustedProxy } : {}),
+    },
+    {
+      logger: createLogger({ scope: "test", sink: () => undefined }),
+      ...(options.remoteAddress !== undefined ? { remoteAddress: () => options.remoteAddress } : {}),
+    },
   );
   assert.ok(result.ok, "the app must start");
 
-  const auth = new Auth({ config: stores.config });
+  const auth = new Auth({ config: stores.config, now: () => new Date(clock()) });
   const ownerToken = await auth.mintOwner("http://127.0.0.1").then((m) => m.token);
   const ownerCookie = await auth.login(ownerToken).then((l) => l.token);
+  const host = options.publicOrigin !== undefined ? new URL(options.publicOrigin).host : new URL(result.app.url).host;
+  const origin = options.publicOrigin ?? result.app.url;
 
   const close = async (): Promise<void> => {
     await result.app.close();
@@ -146,11 +221,13 @@ export async function startTestApp(options: TestAppOptions): Promise<TestApp> {
     },
     now: clock,
     profile: async () => {
-      const response = await fetch(`${result.app.url}/api/puppy`, {
-        headers: { Cookie: cookieHeader(ownerCookie) },
+      const response = await callApp(result.app.url, "/api/puppy", {
+        host,
+        origin,
+        cookie: ownerCookie,
       });
       assert.equal(response.status, 200, "the care-state read answers");
-      return (await response.json()) as PuppyProfile;
+      return JSON.parse(response.body) as PuppyProfile;
     },
     stop: close,
   };
@@ -160,16 +237,13 @@ export async function startTestApp(options: TestAppOptions): Promise<TestApp> {
   // caller's `finally` has not started yet.
   try {
     const current = await fixture.profile();
-    const patched = await fetch(`${result.app.url}/api/household`, {
+    const patched = await callApp(result.app.url, "/api/household", {
       method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
-        "Idempotency-Key": "zone-setup",
-        Cookie: cookieHeader(ownerCookie),
-        Origin: result.app.url,
-      },
-      body: JSON.stringify({ rev: current.household.rev, timezone: options.timezone ?? "UTC" }),
+      host,
+      origin,
+      cookie: ownerCookie,
+      headers: { "Idempotency-Key": "zone-setup" },
+      body: { rev: current.household.rev, timezone: options.timezone ?? "UTC" },
     });
     assert.equal(patched.status, 200, "the household zone is set for the fixture");
   } catch (error) {

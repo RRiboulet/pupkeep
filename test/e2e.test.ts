@@ -6,8 +6,8 @@
 //     same data directory, and the reopened server answers a new message;
 //   * a real `server.log` from that full run carries none of the secret shapes
 //     the redaction suite exercises (PLAN §6.3, §14.4);
-//   * the tunnel's forwarded scheme is trusted only from a loopback peer, and
-//     `X-Forwarded-Host` cannot widen the origin check (§14.2).
+//   * forwarded headers do nothing without a trusted proxy, and
+//     `X-Forwarded-Host` cannot widen the origin check (§14.2, P6/R4).
 //
 // Everything here is the production path: real HTTP, the real SQLite harness in
 // a temp directory (never the workspace mount), the P1-06 auth routes, the
@@ -450,32 +450,27 @@ test("a full run's server.log carries none of the redaction shapes", async () =>
   }
 });
 
-test("the tunnel scheme is trusted only from loopback, and X-Forwarded-* never widens the origin check", async () => {
+test("forwarded headers change nothing without a trusted proxy, and X-Forwarded-Host never widens the origin check", async () => {
   const fixture = await startSlice([]);
   try {
     const minted = await fixture.auth.mintOwner("http://127.0.0.1");
 
-    // cloudflared's quick tunnel connects from loopback and sets this header.
-    // A plain-HTTP request must not get a Secure cookie, or the partner's
-    // Tailscale browser would drop it (PLAN §14.2).
+    // No proxy address is configured, so even the loopback peer's forwarded
+    // scheme is ignored: a plain-HTTP request must not get a Secure cookie, or
+    // the browser would drop it (P6/R3-R4).
     const tunnel = await fetch(`${fixture.url}/login?token=${encodeURIComponent(minted.token)}`, {
       redirect: "manual",
       headers: { "X-Forwarded-Proto": "https" },
     });
     assert.equal(tunnel.status, 303);
     const tunnelCookie = tunnel.headers.get("set-cookie") ?? "";
-    assert.match(tunnelCookie, /;\s*Secure/, "the HTTPS tunnel path sets a Secure cookie");
+    assert.doesNotMatch(tunnelCookie, /;\s*Secure/, "a forwarded scheme is not trusted by default");
     assert.doesNotMatch(tunnelCookie, /Domain=/i, "the cookie is host-only, not shared across origins");
+    assert.doesNotMatch(tunnelCookie, /__Host-/, "the __Host- prefix belongs to an HTTPS origin");
     const cookie = firstCookie(tunnel);
 
-    const plain = await fetch(`${fixture.url}/login?token=${encodeURIComponent(minted.token)}`, {
-      redirect: "manual",
-    });
-    assert.doesNotMatch(plain.headers.get("set-cookie") ?? "", /Secure/, "plain HTTP must not set Secure");
-
-    // The counterpart: the same header from a peer that is not one of the
-    // loopback addresses is ignored. A tiny loopback alias makes the peer
-    // 127.0.0.2, which `peerIsLoopback` deliberately does not trust.
+    // The counterpart peer (127.0.0.2) gets exactly the same treatment: it is
+    // not a trusted proxy either.
     const nonLoopback = await requestFrom(
       fixture.url,
       `/login?token=${encodeURIComponent(minted.token)}`,
@@ -483,17 +478,17 @@ test("the tunnel scheme is trusted only from loopback, and X-Forwarded-* never w
       { "X-Forwarded-Proto": "https" },
     );
     assert.equal(nonLoopback.status, 303);
-    assert.doesNotMatch(nonLoopback.setCookie, /Secure/, "a non-loopback peer's forwarded scheme is ignored");
+    assert.doesNotMatch(nonLoopback.setCookie, /;\s*Secure/, "a non-proxy peer's forwarded scheme is ignored");
 
-    // The invite link follows the scheme the browser saw, while the origin
-    // check still uses the real Host header.
+    // The invite link follows the real request mode too; the forwarded scheme
+    // cannot upgrade it.
     const invite = await mutate(fixture, "/api/invites", cookie, { displayName: "Sam" }, {
       Origin: fixture.url,
       "X-Forwarded-Proto": "https",
     });
     assert.equal(invite.status, 200);
     const body = (await invite.json()) as { link: string };
-    assert.match(body.link, /^https:\/\/127\.0\.0\.1:\d+\/invite\?code=/);
+    assert.match(body.link, /^http:\/\/127\.0\.0\.1:\d+\/invite\?code=/);
 
     // A spoofed forwarded origin is not an origin: reads may ignore Origin,
     // but a mutation must be refused and must not carry CORS permission.

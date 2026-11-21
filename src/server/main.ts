@@ -22,6 +22,36 @@ export interface ServerEnvironment {
    * crashing the process must not be retried by every supervisor restart.
    */
   retryParked: boolean;
+  /** The configured public origin (P6/R3); absent in the plaintext modes. */
+  publicOrigin?: string;
+  /** The one proxy address allowed to supply `X-Forwarded-*` (P6/R4). */
+  trustedProxy?: string;
+}
+
+/**
+ * The launcher validates this first; the server validates again so a directly
+ * spawned process cannot start with an origin that is not a bare HTTPS origin.
+ */
+function parseServerOrigin(value: string): { ok: true; origin: string } | { ok: false; error: string } {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN is not a URL: ${value}` };
+  }
+  if (url.protocol !== "https:") {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must be https://, got ${value}` };
+  }
+  if (url.username !== "" || url.password !== "") {
+    return { ok: false, error: "PUPKEEP_PUBLIC_ORIGIN must not carry credentials" };
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN must be a bare origin, got ${value}` };
+  }
+  if (url.hostname === "") {
+    return { ok: false, error: `PUPKEEP_PUBLIC_ORIGIN has no host: ${value}` };
+  }
+  return { ok: true, origin: url.origin };
 }
 
 export type ParseServerEnvironment =
@@ -54,6 +84,17 @@ export function parseServerEnvironment(
   if (rawData === undefined || rawData === "") {
     return { ok: false, error: "PUPKEEP_DATA_DIR is not set; start the server through the launcher" };
   }
+
+  const rawOrigin = env.PUPKEEP_PUBLIC_ORIGIN;
+  let publicOrigin: string | undefined;
+  if (rawOrigin !== undefined && rawOrigin !== "") {
+    const parsedOrigin = parseServerOrigin(rawOrigin);
+    if (!parsedOrigin.ok) return parsedOrigin;
+    publicOrigin = parsedOrigin.origin;
+  }
+  const rawProxy = env.PUPKEEP_TRUSTED_PROXY;
+  const trustedProxy = rawProxy !== undefined && rawProxy.trim() !== "" ? rawProxy.trim() : undefined;
+
   const expanded = rawData === "~" ? home : rawData.startsWith("~/") ? join(home, rawData.slice(2)) : rawData;
   return {
     ok: true,
@@ -62,6 +103,8 @@ export function parseServerEnvironment(
       port,
       dataDir: isAbsolute(expanded) ? resolve(expanded) : resolve(home, expanded),
       retryParked: env.PUPKEEP_RETRY_PARKED === "1",
+      ...(publicOrigin !== undefined ? { publicOrigin } : {}),
+      ...(trustedProxy !== undefined ? { trustedProxy } : {}),
     },
   };
 }

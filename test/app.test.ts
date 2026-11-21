@@ -103,7 +103,7 @@ test("umask is set before the data directory or database is touched", async () =
   }
 });
 
-test("the server binds a real port, answers /healthz, and refuses everything else", async () => {
+test("the server binds a real port, answers both health endpoints, and refuses everything else", async () => {
   const dir = await tempDir();
   try {
     await seedConfig(dir);
@@ -111,6 +111,12 @@ test("the server binds a real port, answers /healthz, and refuses everything els
     assert.ok(result.ok);
     try {
       assert.match(result.app.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+      // The cheap answer Docker's HEALTHCHECK reads, and the deep one that does
+      // the reading: both are 200 on a server whose database is open.
+      const live = await fetch(`${result.app.url}/health`);
+      assert.equal(live.status, 200);
+      assert.deepEqual(await live.json(), { ok: true });
+
       const health = await fetch(`${result.app.url}/healthz`);
       assert.equal(health.status, 200);
       assert.deepEqual(await health.json(), { ok: true });
@@ -472,4 +478,35 @@ test("the server entry refuses to guess a bind address or data directory", () =>
     PUPKEEP_RETRY_PARKED: "yes",
   });
   assert.equal(notOne.ok ? notOne.environment.retryParked : undefined, false);
+});
+
+test("the server entry learns the configured origin and the proxy address", () => {
+  const parsed = parseServerEnvironment({
+    PUPKEEP_BIND_HOST: "0.0.0.0",
+    PUPKEEP_PORT: "8787",
+    PUPKEEP_DATA_DIR: "/data",
+    PUPKEEP_PUBLIC_ORIGIN: "https://PUPPKEEP.example:443/",
+    PUPKEEP_TRUSTED_PROXY: " ::ffff:172.18.0.2 ",
+  });
+  assert.deepEqual(parsed, {
+    ok: true,
+    environment: {
+      host: "0.0.0.0",
+      port: 8787,
+      dataDir: "/data",
+      retryParked: false,
+      publicOrigin: "https://puppkeep.example",
+      trustedProxy: "::ffff:172.18.0.2",
+    },
+  });
+
+  for (const origin of ["http://pupkeep.example", "https://pupkeep.example/path", "https://user:pw@pupkeep.example"]) {
+    const refused = parseServerEnvironment({
+      PUPKEEP_BIND_HOST: "0.0.0.0",
+      PUPKEEP_PORT: "8787",
+      PUPKEEP_DATA_DIR: "/data",
+      PUPKEEP_PUBLIC_ORIGIN: origin,
+    });
+    assert.equal(refused.ok, false, `${origin} is not a bare HTTPS origin`);
+  }
 });

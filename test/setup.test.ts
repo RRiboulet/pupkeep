@@ -450,7 +450,14 @@ async function startSetupApp(): Promise<Fixture> {
         role: "member",
         displayName: "Sam",
         createdAt: now,
-        sessions: [{ tokenHash: hashToken(samToken), createdAt: now, expiresAt: expires }],
+        sessions: [
+          {
+            tokenHash: hashToken(samToken),
+            createdAt: now,
+            lastSeenAt: new Date().toISOString(),
+            expiresAt: expires,
+          },
+        ],
       },
     ],
   }));

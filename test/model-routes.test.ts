@@ -77,7 +77,14 @@ async function startModelsApp(): Promise<Fixture> {
         role: "member",
         displayName: "Sam",
         createdAt: MEMBER_CREATED_AT,
-        sessions: [{ tokenHash: hashToken(partnerToken), createdAt: MEMBER_CREATED_AT, expiresAt: SESSION_EXPIRES_AT }],
+        sessions: [
+          {
+            tokenHash: hashToken(partnerToken),
+            createdAt: MEMBER_CREATED_AT,
+            lastSeenAt: LATE.toISOString(),
+            expiresAt: SESSION_EXPIRES_AT,
+          },
+        ],
       },
     ],
   }));
@@ -87,7 +94,7 @@ async function startModelsApp(): Promise<Fixture> {
     { logger: createLogger({ scope: "test", sink: () => undefined }) },
   );
   assert.ok(result.ok, "the app must start");
-  const auth = new Auth({ config: stores.config });
+  const auth = new Auth({ config: stores.config, now: () => LATE });
   const ownerCookie = await auth.mintOwner("http://127.0.0.1").then((m) => auth.login(m.token)).then((l) => l.token);
   const stop = async (): Promise<void> => {
     await result.app.close();

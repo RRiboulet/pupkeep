@@ -6,11 +6,13 @@
 // work: the server runs on one phone for two caregivers, and the routes are
 //
 //   GET  /                     the PWA shell (P1-10, served before any route)
-//   GET  /healthz                liveness (no version, no counts, no paths)
+//   GET  /health                 liveness only: the event loop runs (a HEALTHCHECK reads it)
+//   GET  /healthz                storage read + disk floor; 503 names the check
 //   GET  /login?token=          owner sign-in link: session cookie, 303 to /
 //   GET  /invite?code=          partner invite link: session cookie, 303 to /
 //   POST /logout                revoke the current session, clear the cookie
 //   GET  /api/session           who am I (label from the household, not auth)
+//   POST /api/auth/revoke       revoke a member's sessions (self, or the owner either)
 //   POST /api/invites           owner-only invite creation, returns {code,link}
 //   POST /api/agent/messages     submit into the shared thread (busy = 409)
 //   GET  /api/agent/thread       full snapshot (transcript/tool cards/busy)
@@ -54,8 +56,9 @@
 //
 // Rules inherited from the auth work (P1-06) and not weakened here:
 //   * every /api route requires a valid session cookie — there is no public API;
-//   * a mutation must come from an origin the server serves, checked with
-//     `originAllowed` plus a same-origin `Host` check for the tailnet
+//   * a mutation must come from an origin the server serves. In public mode that
+//     is the one configured origin and the `Host` must match it; elsewhere the
+//     short origin list plus a same-origin `Host` check covers the tailnet
 //     addresses this process cannot enumerate (it only knows its bind host);
 //   * every mutation also carries the fixed `X-Pupkeep-Request: 1` header and
 //     a JSON content type (§14.2); the PWA client (P1-10) must send both;
@@ -64,10 +67,13 @@
 //     (`stale`, `idempotency_conflict`, `already_fed`) and a sentence otherwise.
 //   * sign-in/invite links are clicked from an SMS/chat client, so they are
 //     GETs without an Origin; tokens and codes are single-use credentials,
-//     and guessing them is met by an IP rate limit (§14.2).
+//     and a failed guess is charged to the client address, never a success.
 
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
+import { dirname } from "node:path";
+import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { checkHealth } from "./health.ts";
 import { isMilestoneStatus } from "../shared/training.ts";
 import {
   APPOINTMENT_FIELD_KEYS,
@@ -99,6 +105,7 @@ import {
   sessionCookie,
   type CookieOptions,
   requireAction,
+  requireMemberRevocation,
   type Session,
 } from "./auth.ts";
 import type { ActorResolver } from "./domain/actor.ts";
@@ -194,6 +201,11 @@ export const SUBMIT_WINDOW_MS = 60_000;
 /** Sign-in/invite attempts: a token or code is a high-value guess. */
 export const SIGNIN_LIMIT = 10;
 export const SIGNIN_WINDOW_MS = 60_000;
+/** Redemption gets its own ceiling, so a stranger cannot block onboarding. */
+export const INVITE_REDEEM_LIMIT = 30;
+export const INVITE_REDEEM_WINDOW_MS = 60_000;
+/** Stated, no `includeSubDomains`: one name, one box (R3). */
+export const HSTS_MAX_AGE_SECONDS = 180 * 24 * 60 * 60;
 export const BODY_LIMIT_BYTES = 8_192;
 export const TEXT_LIMIT = 2000;
 export const CLIENT_ID_LIMIT = 100;
@@ -207,6 +219,14 @@ export const REQUEST_HEADER_VALUE = "1";
  * raising that would make a healthy stream look buffered.
  */
 export const KEEPALIVE_MS = 15_000;
+/**
+ * The `/healthz` ceiling (§14.2's limiter, R8's "rate-limited"): a probe every
+ * 30 s plus an operator's curl is far under 60 a minute, and a flood cannot buy
+ * storage reads or `statfs` calls. A throttled probe is a 429, never a 503, so a
+ * busy probe never reads as a sick app.
+ */
+export const HEALTH_LIMIT = 60;
+export const HEALTH_WINDOW_MS = 60_000;
 
 const BUSY_MESSAGE =
   "The assistant is already answering; keep your draft and send again when the thread frees up.";
@@ -245,14 +265,31 @@ export interface HttpDeps {
   readonly bus: ThreadBus;
   /** Session-submit rate limiter, keyed per member. */
   readonly submitLimiter: RateLimiter;
-  /** Sign-in/invite rate limiter, keyed per client IP (PLAN §14.2). */
+  /** Sign-in and invite-mint rate limiter, keyed per client IP (PLAN §14.2). */
   readonly signInLimiter: RateLimiter;
+  /** Invite redemption's own bucket (a higher ceiling than sign-in). */
+  readonly inviteLimiter?: RateLimiter;
   /** The test button's limiter (it causes an external ntfy/Web Push call). */
   readonly notificationLimiter?: RateLimiter;
   /** The probe's limiter: one press spends a provider call per model. */
   readonly probeLimiter?: RateLimiter;
   /** Origins mutations may come from; a function because the tunnel origin moves. */
   readonly allowedOrigins: () => readonly string[];
+  /**
+   * The one configured public origin (P6/R3). When set it is the *only* origin:
+   * the Host must match it, `sameOrigin` is not a fallback, and its scheme owns
+   * `Secure`, `__Host-` and HSTS. Absent in local/lan/tunnel modes.
+   */
+  readonly publicOrigin?: string;
+  /** The only peer address allowed to supply `X-Forwarded-*` (R4). */
+  readonly trustedProxy?: string;
+  /** Test seam: the harness can only bind 127.0.0.1, so simulate the peer. */
+  readonly remoteAddress?: (req: IncomingMessage) => string | undefined;
+  /**
+   * Test seam for `/healthz`'s disk floor: the real check calls `statfs` on the
+   * data directory, and no test can fill a disk. Production leaves it unset.
+   */
+  readonly freeBytes?: (directory: string) => Promise<number>;
   readonly logger: Logger;
   /** VAPID keys and per-device subscriptions, read/written through one queue. */
   readonly push: JsonFileStore<PushConfig>;
@@ -283,15 +320,13 @@ export interface HttpDeps {
 }
 
 /**
- * The origins this bind address serves. A short list on purpose: the origin of
- * a tailnet device is not enumerable by the server, and the same-origin `Host`
- * check below carries those. The quick-tunnel origin is **not** added by anyone —
- * the server is born before that hostname exists — so `sameOrigin` is the whole
- * mechanism that makes the tunnel path work, and `test/security.test.ts` proves
- * both halves of it (accepted when the hosts agree, refused when they do not).
- * A named tunnel waits for a domain (P4).
+ * The origins this bind address serves. In `public` mode the configured origin
+ * is the *whole* list: no loopback origins and no same-origin `Host` fallback.
+ * Elsewhere the short list stays: the origin of a tailnet device is not
+ * enumerable by the server, so the `Host` check carries those.
  */
-export function bindOrigins(host: string, port: number): string[] {
+export function bindOrigins(host: string, port: number, publicOrigin?: string): string[] {
+  if (publicOrigin !== undefined) return [publicOrigin];
   const origins = [`http://localhost:${port}`, `http://127.0.0.1:${port}`];
   if (host !== "0.0.0.0" && host !== "::" && host !== "") {
     origins.push(`http://${host.includes(":") ? `[${host}]` : host}:${port}`);
@@ -309,38 +344,170 @@ function sameOrigin(origin: string | undefined, hostHeader: string | undefined):
   }
 }
 
-// --- proxy trust (PLAN §14.2) ----------------------------------------------
-
-/** A peer address is loopback only when it *is* one of the loopback addresses. */
-function peerIsLoopback(req: IncomingMessage): boolean {
-  const address = req.socket.remoteAddress ?? "";
-  return address === "::1" || address === "127.0.0.1" || address === "::ffff:127.0.0.1";
-}
+// --- proxy trust (PLAN §14.2, P6/R4) ---------------------------------------
 
 /**
- * The scheme of the request as the browser saw it. `x-forwarded-proto` is
- * trusted only from a loopback peer — the launcher's own cloudflared quick
- * tunnel connects locally — never from an arbitrary client header.
+ * Compare peer addresses in one form. Node reports an IPv4 peer on a dual-stack
+ * socket as `::ffff:a.b.c.d`; configuration usually names the plain form.
  */
-function requestScheme(req: IncomingMessage): "http" | "https" {
-  if (!peerIsLoopback(req)) return "http";
-  const forwarded = req.headers["x-forwarded-proto"];
-  const first = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-  return typeof first === "string" && first.split(",")[0]?.trim() === "https" ? "https" : "http";
-}
-
-/**
- * The client IP for rate limits: behind the local tunnel the real client is
- * in `CF-Connecting-IP`, trusted only from a loopback peer (§14.2); elsewhere
- * it is the peer address itself.
- */
-function clientIp(req: IncomingMessage): string {
-  if (peerIsLoopback(req)) {
-    const forwarded = req.headers["cf-connecting-ip"];
-    const first = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-    if (typeof first === "string" && first.trim() !== "") return first.trim();
+export function normalizeAddress(address: string | undefined): string {
+  if (address === undefined) return "";
+  let value = address.trim().toLowerCase();
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    if (end !== -1) value = value.slice(1, end);
   }
-  return req.socket.remoteAddress ?? "unknown";
+  const zone = value.indexOf("%");
+  if (zone !== -1) value = value.slice(0, zone);
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(value);
+  return mapped ? mapped[1]! : value;
+}
+
+/** True only when the request's peer *is* the address configured for the proxy. */
+export function trustedPeer(remoteAddress: string | undefined, proxyAddress: string | undefined): boolean {
+  const peer = normalizeAddress(remoteAddress);
+  const proxy = normalizeAddress(proxyAddress);
+  return peer !== "" && peer === proxy;
+}
+
+/**
+ * A forwarded header's rightmost value. The proxy appends its own view last;
+ * everything to its left came from the client and is forgeable.
+ */
+export function forwardedValue(
+  header: string | readonly string[] | undefined,
+  which: "leftmost" | "rightmost" = "rightmost",
+): string | undefined {
+  const raw = typeof header === "string" ? header : header === undefined ? undefined : header.join(",");
+  if (raw === undefined) return undefined;
+  const parts = raw.split(",").map((part) => part.trim());
+  const value = which === "leftmost" ? parts[0] : parts[parts.length - 1];
+  return value === "" ? undefined : value;
+}
+
+function peerAddress(deps: HttpDeps, req: IncomingMessage): string {
+  return deps.remoteAddress?.(req) ?? req.socket.remoteAddress ?? "";
+}
+
+/** Forwarded headers exist only in public mode, and only from the proxy peer. */
+function trustedForwarder(deps: HttpDeps, req: IncomingMessage): boolean {
+  return deps.publicOrigin !== undefined && trustedPeer(peerAddress(deps, req), deps.trustedProxy);
+}
+
+function forwardedScheme(deps: HttpDeps, req: IncomingMessage): string | undefined {
+  if (!trustedForwarder(deps, req)) return undefined;
+  return forwardedValue(req.headers["x-forwarded-proto"])?.toLowerCase();
+}
+
+/**
+ * The scheme of the request as the browser saw it. In public mode it follows
+ * the configured origin, not a header (R3). Elsewhere forwarded headers are
+ * ignored entirely (R4).
+ */
+function requestScheme(deps: HttpDeps, req: IncomingMessage): "http" | "https" {
+  if (deps.publicOrigin !== undefined) {
+    return originScheme(deps.publicOrigin) ?? "https";
+  }
+  return "http";
+}
+
+/**
+ * The client address for rate limits: the rightmost `X-Forwarded-For` entry
+ * only from the configured proxy, otherwise the peer itself. `CF-Connecting-IP`
+ * is no longer read at all (P6/R4).
+ */
+function clientIp(deps: HttpDeps, req: IncomingMessage): string {
+  const peer = normalizeAddress(peerAddress(deps, req));
+  if (trustedForwarder(deps, req)) {
+    const forwarded = forwardedValue(req.headers["x-forwarded-for"]);
+    if (forwarded !== undefined) return normalizeAddress(forwarded) || peer;
+  }
+  return peer === "" ? "unknown" : peer;
+}
+
+function originScheme(origin: string | undefined): "http" | "https" | undefined {
+  if (origin === undefined) return undefined;
+  try {
+    const protocol = new URL(origin).protocol;
+    return protocol === "https:" ? "https" : protocol === "http:" ? "http" : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The configured origin's host, compared in the normalised `URL` form. */
+function hostMatchesOrigin(hostHeader: string | undefined, origin: string): boolean {
+  if (hostHeader === undefined || hostHeader === "") return false;
+  try {
+    const configured = new URL(origin);
+    return new URL(`${configured.protocol}//${hostHeader}`).host.toLowerCase() === configured.host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A mutation may only come from the configured origin in public mode. Elsewhere
+ * the `Origin` list and the same-origin `Host` fallback are unchanged.
+ */
+function mutationOriginAllowed(deps: HttpDeps, req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (deps.publicOrigin !== undefined) return originAllowed(origin, [deps.publicOrigin]);
+  return originAllowed(origin, deps.allowedOrigins()) || sameOrigin(origin, req.headers.host);
+}
+
+// --- health ----------------------------------------------------------------
+
+/**
+ * The two health endpoints. `/health` is the cheap one Docker's HEALTHCHECK
+ * reads: no storage, no disk, 200 whenever the event loop runs, so a wedged
+ * database is *reported* by `/healthz` instead of restarting the container in a
+ * loop. `/healthz` is the deeper check (`src/server/health.ts`): a read through
+ * the open SQLite handle and a free-disk floor on the data directory. Its 503
+ * names the failed check and nothing else — no path, no version, no count —
+ * because it is unauthenticated (§14.2, R8).
+ */
+async function handleHealth(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  deep: boolean,
+  limiter: RateLimiter,
+): Promise<void> {
+  if (req.method !== "GET" && req.method !== "HEAD") throw new NotFoundError("no such method");
+
+  if (!deep) {
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  const client = clientIp(deps, req);
+  if (!limiter.hit(`healthz:${client}`)) {
+    deps.logger.warn("a health probe was rate limited", { client });
+    sendJson(res, 429, { error: "too many health probes; wait a minute" });
+    return;
+  }
+
+  const report = await checkHealth({
+    // The cheapest read that reaches the handle: one conversation row through
+    // the Session's serialized read line. It is deliberately *not* a document
+    // snapshot, which the Session can answer from its in-memory cache without
+    // touching SQLite — a check that cannot fail is not a check.
+    readStorage: () => deps.thread.harness.conversation(ROOT_CONVERSATION_ID, deps.thread.context),
+    // The directory this process actually writes to: `HttpDeps` does not carry
+    // one, and `push.json` sits in the data directory (`dataStores`, config.ts).
+    dataDir: dirname(deps.push.path),
+    ...(deps.freeBytes !== undefined ? { freeBytes: deps.freeBytes } : {}),
+  });
+
+  if (report.ok) {
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  // The operator's log line says which check; the body says the same and stops
+  // there, because a stranger can read it.
+  deps.logger.warn("the health check failed", { failed: report.failed });
+  sendJson(res, 503, { ok: false, failed: report.failed });
 }
 
 // --- redirects and cookies --------------------------------------------------
@@ -363,8 +530,9 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-function cookieOptionsFor(req: IncomingMessage): CookieOptions {
-  return { secure: requestScheme(req) === "https" };
+function cookieOptionsFor(deps: HttpDeps, req: IncomingMessage): CookieOptions {
+  const secure = requestScheme(deps, req) === "https";
+  return { secure, hostPrefix: secure };
 }
 
 interface SubmitBody {
@@ -456,12 +624,20 @@ async function sessionOf(deps: HttpDeps, req: IncomingMessage): Promise<Session 
  * harness exits the process through the app, not through a request.
  */
 export function createAppHandler(deps: HttpDeps): RequestListener {
+  // One bucket per process for `/healthz`; it lives here because nothing else
+  // reads it, and a `HttpDeps` field no caller sets would be dead weight.
+  const healthLimiter = new RateLimiter(HEALTH_LIMIT, HEALTH_WINDOW_MS, deps.now ?? Date.now);
   return (req, res) => {
-    void dispatch(deps, req, res);
+    void dispatch(deps, req, res, healthLimiter);
   };
 }
 
-async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function dispatch(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  healthLimiter: RateLimiter,
+): Promise<void> {
   res.setHeader("X-Content-Type-Options", "nosniff");
   let pathname = "";
   try {
@@ -478,19 +654,33 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
     // every response — static, JSON, SSE, 503 and the mapper's 500 — rides under
     // the same policy and nothing can be sent before they are set.
     applySecurityHeaders(res);
+    if (originScheme(deps.publicOrigin) === "https") {
+      res.setHeader("Strict-Transport-Security", `max-age=${HSTS_MAX_AGE_SECONDS}`);
+    }
+
+    if (deps.publicOrigin !== undefined) {
+      // The configured origin is the whole identity: a request for another Host
+      // never reaches a route, so neither a proxy rewrite nor a stray DNS name
+      // can mint or accept a credential here.
+      if (!hostMatchesOrigin(req.headers.host, deps.publicOrigin)) {
+        deps.logger.warn("refused a request for another host", { host: req.headers.host ?? "" });
+        throw new Refusal("the request is for a different host", 403, "ForbiddenError");
+      }
+      const forwarded = forwardedScheme(deps, req);
+      const expected = originScheme(deps.publicOrigin);
+      if (forwarded !== undefined && forwarded !== expected) {
+        deps.logger.warn("the proxy's scheme contradicts the configured origin", { forwarded });
+        throw new Refusal("the proxy's scheme contradicts the configured origin", 400, "BadRequestError");
+      }
+    }
+
     if (await serveStaticRequest(req, res)) return;
 
-    // Liveness answers before any session lookup: a probe with a cookie must
-    // not read/parse config.json or walk sessions just to hear "ok" (§14.2).
+    // Both health answers come before any session lookup: a probe with a cookie
+    // must not read/parse config.json or walk sessions just to hear "ok" (§14.2).
     if (pathname === "/healthz" || pathname === "/health") {
-      if (req.method === "GET" || req.method === "HEAD") {
-        res.setHeader("Content-Type", "application/json; charset=utf-8");
-        res.setHeader("Cache-Control", "no-store");
-        res.statusCode = 200;
-        res.end(req.method === "HEAD" ? undefined : '{"ok":true}\n');
-        return;
-      }
-      throw new NotFoundError("no such method");
+      await handleHealth(deps, req, res, pathname === "/healthz", healthLimiter);
+      return;
     }
 
     const session = await sessionOf(deps, req);
@@ -512,6 +702,11 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
 
     if (pathname === "/api/session" && req.method === "GET") {
       await handleSession(deps, res, requireAgent(session));
+      return;
+    }
+
+    if (pathname === "/api/auth/revoke" && req.method === "POST") {
+      await handleRevokeSessions(deps, req, res, requireAgent(session));
       return;
     }
 
@@ -809,8 +1004,7 @@ async function handleMessage(
   res: ServerResponse,
   session: Session,
 ): Promise<void> {
-  const origin = req.headers.origin;
-  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
+  if (!mutationOriginAllowed(deps, req)) {
     throw new ForbiddenError(session?.role, "agent");
   }
   requireMutationHeaders(req);
@@ -875,6 +1069,23 @@ async function handleMessage(
 // --- sign-in / invites / session --------------------------------------------
 
 /**
+ * Charge a failed credential attempt only after validation failed. A correct
+ * credential never consumes the bucket; it resets it below.
+ */
+function chargeCredentialFailure(
+  deps: HttpDeps,
+  limiter: RateLimiter,
+  key: string,
+  client: string,
+  message: string,
+): void {
+  if (!limiter.hit(key)) {
+    deps.logger.warn("a credential attempt was rate limited", { client });
+    throw new RateLimitError(message);
+  }
+}
+
+/**
  * The owner link's target: exchange the link token for a session cookie.
  * Token and cookie values never reach the log — the mapper logs only statuses.
  */
@@ -883,14 +1094,25 @@ async function handleLogin(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
-  if (!deps.signInLimiter.hit(`signin:${clientIp(req)}`)) {
-    throw new RateLimitError("too many sign-in attempts; wait a minute");
-  }
   const url = new URL(req.url ?? "/", "http://localhost");
   const token = url.searchParams.get("token") ?? "";
-  if (token === "") throw new AuthError("not signed in");
-  const login = await deps.auth.login(token);
-  res.setHeader("Set-Cookie", sessionCookie(login.token, cookieOptionsFor(req)));
+  const client = clientIp(deps, req);
+  const key = `signin:${client}`;
+
+  let login: Awaited<ReturnType<HttpDeps["auth"]["login"]>>;
+  try {
+    if (token === "") throw new AuthError("not signed in");
+    // Validate (and create the session) first: a stranger's failures must not
+    // stop a correct link from working, and a success resets the bucket.
+    login = await deps.auth.login(token);
+  } catch (error) {
+    if (error instanceof Refusal) {
+      chargeCredentialFailure(deps, deps.signInLimiter, key, client, "too many sign-in attempts; wait a minute");
+    }
+    throw error;
+  }
+  deps.signInLimiter.reset(key);
+  res.setHeader("Set-Cookie", sessionCookie(login.token, cookieOptionsFor(deps, req)));
   redirect(res, "/");
 }
 
@@ -900,13 +1122,23 @@ async function handleInvite(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
-  if (!deps.signInLimiter.hit(`signin:${clientIp(req)}`)) {
-    throw new RateLimitError("too many sign-in attempts; wait a minute");
-  }
   const url = new URL(req.url ?? "/", "http://localhost");
   const code = url.searchParams.get("code") ?? "";
-  if (code === "") throw new AuthError("invite is not valid");
-  const accepted = await deps.auth.acceptInvite(code);
+  const client = clientIp(deps, req);
+  const key = `invite:${client}`;
+  const limiter = deps.inviteLimiter ?? deps.signInLimiter;
+
+  let accepted: Awaited<ReturnType<HttpDeps["auth"]["acceptInvite"]>>;
+  try {
+    if (code === "") throw new AuthError("invite is not valid");
+    accepted = await deps.auth.acceptInvite(code);
+  } catch (error) {
+    if (error instanceof Refusal) {
+      chargeCredentialFailure(deps, limiter, key, client, "too many invite attempts; wait a minute");
+    }
+    throw error;
+  }
+  limiter.reset(key);
   // §7.1: mirror the new member into `app.household` now, so their label is
   // right on this first request instead of waiting for the next boot. A failure
   // must not cost the partner their session — boot repairs it.
@@ -918,7 +1150,7 @@ async function handleInvite(
   } catch (error) {
     deps.logger.warn("the new member could not be mirrored into the household", { error });
   }
-  res.setHeader("Set-Cookie", sessionCookie(accepted.token, cookieOptionsFor(req)));
+  res.setHeader("Set-Cookie", sessionCookie(accepted.token, cookieOptionsFor(deps, req)));
   redirect(res, "/");
 }
 
@@ -929,15 +1161,54 @@ async function handleLogout(
   res: ServerResponse,
   session: Session,
 ): Promise<void> {
-  const origin = req.headers.origin;
-  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
+  if (!mutationOriginAllowed(deps, req)) {
     throw new ForbiddenError(session.role, "agent");
   }
   requireMutationHeaders(req);
   const token = parseSessionCookie(req.headers.cookie);
   if (token) await deps.auth.revokeSession(token);
-  res.setHeader("Set-Cookie", sessionCookie("", { ...cookieOptionsFor(req), maxAgeSeconds: 0 }));
+  res.setHeader("Set-Cookie", sessionCookie("", { ...cookieOptionsFor(deps, req), maxAgeSeconds: 0 }));
   redirect(res, "/");
+}
+
+/**
+ * Revoke a member's sessions over HTTP. The rule lives in `auth.ts`, so this
+ * route cannot widen it; it only decides whether the caller's own cookie stays.
+ */
+async function handleRevokeSessions(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  if (!mutationOriginAllowed(deps, req)) {
+    throw new ForbiddenError(session.role, "revoke-sessions");
+  }
+  requireMutationHeaders(req);
+  const raw = await readJsonBody(req);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConflictError("a revocation is a JSON object");
+  }
+  const record = raw as Record<string, unknown>;
+  const memberId = typeof record.memberId === "string" ? record.memberId.trim() : "";
+  if (memberId === "") throw new ConflictError("a revocation needs a memberId");
+  if (record.allDevices !== undefined && typeof record.allDevices !== "boolean") {
+    throw new ConflictError("allDevices is true or false");
+  }
+  requireMemberRevocation(session, memberId);
+
+  const allDevices = record.allDevices === true;
+  // Revoking others keeps the device that asked; revoking all drops it too. The
+  // token is only hashed for comparison inside `revokeMemberSessions`.
+  const keepToken = memberId === session.memberId && !allDevices ? parseSessionCookie(req.headers.cookie) : undefined;
+  await deps.auth.revokeMemberSessions(memberId, keepToken === undefined ? {} : { keepToken });
+
+  const revoked = keepToken === undefined ? "all" : "others";
+  if (memberId === session.memberId && allDevices) {
+    res.setHeader("Set-Cookie", sessionCookie("", { ...cookieOptionsFor(deps, req), maxAgeSeconds: 0 }));
+  }
+  deps.logger.info("member sessions revoked", { memberId, actor: session.memberId, revoked });
+  sendJson(res, 200, { memberId, revoked });
 }
 
 /** Who is asking — role from auth, but the label from the household profiles. */
@@ -961,25 +1232,30 @@ async function handleInvites(
   res: ServerResponse,
   actor: Session,
 ): Promise<void> {
-  const origin = req.headers.origin;
-  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
+  if (!mutationOriginAllowed(deps, req)) {
     throw new ForbiddenError(actor.role, "invite");
   }
   requireMutationHeaders(req);
-  if (!deps.signInLimiter.hit(`signin:${clientIp(req)}`)) {
-    throw new RateLimitError("too many attempts; wait a minute");
-  }
   const body = (await readJsonBody(req)) as { displayName?: unknown };
   const displayName = typeof body.displayName === "string" ? body.displayName.trim() : "";
   if (displayName === "" || displayName.length > 64) {
     throw new ConflictError("an invite needs a display name");
   }
+  const client = clientIp(deps, req);
+  if (!deps.signInLimiter.hit(`signin:${client}`)) {
+    deps.logger.warn("an invite mint was rate limited", { client });
+    throw new RateLimitError("too many attempts; wait a minute");
+  }
   const code = await deps.auth.createInvite(actor, displayName);
-  // The link points wherever this owner is browsing right now — the browser's
-  // own origin — so the partner's phone lands on the same access mode.
-  const scheme = requestScheme(req);
-  const host = req.headers.host ?? "localhost";
-  const link = `${scheme}://${host}/invite?code=${encodeURIComponent(code)}`;
+  // In public mode the invite is built from the configured origin, never from
+  // the request's headers (R3); elsewhere it follows the browser's access mode.
+  const link = deps.publicOrigin
+    ? `${deps.publicOrigin}/invite?code=${encodeURIComponent(code)}`
+    : (() => {
+        const scheme = requestScheme(deps, req);
+        const host = req.headers.host ?? "localhost";
+        return `${scheme}://${host}/invite?code=${encodeURIComponent(code)}`;
+      })();
   sendJson(res, 200, { code, link });
 }
 
@@ -992,8 +1268,7 @@ async function handleInvites(
  * client-chosen key can never collide with a tool's task id.
  */
 function requireCareMutation(deps: HttpDeps, req: IncomingMessage, session: Session): string {
-  const origin = req.headers.origin;
-  if (!originAllowed(origin, deps.allowedOrigins()) && !sameOrigin(origin, req.headers.host)) {
+  if (!mutationOriginAllowed(deps, req)) {
     throw new ForbiddenError(session.role, "care");
   }
   requireMutationHeaders(req);
