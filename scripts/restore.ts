@@ -7,6 +7,13 @@
 // A restore is not a merge. Without `--force` it refuses a data directory that
 // already has a database/config/push; with `--force` it moves those aside into
 // `restore-backup-<timestamp>/` first, so a mistaken restore is recoverable.
+//
+// A restored household cannot be signed into. The archive's `config.json` is
+// scrubbed (no owner token hash, no session, no invite; PLAN §14.4 / R7), so the
+// restore leaves the directory in the "fresh install, no owner yet" state the
+// launcher already knows how to finish: it mints a new owner token on the next
+// start and writes `owner-link.txt` at 0600. Nothing new is needed on the command
+// line — the state itself is the instruction.
 
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -19,11 +26,12 @@ import {
   readPassphrase,
   restoreDataDir,
   runCommand,
+  type RestoreResult,
 } from "../src/server/backup.ts";
 import { absolutePath, booleanValue, stringValue } from "../src/server/cli.ts";
 import { createLogger } from "../src/server/log.ts";
 
-const USAGE = `pupkeep restore — replace a data directory from an encrypted backup
+export const USAGE = `pupkeep restore — replace a data directory from an encrypted backup
 
 Usage: npm run restore -- [options]
 
@@ -36,6 +44,10 @@ Usage: npm run restore -- [options]
 
 The server must be stopped: a live launcher.pid or server.pid is refused.
 secrets.json is not in the bundle; provider keys are re-entered.
+The bundle carries no owner token, session or invite: nobody can sign in until a
+fresh owner link is minted. The next start mints one (owner-link.txt, 0600);
+the launcher's --reissue-owner mints one now — npm start -- --reissue-owner, or
+the same bin/pupkeep.js in the container. This script has no such flag.
 `;
 
 export interface RestoreCliOptions {
@@ -71,6 +83,36 @@ export function parseRestoreArgs(argv: readonly string[], home: string = homedir
     force: booleanValue(values.force, "--force"),
     help: booleanValue(values.help, "--help"),
   };
+}
+
+/**
+ * The success report, one entry per output line. Exported so a test can assert
+ * the operator-facing advice without running a real restore (which needs `age`,
+ * `expect` and a live archive); `main` prints these lines verbatim.
+ */
+export function restoreReport(result: RestoreResult, archive: string): string[] {
+  const lines = [`restored ${result.restored.join(", ")} from ${archive} (durable seq ${result.seq})`];
+  if (result.movedAside !== undefined) {
+    lines.push(`the previous files were moved to ${result.movedAside}`);
+  }
+  lines.push(
+    result.secretsPresent
+      ? "secrets.json was left in place; its provider keys were not part of the bundle."
+      : "secrets.json is absent (it is excluded from backups); re-enter the provider keys before use.",
+  );
+  if (result.requiresOwnerMint) {
+    // R7: the archive has no owner token hash, so no link from before the backup
+    // works and there is nothing to sign in with yet. Name the launcher, not the
+    // bare flag: `--reissue-owner` belongs to bin/pupkeep.js and this script's
+    // own parser rejects it as an unknown option, so "run --reissue-owner" was
+    // an instruction that failed when followed.
+    lines.push(
+      "the archive carries no owner token, session or invite, so nobody can sign in until a fresh owner token is minted.",
+      "Start the app — it mints one and writes owner-link.txt (0600) — or mint one now with the launcher: npm start -- --reissue-owner (the container entrypoint runs the same bin/pupkeep.js).",
+      "Member sessions were removed with the rest: a caregiver signs in again from a new invite.",
+    );
+  }
+  return lines;
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
@@ -111,16 +153,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
       force: options.force,
     });
 
-    process.stdout.write(`restored ${result.restored.join(", ")} from ${archive} (durable seq ${result.seq})\n`);
-    if (result.movedAside) {
-      process.stdout.write(`the previous files were moved to ${result.movedAside}\n`);
-    }
-    if (!result.secretsPresent) {
-      process.stdout.write(
-        "secrets.json is absent (it is excluded from backups); re-enter the provider keys before use.\n",
-      );
-    } else {
-      process.stdout.write("secrets.json was left in place; its provider keys were not part of the bundle.\n");
+    for (const line of restoreReport(result, archive)) {
+      process.stdout.write(`${line}\n`);
     }
     return 0;
   } catch (error) {

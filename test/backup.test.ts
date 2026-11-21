@@ -11,11 +11,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineDoc } from "@earendil-works/pi-durable";
-import { dataPaths, dataStores } from "../src/server/config.ts";
+import { dataPaths, dataStores, parseConfig } from "../src/server/config.ts";
+import { Auth, hashToken } from "../src/server/auth.ts";
 import {
   ageCipher,
+  archivedCredentials,
   backupArchiveName,
   backupDataDir,
+  checkBackupTools,
   expiredArchives,
   failureStatus,
   isBackupArchive,
@@ -388,6 +391,7 @@ test("a configured remote receives the archive and retention deletes only old re
   const source = await seedDataDir("remote");
   try {
     const calls: string[] = [];
+    let uploadedSize: number | undefined;
     const remoteRun: CommandRunner = async (command, args, options) => {
       if (command === "rclone") {
         calls.push(args.join(" "));
@@ -397,6 +401,13 @@ test("a configured remote receives the archive and retention deletes only old re
             stdout: "pupkeep-20200101T000000Z.tar.gz.age\npupkeep-20261028T000000Z.tar.gz.age\n",
             stderr: "",
           };
+        }
+        if (args[0] === "copyto") {
+          uploadedSize = (await stat(args[1]!)).size;
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "lsjson") {
+          return { code: 0, stdout: JSON.stringify({ Size: uploadedSize }), stderr: "" };
         }
         return { code: 0, stdout: "", stderr: "" };
       }
@@ -423,6 +434,8 @@ test("a configured remote receives the archive and retention deletes only old re
     assert.equal(result.remoteConfigured, true);
     assert.equal(result.uploaded, true);
     assert.equal(calls.some((call) => call.startsWith("copyto ")), true);
+    // The object that landed off-device is stat-ed, not just assumed (P5-02 drill).
+    assert.equal(calls.some((call) => call.startsWith("lsjson --stat ")), true);
     assert.deepEqual(result.deletedRemote, ["pupkeep-20200101T000000Z.tar.gz.age"]);
     assert.equal(calls.some((call) => call.includes("pupkeep-20261028T000000Z")), false);
   } finally {
@@ -490,6 +503,212 @@ test("restore --force moves the old state aside, drops stale wal/shm, and keeps 
     assert.equal(restored.secretsPresent, true);
     assert.equal(await readFile(join(target, "secrets.json"), "utf8"), '{"schemaVersion":1,"providerKeys":{}}\n');
     await assert.rejects(stat(join(target, SERVER_LOCK_FILE)), /ENOENT/, "the restore must release its lock");
+  } finally {
+    await source.close();
+    await rm(source.dir, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test("the archived config carries no owner token, session or invite, and the live file is untouched", async () => {
+  // R7: an archive must not become a credential. Its passphrase deliberately
+  // leaves the backup host, so anyone who can open the archive can read every
+  // hash in it — an owner hash or a session hash there is a working sign-in.
+  const source = await seedDataDir("scrubbed");
+  try {
+    const stores = dataStores(source.dir);
+    const auth = new Auth({ config: stores.config, push: stores.push });
+    const { token: ownerToken } = await auth.mintOwner("http://127.0.0.1:8787");
+    const owner = await auth.login(ownerToken);
+    const partnerCode = await auth.createInvite(owner.session, "Partner");
+    const partner = await auth.acceptInvite(partnerCode);
+
+    // The household is at its cap once the invite is accepted, so the unused
+    // invite and the member invite hash (an older build wrote one) are added the
+    // way `createInvite`/`acceptInvite` would: valid, and live at backup time.
+    const unusedInvite = hashToken("an-unused-invite-code-0123456789");
+    const pendingInviteHash = hashToken("a-pending-member-invite-0123456789");
+    await stores.config.update((config) => ({
+      ...config,
+      invites: [
+        {
+          codeHash: unusedInvite,
+          role: "member",
+          displayName: "Helper",
+          createdAt: "2026-10-29T11:00:00.000Z",
+          expiresAt: "2026-10-29T23:00:00.000Z",
+        },
+      ],
+      members: config.members.map((member) =>
+        member.id === partner.session.memberId ? { ...member, inviteHash: pendingInviteHash } : member,
+      ),
+    }));
+
+    const liveConfig = await stores.config.read();
+    // The detector names everything the live file carries; empty is the only
+    // state a bundle may be in.
+    const named = archivedCredentials(liveConfig).join(", ");
+    assert.match(named, /an owner token hash/);
+    assert.match(named, /2 session hashes/);
+    assert.match(named, /1 invite/);
+    assert.match(named, /1 member invite hash/);
+
+    const liveBefore = await readFile(dataPaths(source.dir).config, "utf8");
+    const result = await backupDataDir(
+      { dataDir: source.dir, passphrase: PASSPHRASE, now: new Date("2026-10-29T12:10:00Z") },
+      { cipher: identityCipher },
+    );
+
+    const staged = await stageArchive(result.archive, PASSPHRASE, { cipher: identityCipher });
+    try {
+      const archivedRaw = JSON.parse(await readFile(join(staged.directory, "config.json"), "utf8"));
+      assert.equal(archivedRaw.ownerTokenHash, null);
+      assert.deepEqual(archivedRaw.invites, []);
+      for (const member of archivedRaw.members) {
+        assert.deepEqual(member.sessions, []);
+        assert.equal("inviteHash" in member, false, "a member invite hash is a credential too");
+      }
+      // Identities and roles stay: boot reconciliation, the member cap and the
+      // invite flow read them, and a restore that forgot them would lose the
+      // household's shape.
+      assert.deepEqual(
+        archivedRaw.members.map((member: { role: string; displayName: string }) => [member.role, member.displayName]).sort(),
+        [["member", "Partner"], ["owner", "Owner"]],
+      );
+      assert.deepEqual(archivedCredentials(parseConfig(archivedRaw)!), [], "the archive is restorable as-is");
+
+      // No hash that could authenticate survived, by value rather than by name.
+      const archivedText = JSON.stringify(archivedRaw);
+      for (const hash of [
+        hashToken(ownerToken),
+        hashToken(owner.token),
+        hashToken(partner.token),
+        hashToken(partnerCode),
+        unusedInvite,
+        pendingInviteHash,
+      ]) {
+        assert.equal(archivedText.includes(hash), false, `the archive leaked ${hash.slice(0, 8)}…`);
+      }
+    } finally {
+      await staged.cleanup();
+    }
+
+    // The job reads the live config and never writes it: P5-02's drill property.
+    assert.equal(await readFile(dataPaths(source.dir).config, "utf8"), liveBefore);
+  } finally {
+    await source.close();
+    await rm(source.dir, { recursive: true, force: true });
+  }
+});
+
+test("a restore refuses an archive that still carries a live credential", async () => {
+  const source = await seedDataDir("tampered");
+  const tamperedDir = await tempDir("pupkeep-tampered-");
+  const target = await tempDir("pupkeep-tampered-target-");
+  try {
+    const stores = dataStores(source.dir);
+    const { token } = await new Auth({ config: stores.config }).mintOwner("http://127.0.0.1:8787");
+    const result = await backupDataDir(
+      { dataDir: source.dir, passphrase: PASSPHRASE, now: new Date("2026-10-29T12:11:00Z") },
+      { cipher: identityCipher },
+    );
+
+    // Put an owner hash back into the archive's config, then re-tar it: the shape a
+    // pre-change archive (or a hand-edited one) has.
+    const staged = await stageArchive(result.archive, PASSPHRASE, { cipher: identityCipher });
+    let archive: string;
+    try {
+      const archived = JSON.parse(await readFile(join(staged.directory, "config.json"), "utf8"));
+      archived.ownerTokenHash = hashToken(token);
+      await writeFile(join(staged.directory, "config.json"), `${JSON.stringify(archived, null, 2)}\n`);
+      archive = join(tamperedDir, "tampered.tar.gz.age");
+      const tarred = await runCommand("tar", ["-czf", archive, "-C", staged.directory, "pupkeep.sqlite", "config.json", "push.json"]);
+      assert.equal(tarred.code, 0, tarred.stderr);
+    } finally {
+      await staged.cleanup();
+    }
+
+    // The refusal is a restore-time policy, not an archive-level one: `--verify`
+    // and `rotatePassphrases` still read an older, un-scrubbed archive, so an
+    // operator rotating a passphrase across the retained set is not wedged by it.
+    const readable = await stageArchive(archive, PASSPHRASE, { cipher: identityCipher });
+    await readable.cleanup();
+
+    // The target already holds state, so the refusal is also proven to come before
+    // the move-aside: a refused archive must change nothing.
+    await writeFile(join(target, "config.json"), '{"old":true}\n', "utf8");
+    await assert.rejects(
+      restoreDataDir({ archive, dataDir: target, passphrase: PASSPHRASE, force: true }, { cipher: identityCipher }),
+      /still carries an owner token hash: restoring it would re-arm an old sign-in/,
+    );
+    assert.equal(await readFile(join(target, "config.json"), "utf8"), '{"old":true}\n');
+    assert.deepEqual(
+      (await readdir(target)).filter((name) => name.startsWith("restore-backup-")),
+      [],
+      "nothing was moved aside",
+    );
+  } finally {
+    await source.close();
+    await rm(source.dir, { recursive: true, force: true });
+    await rm(tamperedDir, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test("a restored household has no way in until an owner token is minted again", async () => {
+  // The chosen shape for "restore requires a re-mint": the archive's null
+  // `ownerTokenHash` *is* the state. The launcher already mints when the hash is
+  // null, so no new CLI surface is needed — the operator is told in the restore's
+  // own output that a fresh link will be minted (`--reissue-owner` mints one now).
+  const source = await seedDataDir("remint");
+  const target = await tempDir("pupkeep-remint-target-");
+  try {
+    const stores = dataStores(source.dir);
+    const auth = new Auth({ config: stores.config });
+    const { token: ownerToken } = await auth.mintOwner("http://127.0.0.1:8787");
+    const owner = await auth.login(ownerToken);
+    const partnerCode = await auth.createInvite(owner.session, "Partner");
+    const partner = await auth.acceptInvite(partnerCode);
+
+    const result = await backupDataDir(
+      { dataDir: source.dir, passphrase: PASSPHRASE, now: new Date("2026-10-29T12:12:00Z") },
+      { cipher: identityCipher },
+    );
+    const restored = await restoreDataDir(
+      { archive: result.archive, dataDir: target, passphrase: PASSPHRASE },
+      { cipher: identityCipher },
+    );
+    assert.equal(restored.requiresOwnerMint, true, "the restored config has no owner token");
+
+    // Everything that authenticated before the backup now authenticates nothing.
+    const restoredStores = dataStores(target);
+    const restoredAuth = new Auth({ config: restoredStores.config, push: restoredStores.push });
+    for (const dead of [ownerToken, owner.token, partner.token, partnerCode]) {
+      await assert.rejects(restoredAuth.authenticate(dead), /not signed in/);
+    }
+
+    // The database itself restored, so "boots after a re-mint" is about auth only.
+    const reopened = await openHarness({ path: dataPaths(target).database });
+    try {
+      assert.deepEqual(await reopened.harness.snapshot(SnapshotDoc, BACKGROUND_CONTEXT), { marker: "remint" });
+    } finally {
+      await reopened.harness.close(BACKGROUND_CONTEXT);
+    }
+
+    const minted = await restoredAuth.mintOwner("http://127.0.0.1:8787");
+    assert.equal(minted.rotated, false, "there was no owner token to rotate");
+    assert.equal((await restoredAuth.authenticate(minted.token)).role, "owner");
+    const signedIn = await restoredAuth.login(minted.token);
+    const config = await restoredStores.config.read();
+    assert.equal(config.ownerTokenHash, hashToken(minted.token));
+
+    // And the household is operable again: the partner's row survived the scrub
+    // without sessions, so the owner frees the slot and invites them afresh.
+    assert.equal(config.members.filter((member) => member.removedAt === undefined).length, 2);
+    await restoredAuth.removeMember(signedIn.session, partner.session.memberId);
+    const freshCode = await restoredAuth.createInvite(signedIn.session, "Partner");
+    const returned = await restoredAuth.acceptInvite(freshCode);
+    assert.equal((await restoredAuth.authenticate(returned.token)).role, "member");
   } finally {
     await source.close();
     await rm(source.dir, { recursive: true, force: true });
@@ -606,4 +825,43 @@ test("age + expect really round-trip a file under a passphrase", { skip: !ageAva
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("a truncated upload is refused instead of being called uploaded", async () => {
+  // P5-02's drill found the module header claiming this while nothing checked it:
+  // the job decrypted its own local archive and never looked at the object.
+  const source = await seedDataDir("truncated");
+  try {
+    const remoteRun: CommandRunner = async (command, args, options) => {
+      if (command === "rclone") {
+        if (args[0] === "lsf") return { code: 0, stdout: "", stderr: "" };
+        if (args[0] === "lsjson") return { code: 0, stdout: JSON.stringify({ Size: 12 }), stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return runCommand(command, args, options);
+    };
+    await assert.rejects(
+      backupDataDir(
+        {
+          dataDir: source.dir,
+          passphrase: PASSPHRASE,
+          remote: "test:pupkeep",
+          now: new Date("2026-10-29T12:04:00Z"),
+        },
+        { cipher: identityCipher, run: remoteRun },
+      ),
+      /uploaded archive is 12 bytes but the local archive/,
+    );
+  } finally {
+    await source.close();
+    await rm(source.dir, { recursive: true, force: true });
+  }
+});
+
+test("a missing helper names itself and says to install it", async () => {
+  const run: CommandRunner = async (command) => {
+    if (command === "expect") throw new Error("spawn expect ENOENT");
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await assert.rejects(checkBackupTools(run, false), /expect is not available \(spawn expect ENOENT\); install it before backing up/);
 });

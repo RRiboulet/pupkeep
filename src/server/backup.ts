@@ -10,7 +10,16 @@
 //     copy (P0-07 measured a live `.backup` that passed its exit code while
 //     missing the newest commit);
 //   * the archive is decrypted and checked again after encryption, so a wrong
-//     passphrase or a truncated upload is found now rather than at restore time;
+//     passphrase is found now rather than at restore time, and when a remote is
+//     configured the uploaded object is stat-ed and its size compared with the
+//     local archive, so a truncated upload is found now too (P5-02's drill found
+//     this was claimed here but never done);
+//   * the archived `config.json` is a scrub of the live one: no owner token hash,
+//     no session hash, no invite. An archive is the most-copied object in the
+//     system and its passphrase deliberately leaves the backup host, so carrying
+//     those hashes would make the archive itself a credential (PLAN §14.4, R7 of
+//     docs/specs/2026-11-20-hosting-public-https.md). Restore refuses an archive
+//     that still carries one and needs a fresh owner mint before any sign-in;
 //   * a restore refuses to run while either pid lock is live, and removes the
 //     stale WAL/SHM files before installing the bundle.
 //
@@ -37,7 +46,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
-import { emptyPush, parseConfig, parsePush, dataPaths } from "./config.ts";
+import { emptyPush, parseConfig, parsePush, dataPaths, type AppConfig } from "./config.ts";
 import { atomicWrite } from "./json-file.ts";
 import { acquireLock, inspectLock, LOCK_FILE, SERVER_LOCK_FILE, type LockHandle } from "./lock.ts";
 import { TABLE_PREFIX } from "./harness.ts";
@@ -125,7 +134,17 @@ export async function checkBackupTools(run: CommandRunner, needsRemote: boolean)
   ];
   if (needsRemote) tools.push(["rclone", ["version"]]);
   for (const [command, args] of tools) {
-    const result = await run(command, args);
+    // A missing binary makes `run` *reject* (spawn ENOENT) rather than return a
+    // code, so without this catch the operator saw `spawn expect ENOENT` and the
+    // one sentence telling them to install it was unreachable (P5-02 drill).
+    let result: CommandResult;
+    try {
+      result = await run(command, args);
+    } catch (error) {
+      throw new Error(
+        `${command} is not available (${(error as Error).message}); install it before backing up`,
+      );
+    }
     if (result.code !== 0) {
       throw new Error(`${command} is not available (exit ${result.code}); install it before backing up`);
     }
@@ -449,6 +468,50 @@ async function listRemoteArchives(run: CommandRunner, remote: string): Promise<s
     .filter((name) => isBackupArchive(name));
 }
 
+/**
+ * Check the object that actually landed off-device, not just the local file.
+ * `rclone lsf` proves the *name* exists; it says nothing about a truncated
+ * upload, which is what a killed connection leaves behind. The module header
+ * claimed this check long before it existed (P5-02's drill found the gap), so it
+ * compares the remote object's reported size with the local archive's.
+ *
+ * A stat that cannot be read is a failure, not a warning: "uploaded, maybe" is
+ * how a household discovers its only off-device copy is 0 bytes.
+ */
+async function verifyRemoteArchive(
+  run: CommandRunner,
+  remote: string,
+  name: string,
+  localArchive: string,
+): Promise<void> {
+  const target = remotePath(remote, name);
+  const result = await run("rclone", ["lsjson", "--stat", target]);
+  if (result.code !== 0) {
+    throw new Error(
+      `rclone could not read back ${target} (exit ${result.code}); the local archive is intact but the off-device copy is unverified`,
+    );
+  }
+  let size: number | undefined;
+  try {
+    const parsed = JSON.parse(result.stdout) as { Size?: unknown };
+    if (typeof parsed.Size === "number") size = parsed.Size;
+  } catch {
+    size = undefined;
+  }
+  if (size === undefined) {
+    throw new Error(
+      `rclone returned no usable size for ${target}; the local archive is intact but the off-device copy is unverified`,
+    );
+  }
+  const local = (await stat(localArchive)).size;
+  if (size !== local) {
+    throw new Error(
+      `the uploaded archive is ${size} bytes but the local archive is ${local}; ` +
+        `the local copy is intact and the remote object at ${target} is incomplete`,
+    );
+  }
+}
+
 // --- filesystem helpers ----------------------------------------------------
 
 async function exists(path: string): Promise<boolean> {
@@ -567,16 +630,23 @@ export async function copyDatabase(source: string, destination: string): Promise
   return { expectedSeq, copiedSeq };
 }
 
-function verifyConfigText(text: string): void {
+/**
+ * Parse `config.json` text with the error an operator can act on. Returns the
+ * parsed config, because both bundle staging and restore need to look at it: one
+ * to scrub it, the other to refuse a credential that survived.
+ */
+function parseConfigText(text: string): AppConfig {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (error) {
     throw new Error(`config.json is not valid JSON (${(error as Error).message})`);
   }
-  if (parseConfig(raw) === undefined) {
+  const config = parseConfig(raw);
+  if (config === undefined) {
     throw new Error("config.json does not match the shape this build understands");
   }
+  return config;
 }
 
 function verifyPushText(text: string): void {
@@ -661,9 +731,63 @@ async function verifyExtracted(directory: string, expectedSeq?: number): Promise
     throw new Error(`the archived database is behind the source (seq ${seq}, expected at least ${expectedSeq})`);
   }
 
-  verifyConfigText(await readFile(join(directory, "config.json"), "utf8"));
+  parseConfigText(await readFile(join(directory, "config.json"), "utf8"));
   verifyPushText(await readFile(join(directory, "push.json"), "utf8"));
   return seq;
+}
+
+// --- archived credentials --------------------------------------------------
+
+/**
+ * The bundle's `config.json`: the household's identities and roles, and none of
+ * the secrets that can authenticate.
+ *
+ * R7 (docs/specs/2026-11-20-hosting-public-https.md) forbids an archive that
+ * carries a live credential, and `restoreDataDir` enforces it. The reason is not
+ * hygiene: the passphrase deliberately leaves the backup host (PLAN §7.5), so
+ * whoever can open the archive can also read it, and an owner token hash plus a
+ * session hash would let them sign in as a caregiver. Identities stay because
+ * boot reconciliation, the member cap and the invite flow read them; the owner
+ * token is re-minted after a restore and everyone signs in again.
+ *
+ * Built field by field rather than by deleting keys from a copy, so a credential
+ * added to `MemberRecord` later is not carried into every archive until someone
+ * deliberately allows it. The live file is only ever read: the job must not be a
+ * second writer into the data directory while the server runs (P5-02's drill).
+ */
+export function scrubArchivedConfig(config: AppConfig): AppConfig {
+  return {
+    schemaVersion: config.schemaVersion,
+    ownerTokenHash: null,
+    members: config.members.map((member) => ({
+      id: member.id,
+      role: member.role,
+      displayName: member.displayName,
+      createdAt: member.createdAt,
+      ...(member.removedAt !== undefined ? { removedAt: member.removedAt } : {}),
+      sessions: [],
+    })),
+    invites: [],
+  };
+}
+
+/**
+ * The live credentials a `config.json` still carries, named for the operator.
+ * Used by the restore refusal; empty is the only state a bundle may be in.
+ */
+export function archivedCredentials(config: AppConfig): string[] {
+  const found: string[] = [];
+  if (config.ownerTokenHash !== null) found.push("an owner token hash");
+  const sessions = config.members.reduce((total, member) => total + member.sessions.length, 0);
+  if (sessions > 0) found.push(`${sessions} session ${sessions === 1 ? "hash" : "hashes"}`);
+  if (config.invites.length > 0) {
+    found.push(`${config.invites.length} ${config.invites.length === 1 ? "invite" : "invites"}`);
+  }
+  const inviteHashes = config.members.filter((member) => member.inviteHash !== undefined).length;
+  if (inviteHashes > 0) {
+    found.push(`${inviteHashes} member ${inviteHashes === 1 ? "invite hash" : "invite hashes"}`);
+  }
+  return found;
 }
 
 /**
@@ -747,9 +871,14 @@ async function stageBundle(dataDir: string, stagingDir: string): Promise<Databas
   }
 
   const copy = await copyDatabase(paths.database, join(stagingDir, "pupkeep.sqlite"));
-  const configText = await readFile(paths.config, "utf8");
-  verifyConfigText(configText);
-  await writePrivate(join(stagingDir, "config.json"), configText);
+  // The bundle gets the scrub, never the live text: `config.json` holds the owner
+  // and session hashes, and an archive must not become a credential (PLAN §14.4).
+  const config = parseConfigText(await readFile(paths.config, "utf8"));
+  const archivedText = `${JSON.stringify(scrubArchivedConfig(config), null, 2)}\n`;
+  // The scrub's own output is parsed again: an archive this build cannot restore
+  // must never be written in the first place.
+  parseConfigText(archivedText);
+  await writePrivate(join(stagingDir, "config.json"), archivedText);
 
   // push.json is optional on a first run. Include a valid empty shape rather
   // than writing one into the live data directory: the backup job must not be a
@@ -889,6 +1018,7 @@ export async function backupDataDir(
     if (result.code !== 0) {
       throw new Error(`rclone could not copy the archive to ${remote} (exit ${result.code}); the local archive is intact`);
     }
+    await verifyRemoteArchive(run, remote, name, archive);
     uploaded = true;
   }
 
@@ -927,6 +1057,14 @@ export interface RestoreResult {
   seq: number;
   /** `secrets.json` is excluded by design; absent means keys must be re-entered. */
   secretsPresent: boolean;
+  /**
+   * True when the installed `config.json` has no owner token hash, so nobody can
+   * sign in until one is minted: the next start mints a fresh link and
+   * `--reissue-owner` mints one explicitly. The scrub guarantees this and the
+   * refusal below makes the alternative unreachable, but the CLI reads the state
+   * the restore actually installed rather than assuming it.
+   */
+  requiresOwnerMint: boolean;
 }
 
 async function assertServerStopped(dataDir: string): Promise<void> {
@@ -974,6 +1112,22 @@ export async function restoreDataDir(
   let movedAside: string | undefined;
   try {
     staged = await stageArchive(options.archive, options.passphrase, { run, cipher });
+
+    // R7: an archive that still carries a live credential is refused *before* the
+    // data directory is touched, because installing it would re-arm the owner
+    // link or a cookie that was valid when the backup was taken — the exact thing
+    // `scrubArchivedConfig` removes. Deliberately not in `stageArchive`: `--verify`
+    // and `rotatePassphrases` must still read and re-encrypt older archives.
+    const archived = parseConfigText(await readFile(join(staged.directory, "config.json"), "utf8"));
+    const credentials = archivedCredentials(archived);
+    if (credentials.length > 0) {
+      throw new Error(
+        `the archive still carries ${credentials.join(", ")}: restoring it would re-arm an old sign-in, ` +
+          "so it was refused. Write a fresh archive with this build's backup job (it scrubs the config), " +
+          "or remove those fields from the archive's config.json",
+      );
+    }
+
     const present: string[] = [];
     for (const name of [...BACKUP_FILES, SQLITE_WAL, SQLITE_SHM]) {
       if (await exists(join(dataDir, name))) present.push(name);
@@ -1029,6 +1183,7 @@ export async function restoreDataDir(
       ...(movedAside !== undefined ? { movedAside } : {}),
       seq: staged.seq,
       secretsPresent: await exists(join(dataDir, "secrets.json")),
+      requiresOwnerMint: archived.ownerTokenHash === null,
     };
   } catch (error) {
     // A failure after the move-aside leaves the old state recoverable but the
