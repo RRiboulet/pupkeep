@@ -23,15 +23,25 @@ test("defaults: local access, port 8787, ~/.pupkeep", () => {
 });
 
 test("every documented flag is accepted, in both spellings for values", () => {
-  const spaced = parseOptions(["--access", "tailscale", "--port", "9000", "--data", "/srv/pk"], {}, HOME);
+  const spaced = parseOptions(["--access", "lan", "--port", "9000", "--data", "/srv/pk"], {}, HOME);
   assert.ok(spaced.ok);
-  assert.equal(spaced.options.mode, "tailscale");
+  assert.equal(spaced.options.mode, "lan");
   assert.equal(spaced.options.port, 9000);
   assert.equal(spaced.options.dataDir, "/srv/pk");
 
-  const inline = parseOptions(["--access=cloudflare", "--port=9001", "--data=/srv/x"], {}, HOME);
+  const inline = parseOptions(
+    ["--access=public", "--port=9001", "--data=/srv/x"],
+    {
+      // `public` needs its origin and the proxy address; the spelling being
+      // tested here is the flag parsing, and public exercises the inline form
+      // the same way any other mode would.
+      PUPKEEP_PUBLIC_ORIGIN: "https://pupkeep.example",
+      PUPKEEP_TRUSTED_PROXY: "172.28.0.11",
+    },
+    HOME,
+  );
   assert.ok(inline.ok);
-  assert.equal(inline.options.mode, "cloudflare");
+  assert.equal(inline.options.mode, "public");
   assert.equal(inline.options.port, 9001);
 });
 
@@ -71,7 +81,7 @@ test("environment fills the defaults, and flags win over it", () => {
 
 test("bad input is refused with a message naming the problem", () => {
   const cases: Array<[string[], RegExp]> = [
-    [["--access", "bogus"], /--access must be one of local, lan, public, tailscale, cloudflare/],
+    [["--access", "bogus"], /--access must be one of local, lan, public/],
     [["--access"], /--access needs a mode/],
     [["--port", "0"], /--port must be an integer 1\.\.65535/],
     [["--port", "70000"], /--port must be an integer/],
@@ -94,6 +104,21 @@ test("a bad environment value fails the same way", () => {
   const port = parseOptions([], { PUPKEEP_PORT: "http" }, HOME);
   assert.ok(!port.ok);
   assert.match(port.error, /PUPKEEP_PORT is not a port/);
+});
+
+test("the retired modes are rejected like any unknown value (P6-08/R2)", () => {
+  // Deletion must fail closed: a stale boot line or a copied command that still
+  // names `tailscale` or `cloudflare` gets a refusal, never a listener
+  // configured the way the deleted mode used to be.
+  for (const retired of ["tailscale", "cloudflare"] as const) {
+    const byFlag = parseOptions(["--access", retired], {}, HOME);
+    assert.ok(!byFlag.ok, `--access ${retired} must be refused`);
+    assert.match(byFlag.error, /--access must be one of local, lan, public/);
+
+    const byEnv = parseOptions([], { PUPKEEP_ACCESS: retired }, HOME);
+    assert.ok(!byEnv.ok, `PUPKEEP_ACCESS=${retired} must be refused`);
+    assert.match(byEnv.error, /PUPKEEP_ACCESS is not an access mode/);
+  }
 });
 
 test("~ is expanded and relative data dirs resolve against home, not the cwd", () => {

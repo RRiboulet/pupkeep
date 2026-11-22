@@ -4,8 +4,8 @@
 //   * every credential is ≥128 bits of randomness and only its **hash** is stored,
 //     so a leaked backup cannot be replayed as a cookie;
 //   * the owner token is the trust root — losing it is recovered by physical
-//     Termux access (`--reissue-owner`), which rotates it and revokes what it
-//     issued, while member sessions survive;
+//     access to the host (`--reissue-owner`), which rotates it and revokes what
+//     it issued, while member sessions survive;
 //   * authz is server-side. An owner-only action returns 403 for a member; hiding
 //     a button is not a permission.
 //
@@ -29,7 +29,7 @@ export type { InviteRecord } from "./config.ts";
 
 export const TOKEN_BYTES = 32; // 256 bits; the plan's floor is 128
 export const INVITE_TTL_MS = 15 * 60 * 1000;
-/** Sessions are sized for the public internet, not a phone on one tailnet. */
+/** Sessions are sized for the public internet, not a phone on one LAN. */
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** An unused session expires before its absolute 30-day limit. */
 export const SESSION_IDLE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -205,8 +205,9 @@ export class Auth {
 
   /**
    * Build a sign-in link for a token. The origin is a *parameter*, not constructor
-   * state: it is derived from the live access mode (and changes when the quick
-   * tunnel restarts), so a snapshot taken at construction would be wrong.
+   * state: it is derived from the live access mode (and changes when the process
+   * restarts on a different address), so a snapshot taken at construction would
+   * be wrong.
    */
   link(token: string, origin: string): string {
     if (!/^https?:\/\/[^/]+/.test(origin)) throw new Error(`not an origin: ${origin}`);
@@ -642,7 +643,7 @@ export class RateLimiter {
   /** Record an attempt; false means the caller should answer 429. */
   hit(key: string): boolean {
     const now = this.#now();
-    // Behind an internet-facing tunnel the key comes from the client, so the key
+    // Served on the public internet the key comes from the client, so the key
     // space is attacker-chosen: evict stale entries rather than grow forever.
     if (this.#hits.size >= this.#maxKeys) this.#sweep(now);
     const recent = (this.#hits.get(key) ?? []).filter((at) => now - at < this.#windowMs);

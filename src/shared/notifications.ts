@@ -105,7 +105,7 @@ export function notificationKey(...parts: readonly string[]): string {
 /**
  * Urgency per category: appointments and overdue meals are the ones a caregiver
  * must not miss. It rides on the transport's priority field (ntfy's header,
- * Termux's `--priority`), never on extra words (§12.3).
+ * Web Push's urgency), never on extra words (§12.3).
  */
 export const NOTIFICATION_PRIORITY: Readonly<Record<NotificationIntentCategory, "default" | "high">> = Object.freeze({
   appointment: "high",

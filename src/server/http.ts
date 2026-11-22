@@ -58,8 +58,8 @@
 //   * every /api route requires a valid session cookie — there is no public API;
 //   * a mutation must come from an origin the server serves. In public mode that
 //     is the one configured origin and the `Host` must match it; elsewhere the
-//     short origin list plus a same-origin `Host` check covers the tailnet
-//     addresses this process cannot enumerate (it only knows its bind host);
+//     short origin list plus a same-origin `Host` check covers proxied hostnames
+//     this process cannot enumerate (it only knows its bind host);
 //   * every mutation also carries the fixed `X-Pupkeep-Request: 1` header and
 //     a JSON content type (§14.2); the PWA client (P1-10) must send both;
 //   * every failure answers through one mapper, so no stack trace leaves. A
@@ -273,12 +273,12 @@ export interface HttpDeps {
   readonly notificationLimiter?: RateLimiter;
   /** The probe's limiter: one press spends a provider call per model. */
   readonly probeLimiter?: RateLimiter;
-  /** Origins mutations may come from; a function because the tunnel origin moves. */
+  /** Origins mutations may come from; a function because the bind can differ per process. */
   readonly allowedOrigins: () => readonly string[];
   /**
    * The one configured public origin (P6/R3). When set it is the *only* origin:
    * the Host must match it, `sameOrigin` is not a fallback, and its scheme owns
-   * `Secure`, `__Host-` and HSTS. Absent in local/lan/tunnel modes.
+   * `Secure`, `__Host-` and HSTS. Absent in local/lan modes.
    */
   readonly publicOrigin?: string;
   /** The only peer address allowed to supply `X-Forwarded-*` (R4). */
@@ -322,7 +322,7 @@ export interface HttpDeps {
 /**
  * The origins this bind address serves. In `public` mode the configured origin
  * is the *whole* list: no loopback origins and no same-origin `Host` fallback.
- * Elsewhere the short list stays: the origin of a tailnet device is not
+ * Elsewhere the short list stays: the origin a proxy fronts is not
  * enumerable by the server, so the `Host` check carries those.
  */
 export function bindOrigins(host: string, port: number, publicOrigin?: string): string[] {

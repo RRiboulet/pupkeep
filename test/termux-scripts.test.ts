@@ -140,13 +140,14 @@ test("the boot script starts the app with no PATH and no HOME, and writes the bo
     assert.match(log, /termux-sshd: listening on 100\.101\.102\.61:8022/);
 
     // The launcher is exec'd with the same flags `npm start` uses, so the boot
-    // path is one entry point rather than a second variant of the app.
+    // path is one entry point rather than a second variant of the app. The mode
+    // is `lan` (P6-08): the offline LAN fallback, not a deleted phone mode.
     const args = (await readFile(nodeArgs, "utf8")).trim().split("\n");
     assert.deepEqual(args, [
       "--env-file-if-exists=.env",
       "bin/pupkeep.js",
       "--access",
-      "tailscale",
+      "lan",
       "--boot",
       "--data",
       phone.data,
@@ -174,73 +175,31 @@ test("the boot script still starts the app when sshd cannot, although the tailne
     const log = await readFile(join(phone.data, "server.log"), "utf8");
     assert.match(log, /sshd not started; run scripts\/termux-sshd\.sh/);
     assert.match(log, /^boot: /m);
-    assert.match(await readFile(nodeArgs, "utf8"), /--access\n?tailscale/);
+    assert.match(await readFile(nodeArgs, "utf8"), /--access\n?lan/);
   } finally {
     await phone.cleanup();
   }
 });
 
-test("the boot script waits for the tailnet instead of dying at the first refusal", async () => {
-  // 2026-11-16 on the daily phone: the boot line was written and the launcher was
-  // refused 4 s later, because Android had not reconnected Tailscale yet. The
-  // interface arrives a minute or two after boot with Always-on VPN, so the boot
-  // path waits for it — the `ip` stub here hands out an address on the third call.
+test("the boot script starts the app without waiting for the tailnet (P6-08)", async () => {
+  // The boot path used to hold the app hostage until a tailnet address arrived,
+  // because `--access tailscale` could not run without one. `--access lan` can,
+  // so the sshd attempt (operator tooling, still tailnet-bound) is made once and
+  // never waited on: its refusal must not delay the care app a minute.
   const phone = await makePhone();
   const nodeArgs = join(phone.root, "node-args");
-  const attempts = join(phone.root, "ip-calls");
   try {
-    await phone.stub(
-      "ip",
-      `count=0
-[ -f "${attempts}" ] && count="$(cat "${attempts}")"
-count=$((count + 1))
-echo "$count" > "${attempts}"
-if [ "$count" -ge 3 ]; then
-  echo "3: tun1    inet 100.101.102.61/32 scope global tun1"
-fi`,
-    );
+    // No TAILNET_ADDRESS at all: the sshd script refuses with exit 2.
     const result = phone.run("scripts/termux-boot.sh", [], {
       PREFIX: phone.prefix,
       PUPKEEP_DATA_DIR: phone.data,
       NODE_ARGS_FILE: nodeArgs,
-      // A second of patience per attempt keeps the test fast and still exercises
-      // the loop; the shipped default is 180 s.
-      PUPKEEP_BOOT_TAILNET_WAIT: "5",
-      PUPKEEP_BOOT_RETRY_STEP: "1",
     });
     assert.equal(result.status, 0, `stderr: ${result.stderr}`);
-
     const log = await readFile(join(phone.data, "server.log"), "utf8");
-    // Refused twice, then bound: the wait is what the log has to show.
-    assert.equal((log.match(/Tailscale is not connected/g) ?? []).length, 2);
-    assert.match(log, /termux-sshd: listening on 100\.101\.102\.61:8022/);
-    assert.match(log, /^boot: 2026-11-10T15:00:00\+01:00/m);
-    assert.match(await readFile(nodeArgs, "utf8"), /--access\n?tailscale/);
-  } finally {
-    await phone.cleanup();
-  }
-});
-
-test("the boot script gives up after the wait, says why, and starts nothing", async () => {
-  // Always-on VPN off means the address never arrives. One sentence after the
-  // wait beats a launcher refusal in a log nobody reads, and the app genuinely
-  // cannot run without the tailnet in `--access tailscale`.
-  const phone = await makePhone();
-  const nodeArgs = join(phone.root, "node-args");
-  try {
-    const result = phone.run("scripts/termux-boot.sh", [], {
-      PREFIX: phone.prefix,
-      PUPKEEP_DATA_DIR: phone.data,
-      NODE_ARGS_FILE: nodeArgs,
-      PUPKEEP_BOOT_TAILNET_WAIT: "1",
-      PUPKEEP_BOOT_RETRY_STEP: "1",
-    });
-    assert.equal(result.status, 1, `stdout: ${result.stdout}`);
-    const log = await readFile(join(phone.data, "server.log"), "utf8");
-    assert.match(log, /no tailnet address after 1s, so the app is not started/);
-    assert.match(log, /Always-on VPN/, "it names the setting that fixes it");
-    assert.match(log, /^boot: 2026-11-10T15:00:00\+01:00/m, "the boot line is still written");
-    await assert.rejects(readFile(nodeArgs), "the launcher must not run");
+    assert.match(log, /sshd not started; run scripts\/termux-sshd\.sh/);
+    assert.match(log, /^boot: /m, "the boot line is still written");
+    assert.match(await readFile(nodeArgs, "utf8"), /--access\n?lan/, "the launcher ran anyway");
   } finally {
     await phone.cleanup();
   }
@@ -476,9 +435,11 @@ esac`,
   );
   // `curl -fsSL -o <path> <url>` is the only shape the script uses.
   await phone.stub("curl", 'while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then : > "$2"; fi; shift; done');
-  // The checksum is pinned by test/runbook.test.ts and by the phone itself; this
-  // test is about ordering. It must consume stdin: `set -o pipefail` turns the
-  // writer's SIGPIPE into a failed pipeline, and that made this test flake.
+  // The checksum guard is gone with the cloudflared download (P6-08); the stub
+  // stays because `sha256sum` appears in no phone script any more and a stray
+  // call must still not hang the pipeline. It must consume stdin:
+  // `set -o pipefail` turns the writer's SIGPIPE into a failed pipeline, and
+  // that made this test flake.
   await phone.stub("sha256sum", "cat >/dev/null; exit 0");
   await phone.stub("npm", `printf '%s\\n' "$*" >> "${npmLog}"`);
   await phone.stub("uname", `if [ "\${1:-}" = "-m" ]; then echo aarch64; else echo Linux; fi`);

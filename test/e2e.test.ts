@@ -458,16 +458,16 @@ test("forwarded headers change nothing without a trusted proxy, and X-Forwarded-
     // No proxy address is configured, so even the loopback peer's forwarded
     // scheme is ignored: a plain-HTTP request must not get a Secure cookie, or
     // the browser would drop it (P6/R3-R4).
-    const tunnel = await fetch(`${fixture.url}/login?token=${encodeURIComponent(minted.token)}`, {
+    const forwarded = await fetch(`${fixture.url}/login?token=${encodeURIComponent(minted.token)}`, {
       redirect: "manual",
       headers: { "X-Forwarded-Proto": "https" },
     });
-    assert.equal(tunnel.status, 303);
-    const tunnelCookie = tunnel.headers.get("set-cookie") ?? "";
-    assert.doesNotMatch(tunnelCookie, /;\s*Secure/, "a forwarded scheme is not trusted by default");
-    assert.doesNotMatch(tunnelCookie, /Domain=/i, "the cookie is host-only, not shared across origins");
-    assert.doesNotMatch(tunnelCookie, /__Host-/, "the __Host- prefix belongs to an HTTPS origin");
-    const cookie = firstCookie(tunnel);
+    assert.equal(forwarded.status, 303);
+    const forwardedCookie = forwarded.headers.get("set-cookie") ?? "";
+    assert.doesNotMatch(forwardedCookie, /;\s*Secure/, "a forwarded scheme is not trusted by default");
+    assert.doesNotMatch(forwardedCookie, /Domain=/i, "the cookie is host-only, not shared across origins");
+    assert.doesNotMatch(forwardedCookie, /__Host-/, "the __Host- prefix belongs to an HTTPS origin");
+    const cookie = firstCookie(forwarded);
 
     // The counterpart peer (127.0.0.2) gets exactly the same treatment: it is
     // not a trusted proxy either.

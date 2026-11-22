@@ -107,8 +107,8 @@ async function readOwner(path: string): Promise<ReadOwner> {
  * Take the lock, or report who holds it.
  *
  * A stale file — pid gone — is replaced rather than treated as an error: a phone
- * that lost power or had Termux killed leaves one behind, and refusing to boot
- * after a normal crash would be worse than the race it protects against.
+ * that lost power or had its process killed leaves one behind, and refusing to
+ * boot after a normal crash would be worse than the race it protects against.
  *
  * That takeover is read → unlink → exclusive create, not a compare-and-swap.
  * Two *simultaneous manual* starts on the same stale lock can in principle both

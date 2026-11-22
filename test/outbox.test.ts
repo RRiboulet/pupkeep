@@ -28,7 +28,6 @@ import { dataStores } from "../src/server/config.ts";
 import { NotificationsDoc } from "../src/server/domain/docs.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import { notificationIntent } from "../src/shared/notifications.ts";
-import type { ExecFile } from "../src/server/notifications/termux.ts";
 import { ensureVapid, generateVapidKeys } from "../src/server/push/vapid.ts";
 import type { PushTransport } from "../src/server/push/web-push.ts";
 import {
@@ -442,52 +441,26 @@ test("a failed push falls back to ntfy, and a failed ntfy is recorded for retry"
   });
 });
 
-test("the host member is notified through Termux:API when no phone path is configured", async () => {
+test("an intent whose only channel was the deleted host transport is skipped, not failed (P6-08/R6)", async () => {
+  // The Termux:API transport is gone. An intent for a member with no push
+  // subscription and no ntfy topic was never a delivery failure — the in-app
+  // item is the authoritative record — so deletion changes nothing about the
+  // skip: the intent stays owed rather than burning attempts on a channel that
+  // no longer exists.
   await withOutbox(async (fixture) => {
     await configure(fixture, []);
     await fixture.seed([intent()]);
-    const calls: { file: string; args: readonly string[] }[] = [];
-    const exec: ExecFile = async (file, args) => {
-      calls.push({ file, args });
-    };
     const result = await drainNotificationOutbox({
       store: fixture.opened.harness,
       context,
       push: fixture.push,
       now: NOW,
-      termux: { memberId: "owner", exec, channelReady: true },
     });
-    assert.equal(result.sent, 1);
-    const command = calls.find((call) => call.file === "termux-notification");
-    assert.ok(command);
-    assert.ok(command.args.includes("--title"));
-    assert.ok(command.args.includes("A meal is overdue"));
-    assert.ok(command.args.includes("--priority"));
-    assert.ok(command.args.includes("high"));
-    assert.ok(command.args.includes("--channel"));
-    const id = command.args[command.args.indexOf("--id") + 1]!;
-    assert.match(id, /^[0-9a-f]{16}$/, "a stable Android id from the dedupe key");
-    assert.ok(!command.args.includes("Breakfast"), "no care text reaches a system notification");
-  });
-});
-
-test("a Termux notification omits the channel when it was not created", async () => {
-  await withOutbox(async (fixture) => {
-    await configure(fixture, []);
-    await fixture.seed([intent()]);
-    const calls: { file: string; args: readonly string[] }[] = [];
-    const exec: ExecFile = async (file, args) => {
-      calls.push({ file, args });
-    };
-    const result = await drainNotificationOutbox({
-      store: fixture.opened.harness,
-      context,
-      push: fixture.push,
-      now: NOW,
-      termux: { memberId: "owner", exec, channelReady: false },
-    });
-    assert.equal(result.sent, 1, "the default channel still delivers");
-    assert.ok(!calls.find((call) => call.file === "termux-notification")!.args.includes("--channel"));
+    assert.equal(result.sent, 0);
+    assert.equal(result.failed, 0);
+    assert.equal(result.skipped, 1, "no subscription and no topic: the in-app record suffices");
+    const items = (await fixture.opened.harness.snapshot(NotificationsDoc, context))?.items as NotificationIntent[];
+    assert.equal(items[0]!.delivery.state, "pending", "still owed, never marked failed");
   });
 });
 

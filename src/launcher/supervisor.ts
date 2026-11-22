@@ -1,7 +1,7 @@
-// A small supervisor for the two children the launcher owns: the server and the
-// quick tunnel. It is deliberately independent of `child_process` — the spawner
-// is injected — so the restart policy and the shutdown ladder can be tested with
-// fake children and millisecond timings instead of a flaky integration test.
+// A small supervisor for the child the launcher owns: the server. It is
+// deliberately independent of `child_process` — the spawner is injected — so the
+// restart policy and the shutdown ladder can be tested with fake children and
+// millisecond timings instead of a flaky integration test.
 //
 // Policy (PLAN §6.3, §6.8):
 //   * restart a child that exits unexpectedly, with exponential backoff;
@@ -15,9 +15,11 @@
 //   * a failed spawn emits `error` and **no** `exit` (verified on Node 24), so an
 //     `error`-only handler that does nothing leaves the supervisor "running"
 //     forever with no restart, no give-up and no log line;
-//   * killing a wrapper kills the wrapper. `termux-chroot` is the tunnel's direct
-//     child on the phone, so shutdown signals the process *group*, waits, and
-//     escalates to SIGKILL rather than orphaning a live tunnel.
+//   * killing a wrapper kills the wrapper. A wrapper between the supervisor and
+//     the real process (the old `termux-chroot` tunnel was one) would survive a
+//     signal aimed at its parent, so shutdown signals the process *group*,
+//     waits, and escalates to SIGKILL rather than orphaning whatever the child
+//     started.
 
 export interface ChildLike {
   readonly pid?: number | undefined;
@@ -170,8 +172,9 @@ export class Supervisor {
   }
 
   /**
-   * Signal the child *group* when possible: the tunnel's direct child is a
-   * wrapper (`termux-chroot`), and killing only the wrapper orphans cloudflared.
+   * Signal the child *group* when possible: a wrapper between this supervisor
+   * and the real process would otherwise survive the signal and orphan what it
+   * started.
    */
   #signal(child: ChildLike, signal: NodeJS.Signals): void {
     const pid = child.pid;

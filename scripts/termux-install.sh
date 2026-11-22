@@ -12,13 +12,6 @@
 
 set -euo pipefail
 
-# cloudflared is not in the Termux package repo (P0-03). The arm64 release
-# binary is pinned by version *and* checksum, the same discipline the
-# devcontainer uses (PLAN §5.1), because the quick tunnel is part of the access
-# story and a moving download would silently be a different binary.
-CLOUDFLARED_VERSION=2026.10.5
-CLOUDFLARED_SHA256_ARM64=72e0d05a67e09da87cf495e409a28c3cc5994dd23fc66a982eebea6a55923b7d
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_DIR="${PUPKEEP_DATA_DIR:-$HOME/.pupkeep}"
 BOOT_DIR="${HOME}/.termux/boot"
@@ -59,14 +52,13 @@ case "${PREFIX}" in
 esac
 
 # v1 hosts on arm64 Android. A different machine is the VPS/Docker fallback's
-# job (PLAN §6.9), not a second cloudflared pin nobody tests.
+# job (PLAN §6.9), not a second host's install path.
 case "$(uname -m)" in
   aarch64 | arm64) ;;
   *) die "the host phone is arm64; found $(uname -m). PLAN §6.9 is the fallback for anything else." 1 ;;
 esac
 
 step "Termux packages"
-note "cloudflared is NOT in the Termux repo (P0-03); the pinned arm64 binary below replaces it."
 # Upgrade before install (P5-01b finding 1, 2026-11-10). That phone's index had
 # already been moved by an earlier `pkg update`, so `pkg install nodejs` fetched
 # 26.13.0 without the matching libicu and `node` then died with
@@ -140,26 +132,9 @@ esac
 termux-setup-storage >/dev/null 2>&1 || note "termux-setup-storage was declined or timed out; not needed by the app"
 
 step "Data directory"
-mkdir -p "${DATA_DIR}" "${DATA_DIR}/bin"
+mkdir -p "${DATA_DIR}"
 chmod 700 "${DATA_DIR}"
 note "${DATA_DIR} (0700)"
-
-step "cloudflared ${CLOUDFLARED_VERSION} (arm64, checksum pinned)"
-BIN="${DATA_DIR}/bin/cloudflared"
-if [ -f "${BIN}" ] && [ "$(sha256sum "${BIN}" | cut -d' ' -f1)" = "${CLOUDFLARED_SHA256_ARM64}" ]; then
-  note "already installed and matching"
-else
-  tmp="${BIN}.partial"
-  # PLAN §6.7: this binary only runs through the termux-chroot + SSL_CERT_FILE
-  # wrapper; the launcher builds that command, nobody spawns it by hand.
-  curl -fsSL -o "${tmp}" \
-    "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-arm64"
-  printf '%s  %s\n' "${CLOUDFLARED_SHA256_ARM64}" "${tmp}" | sha256sum -c - >/dev/null ||
-    die "the cloudflared download did not match ${CLOUDFLARED_VERSION}'s arm64 checksum" 3
-  chmod 755 "${tmp}"
-  mv "${tmp}" "${BIN}"
-  note "installed ${BIN}"
-fi
 
 step "Application dependencies"
 [ -f "${REPO_ROOT}/package-lock.json" ] || die "${REPO_ROOT} is not a Pupkeep checkout" 1
@@ -213,8 +188,8 @@ cat <<EOF
      1. Install the Termux:Boot and Termux:API companion apps from F-Droid.
      2. Termux settings: battery "Unrestricted"; Developer options -> disable
         "child process restrictions" (the Android 12+ phantom-process killer).
-     3. Tailscale: sign in, then enable Android "Always-on VPN" for it — the
-        client does not reconnect by itself after a reboot (P0-06).
-     4. First run:  cd ${REPO_ROOT} && npm start -- --access tailscale --data ${DATA_DIR}
-        Keep SSH off the product path: scripts/termux-sshd.sh starts it on demand.
+     3. First run:  cd ${REPO_ROOT} && npm start -- --access lan --data ${DATA_DIR}
+      Keep SSH off the product path: scripts/termux-sshd.sh starts it on demand
+      (operator tooling — it needs Tailscale, which the app itself no longer
+      uses).
 EOF

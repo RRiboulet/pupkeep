@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isCgnatAddress, isPrivateAddress, isTailscaleAddress, lanAddress, resolveAccess, tailscaleAddress, type InterfaceAddress } from "../src/launcher/access.ts";
+import {
+  isCgnatAddress,
+  isPrivateAddress,
+  lanAddress,
+  resolveAccess,
+  ACCESS_MODES,
+  type AccessMode,
+  type InterfaceAddress,
+} from "../src/launcher/access.ts";
 
 const interfaces: InterfaceAddress[] = [
   { name: "lo", address: "127.0.0.1", family: "IPv4", internal: true },
@@ -9,21 +17,17 @@ const interfaces: InterfaceAddress[] = [
   { name: "tun1", address: "fd7a:115c:a1e0::62d:ca3e", family: "IPv6", internal: false },
 ];
 
-test("100.64.0.0/10 is recognised and nothing else is", () => {
-  assert.equal(isTailscaleAddress("100.64.0.1"), true);
-  assert.equal(isTailscaleAddress("100.127.255.254"), true);
-  assert.equal(isTailscaleAddress("100.128.0.1"), false);
-  assert.equal(isTailscaleAddress("192.168.1.2"), false);
-  assert.equal(isTailscaleAddress("fd7a:115c:a1e0::1"), false);
-  assert.equal(isTailscaleAddress("100.90"), false);
-});
-
-test("the tailnet address is found on tun*, IPv4 only", () => {
-  assert.equal(tailscaleAddress(interfaces), "100.90.202.61");
-  // A LAN address is not a tailnet address, however private it looks.
-  assert.equal(tailscaleAddress(interfaces.filter((i) => i.name === "wlan0")), undefined);
-  // The interface list the phone shows before Tailscale connects.
-  assert.equal(tailscaleAddress(interfaces.filter((i) => i.name !== "tun1")), undefined);
+test("the retired modes are gone from the list and fail closed (P6-08)", () => {
+  // R13's offline fallback deleted the phone-only modes. A deleted mode must be
+  // *rejected*, not merely absent from a list: a caller that kept passing one
+  // (a stale boot line, a copied command) gets a refusal instead of a listener
+  // configured the way the mode used to be.
+  assert.deepEqual(ACCESS_MODES, ["local", "lan", "public"]);
+  for (const retired of ["tailscale", "cloudflare"] as const) {
+    const result = resolveAccess(retired as AccessMode, interfaces, 8787);
+    assert.ok(!result.ok, `${retired} must be refused`);
+    assert.match(result.reason, /unknown access mode/);
+  }
 });
 
 test("local binds loopback and shows a loopback URL", () => {
@@ -39,30 +43,6 @@ test("lan is the only mode that opens every interface, and it says so", () => {
   assert.ok(result.ok);
   assert.equal(result.plan.bindHost, "0.0.0.0");
   assert.match(result.plan.warning ?? "", /plain HTTP/);
-});
-
-test("tailscale binds the tailnet address", () => {
-  const result = resolveAccess("tailscale", interfaces, 8787);
-  assert.ok(result.ok);
-  assert.equal(result.plan.bindHost, "100.90.202.61");
-  assert.equal(result.plan.displayUrl, "http://100.90.202.61:8787");
-});
-
-test("tailscale fails closed when the address is missing — never 0.0.0.0", () => {
-  for (const list of [[], interfaces.filter((i) => i.name !== "tun1")]) {
-    const result = resolveAccess("tailscale", list, 8787);
-    assert.ok(!result.ok);
-    assert.match(result.reason, /Tailscale is not connected/);
-    assert.match(result.reason, /Refusing to bind 0\.0\.0\.0/);
-  }
-});
-
-test("cloudflare binds loopback and waits for the tunnel for its URL", () => {
-  const result = resolveAccess("cloudflare", interfaces, 8787);
-  assert.ok(result.ok);
-  assert.equal(result.plan.bindHost, "127.0.0.1");
-  assert.equal(result.plan.displayUrl, undefined);
-  assert.match(result.plan.warning ?? "", /URL changes on every restart/);
 });
 
 test("an impossible port is refused before any bind decision", () => {

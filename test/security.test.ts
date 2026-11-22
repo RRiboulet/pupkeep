@@ -291,9 +291,10 @@ interface RawResponse {
 }
 
 /**
- * A mutation with an explicit `Host`, which `fetch` will not let a test set. The
- * quick tunnel reaches the server as `127.0.0.1` with the tunnel's hostname in
- * `Host`, so this is the only way to exercise the same-origin rule it relies on.
+ * A mutation with an explicit `Host`, which `fetch` will not let a test set. A
+ * reverse proxy reaches the server as `127.0.0.1` with the public hostname in
+ * `Host`, so this is the only way to exercise the same-origin rule it relies
+ * on.
  */
 function mutate(
   url: string,
@@ -331,17 +332,18 @@ function mutate(
   });
 }
 
-test("a mutation is accepted from the quick tunnel only when Origin's host is the Host asked for", async () => {
-  // The server never learns the tunnel's hostname (it is born before the tunnel
-  // exists), so the same-origin fallback is what makes P4-09's tunnel path work.
-  // This test is that rule: acceptance when the hosts agree, refusal when they do
-  // not — the CSRF case (an attacker page's Origin against our Host).
+test("a mutation is accepted only when Origin's host is the Host asked for", async () => {
+  // The server may be reached through a proxy whose hostname it was never told
+  // (it binds a loopback or container address), so the same-origin fallback is
+  // what makes the proxied path work. This test is that rule: acceptance when
+  // the hosts agree, refusal when they do not — the CSRF case (an attacker
+  // page's Origin against our Host).
   const app = await startTestApp({ prefix: "pupkeep-security-" });
   try {
-    const tunnelHost = "random-words-here.trycloudflare.com";
+    const proxyHost = "pupkeep.example";
     const accepted = await mutate(app.url, "/api/walks/start", {
-      host: tunnelHost,
-      origin: `https://${tunnelHost}`,
+      host: proxyHost,
+      origin: `https://${proxyHost}`,
       cookie: app.cookies.owner,
       body: {},
       headers: { "Idempotency-Key": "security-origin-ok" },
@@ -352,7 +354,7 @@ test("a mutation is accepted from the quick tunnel only when Origin's host is th
     );
 
     const forged = await mutate(app.url, "/api/walks/start", {
-      host: tunnelHost,
+      host: proxyHost,
       origin: "https://evil.example",
       cookie: app.cookies.owner,
       body: {},
@@ -361,7 +363,7 @@ test("a mutation is accepted from the quick tunnel only when Origin's host is th
     assert.equal(forged.status, 403, "another site's Origin against our Host is refused");
 
     const missing = await mutate(app.url, "/api/walks/start", {
-      host: tunnelHost,
+      host: proxyHost,
       cookie: app.cookies.owner,
       body: {},
       headers: { "Idempotency-Key": "security-origin-none" },
@@ -372,18 +374,18 @@ test("a mutation is accepted from the quick tunnel only when Origin's host is th
     // copy-paste slip at one of them would pass the walks-start case above, so the
     // route that mints a credential is exercised too.
     const inviteAccepted = await mutate(app.url, "/api/invites", {
-      host: tunnelHost,
-      origin: `https://${tunnelHost}`,
+      host: proxyHost,
+      origin: `https://${proxyHost}`,
       cookie: app.cookies.owner,
-      body: { displayName: "Tunnel Guest" },
+      body: { displayName: "Proxy Guest" },
     });
     assert.ok(
       inviteAccepted.status === 200 || inviteAccepted.status === 201,
-      `an invite from the tunnel origin is accepted (got ${inviteAccepted.status})`,
+      `an invite from the proxy origin is accepted (got ${inviteAccepted.status})`,
     );
 
     const inviteForged = await mutate(app.url, "/api/invites", {
-      host: tunnelHost,
+      host: proxyHost,
       origin: "https://evil.example",
       cookie: app.cookies.owner,
       body: { displayName: "Forged" },

@@ -208,10 +208,10 @@ test("a spawn error with no exit is treated as a failed attempt, not silence", a
 
   supervisor.start();
   // Only `error`, never `exit` — exactly what ENOENT does.
-  children[0]!.emit("error", Object.assign(new Error("spawn cloudflared ENOENT"), { code: "ENOENT" }));
+  children[0]!.emit("error", Object.assign(new Error("spawn pupkeep-server ENOENT"), { code: "ENOENT" }));
 
   assert.equal(attempts, 1, "a failed spawn must be scheduled for a retry");
-  assert.deepEqual(errors, ["spawn cloudflared ENOENT"], "and the reason must be reported");
+  assert.deepEqual(errors, ["spawn pupkeep-server ENOENT"], "and the reason must be reported");
   assert.equal(timers.length, 1);
 
   timers[0]!();

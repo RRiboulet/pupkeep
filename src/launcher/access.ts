@@ -1,10 +1,10 @@
 // Access modes: which address the server binds, and what URL to tell the owner
-// about. Two rules from Phase 0 are encoded here rather than documented and
-// hoped for:
+// about. Two rules are encoded here rather than documented and hoped for:
 //
-//   * tailscale mode fails closed. If no tailnet address is present the launcher
-//     refuses to start — it never falls back to 0.0.0.0 (P0-03's scratch server
-//     proved why: the LAN address is reachable, the tailnet one is private).
+//   * a mode that cannot be honoured fails closed. Phase 6 retired the
+//     `tailscale` and `cloudflare` modes entirely (P6-08): an unknown mode is
+//     refused, never approximated — the same rule the old tailscale mode applied
+//     to a missing address (never fall back to 0.0.0.0).
 //   * only an explicit `lan` opens every interface, and it says so.
 
 import { isCgnatAddress, isPrivateAddress } from "../shared/public-origin.ts";
@@ -15,7 +15,7 @@ import { isCgnatAddress, isPrivateAddress } from "../shared/public-origin.ts";
 // need "is this RFC1918?" should not have to import the deployment contract.
 export { isCgnatAddress, isPrivateAddress };
 
-export const ACCESS_MODES = ["local", "lan", "public", "tailscale", "cloudflare"] as const;
+export const ACCESS_MODES = ["local", "lan", "public"] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
 
 /**
@@ -39,7 +39,7 @@ export interface InterfaceAddress {
 export interface BindPlan {
   mode: AccessMode;
   bindHost: string;
-  /** What the owner opens. For `cloudflare` this is filled in once the tunnel is up. */
+  /** What the owner opens. */
   displayUrl?: string;
   /**
    * The configured public origin, for `public`. It is the origin the owner link
@@ -53,38 +53,14 @@ export interface BindPlan {
 
 export type AccessResult = { ok: true; plan: BindPlan } | { ok: false; reason: string };
 
-/** 100.64.0.0/10 — the shared address space Tailscale uses. */
-export function isTailscaleAddress(address: string): boolean {
-  const parts = address.split(".");
-  if (parts.length !== 4) return false;
-  const first = Number(parts[0]);
-  const second = Number(parts[1]);
-  if (!Number.isInteger(first) || !Number.isInteger(second)) return false;
-  return first === 100 && second >= 64 && second <= 127;
-}
-
-/**
- * The phone's tailnet IPv4 address. Tailscale's Android app puts it on `tun*`;
- * the address family filter matters because the same interface also carries an
- * IPv6 address and a link-local one, and binding those would be a different
- * (and unasked-for) decision.
- */
-export function tailscaleAddress(interfaces: readonly InterfaceAddress[]): string | undefined {
-  for (const iface of interfaces) {
-    if (iface.internal || iface.family !== "IPv4") continue;
-    if (!iface.name.startsWith("tun")) continue;
-    if (isTailscaleAddress(iface.address)) return iface.address;
-  }
-  return undefined;
-}
-
 /** The first non-internal IPv4 address — what a same-Wi-Fi peer would open. */
 export function lanAddress(interfaces: readonly InterfaceAddress[]): string | undefined {
   for (const iface of interfaces) {
     if (iface.internal || iface.family !== "IPv4") continue;
     if (iface.address.startsWith("169.254.")) continue; // link-local, not useful
-    // 100.64/10 is Tailscale's space: a phone with the tailnet up would otherwise
-    // be told its "LAN" address is public and refuse to start (R13's fallback).
+    // 100.64/10 is the CGNAT space a phone's tailnet/VPN interface carries: a
+    // phone with the VPN up would otherwise be told its "LAN" address is public
+    // and refuse to start (R13's offline fallback must keep working).
     if (isCgnatAddress(iface.address)) continue;
     return iface.address;
   }
@@ -199,39 +175,12 @@ export function resolveAccess(
       };
     }
 
-    case "tailscale": {
-      const address = tailscaleAddress(interfaces);
-      if (!address) {
-        return {
-          ok: false,
-          reason:
-            "Tailscale is not connected: no 100.64.0.0/10 address on a tun interface. " +
-            "Start Tailscale (and set Android's Always-on VPN), or choose another --access mode. " +
-            "Refusing to bind 0.0.0.0 instead.",
-        };
-      }
-      return {
-        ok: true,
-        plan: { mode, bindHost: address, displayUrl: `http://${address}:${port}` },
-      };
-    }
-
-    case "cloudflare":
-      // Loopback only: the public side is the tunnel, never the bind.
-      return {
-        ok: true,
-        plan: {
-          mode,
-          bindHost: "127.0.0.1",
-          warning:
-            "The quick tunnel is for HTTPS/PWA/Web Push testing only. Its URL changes on every " +
-            "restart and push subscriptions must be renewed; it is not the daily access path.",
-        },
-      };
-
     default: {
-      const unreachable: never = mode;
-      return { ok: false, reason: `unknown access mode: ${String(unreachable)}` };
+      // Retired modes (`tailscale`, `cloudflare`) and any future typo land here:
+      // a mode that is not in ACCESS_MODES must fail closed, never start a
+      // listener a deleted mode would have configured (P6-08).
+      const unknown: never = mode;
+      return { ok: false, reason: `unknown access mode: ${String(unknown)}` };
     }
   }
 }

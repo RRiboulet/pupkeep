@@ -49,7 +49,7 @@ export const USAGE = `pupkeep — a shared, agent-operated puppy care app
 
 Usage: npm start -- [options]
 
-  --access <mode>     local | lan | public | tailscale | cloudflare   (default: local)
+  --access <mode>     local | lan | public                            (default: local)
   --port <n>          HTTP port                              (default: ${DEFAULT_PORT})
   --data <dir>        data directory                         (default: ~/.pupkeep)
   --boot              non-interactive: write the owner link, never print it
@@ -66,10 +66,11 @@ Environment (deployment): PUPKEEP_PUBLIC_ORIGIN — required by --access public,
 Access modes:
   local       bind 127.0.0.1 — this device only
   lan         bind 0.0.0.0  — explicit opt-in, plain HTTP on the whole network
-  tailscale   bind the tailnet address; refuses to start if Tailscale is down
-  cloudflare  bind 127.0.0.1 and run a quick tunnel for HTTPS/PWA testing
   public      bind every interface inside a container, behind a TLS proxy;
               requires PUPKEEP_PUBLIC_ORIGIN and is the only mode that uses it
+
+Retired modes (P6-08): 'tailscale' and 'cloudflare' are no longer access
+modes; passing either is refused like any unknown value.
 `;
 
 function isMode(value: string): value is AccessMode {

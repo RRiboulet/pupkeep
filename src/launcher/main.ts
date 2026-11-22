@@ -1,22 +1,22 @@
-// Composition: resolve access, take the lock, supervise the server, supervise
-// the tunnel when the mode needs one, and tell the owner where to go.
+// Composition: resolve access, take the lock, supervise the server, and tell
+// the owner where to go.
 //
 // Everything it touches is injectable, because the interesting behaviour — a
-// mode refusing to start, a second instance being turned away, a tunnel URL
-// changing, a boot that must not print a token — is all cheap to test with fakes
-// and expensive to test against a phone.
+// mode refusing to start, a second instance being turned away, a boot that must
+// not print a token — is all cheap to test with fakes and expensive to test
+// against a phone.
 //
 // Ordering is the part that matters and is easy to get wrong: the data-directory
-// lock is released **last**, after both children have actually exited. A launcher
-// that frees the lock while the server still holds its SQLite file hands the next
-// instance a second writer, which is the exact invariant PLAN §3.2 relies on.
+// lock is released **last**, after the server child has actually exited. A
+// launcher that frees the lock while the server still holds its SQLite file
+// hands the next instance a second writer, which is the exact invariant PLAN
+// §3.2 relies on.
 
 import { spawn } from "node:child_process";
 import { networkInterfaces } from "node:os";
 import type { LauncherOptions } from "./options.ts";
 import { lanAddress, resolveAccess, type AccessMode, type BindPlan, type InterfaceAddress } from "./access.ts";
 import { Supervisor, type ChildLike, type ExitInfo } from "./supervisor.ts";
-import { detectTermux, parseTunnelUrl, tunnelCommand, tunnelChanged, type TunnelCommand } from "./tunnel.ts";
 import { announceOwnerLink, type AnnounceResult } from "./owner.ts";
 import { dataStores, ensureDataDir, ownerLinkPath, type DataDir } from "../server/config.ts";
 import { Auth } from "../server/auth.ts";
@@ -38,19 +38,9 @@ export interface LauncherDeps {
   ) => Promise<{ link: string; minted: boolean } | "no-origin" | undefined>;
   /** The server program. Missing until P1-07 lands, which is reported, not guessed. */
   serverEntry?: { command: string; args: string[] };
-  /** True on the phone: the tunnel needs the termux-chroot wrapper. Auto-detected. */
-  termux?: boolean;
-  cloudflaredBinary?: string;
   log?: (line: string) => void;
   out?: (text: string) => void;
   now?: () => number;
-  /** The public origin appeared or changed (cloudflare mode). */
-  onTunnelUrl?: (url: string) => void;
-  /**
-   * How long a fresh `cloudflare` start waits for the tunnel's URL before it can
-   * mint an owner link. Injected so tests do not wait in real time.
-   */
-  tunnelUrlTimeoutMs?: number;
   /** Supervision gave up; the caller should exit non-zero so its supervisor restarts it. */
   onFatal?: (reason: string) => void;
 }
@@ -65,26 +55,17 @@ export interface StartResult {
 }
 
 // 0 ok, 2 access refused, 3 another instance holds the lock, 4 the server program
-// is missing, 5 the data directory or lock failed for a real reason, 6 no origin
-// exists to mint an owner link for.
+// is missing, 5 the data directory or lock failed for a real reason.
 const EXIT_ACCESS = 2;
 const EXIT_LOCKED = 3;
 const EXIT_NO_SERVER = 4;
 const EXIT_DATA_DIR = 5;
-const EXIT_NO_ORIGIN = 6;
-
-/**
- * Long enough for a slow tunnel registration — the pinned cloudflared printed its
- * banner about 5 s after start — and short enough that a broken tunnel is reported
- * instead of waited on.
- */
-const DEFAULT_TUNNEL_URL_TIMEOUT_MS = 30_000;
 
 export interface LauncherHandle {
   start(): Promise<StartResult>;
   stop(): Promise<void>;
-  urls(): { display?: string; tunnel?: string };
-  state(): { server: ReturnType<Supervisor["state"]>; tunnel?: ReturnType<Supervisor["state"]> };
+  urls(): { display?: string };
+  state(): { server: ReturnType<Supervisor["state"]> };
 }
 
 export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}): LauncherHandle {
@@ -99,69 +80,32 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
     ((command, args, env) =>
       spawn(command, args, {
         stdio: ["ignore", "pipe", "pipe"],
-        // Detached so the supervisor can signal the whole group: on the phone the
-        // tunnel's direct child is `termux-chroot`, and killing only that would
-        // orphan a live cloudflared.
+        // Detached so the supervisor can signal the whole group: the server child
+        // is plain node today, but a wrapper between them must not survive a
+        // signal aimed at the supervisor.
         detached: true,
         env: { ...process.env, ...env },
       }) as unknown as ChildLike);
 
   let server: Supervisor | undefined;
-  let tunnel: Supervisor | undefined;
   let lock: LockHandle | undefined;
-  let tunnelUrl: string | undefined;
   let bindPlan: BindPlan | undefined;
   let starting: Promise<StartResult> | undefined;
   let failing = false;
 
-  // cloudflared announces the tunnel asynchronously, and a fresh `cloudflare`
-  // start must know the origin *before* it mints (the server will not boot
-  // ownerless, so there is no later chance to mint). The URL is an output line, so
-  // the wait is one deferred settled by that line — never a poll. One slot, not a
-  // list: `start()` is memoised, so a launcher never waits twice.
-  let tunnelUrlWaiter: { resolve: (url: string | undefined) => void; timer: ReturnType<typeof setTimeout> } | undefined;
   let stopping = false;
   let stoppingDone: Promise<void> | undefined;
 
-  function settleTunnelWait(url: string | undefined): void {
-    const waiter = tunnelUrlWaiter;
-    if (!waiter) return;
-    tunnelUrlWaiter = undefined;
-    clearTimeout(waiter.timer);
-    waiter.resolve(url);
-  }
-
-  function awaitTunnelUrl(timeoutMs: number): Promise<string | undefined> {
-    if (tunnelUrl) return Promise.resolve(tunnelUrl);
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        tunnelUrlWaiter = undefined;
-        resolve(undefined);
-      }, timeoutMs);
-      tunnelUrlWaiter = { resolve, timer };
-    });
-  }
-
   /**
-   * Children first, lock last (see the header), and only once: a tunnel give-up
-   * during the owner wait races the wait's own failure path, and a signal can add
-   * a third caller. `stopping` is also how the wait tells a stop from a timeout.
+   * Child first, lock last (see the header), and only once: a signal can add a
+   * second caller while the first stop is still running.
    */
   function stop(): Promise<void> {
     if (stoppingDone) return stoppingDone;
     stopping = true;
-    // A start waiting for the tunnel's URL must not hang on a stop: the wait ends
-    // with "no URL", the same answer as a timeout.
-    settleTunnelWait(undefined);
     stoppingDone = (async () => {
-      await tunnel?.stop();
       await server?.stop();
-      tunnel = undefined;
       server = undefined;
-      // The origin belonged to the tunnel that just stopped: a handle that were
-      // ever started again must not mint onto it (`start()` is one-shot today, so
-      // this only keeps the lifetime honest).
-      tunnelUrl = undefined;
       if (lock) {
         await lock.release();
         lock = undefined;
@@ -186,14 +130,12 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
     stop,
 
     urls() {
-      if (tunnelUrl) return { display: tunnelUrl, tunnel: tunnelUrl };
       return bindPlan?.displayUrl ? { display: bindPlan.displayUrl } : {};
     },
 
     state() {
       return {
         server: server?.state() ?? { running: false, stopping: false, attempts: 0, restarts: 0 },
-        ...(tunnel ? { tunnel: tunnel.state() } : {}),
       };
     },
   };
@@ -252,96 +194,23 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
       return { ok: false, code: EXIT_DATA_DIR, message: reason, plan, dataDir: dataDir.path };
     }
 
-    // The tunnel is one child started from one place, even though a fresh
-    // `cloudflare` start needs it *before* the mint: it only forwards to loopback,
-    // so it does not need the server to exist yet.
-    const startTunnel = (): void => {
-      if (tunnel) return;
-      const command: TunnelCommand = tunnelCommand({
-        port: options.port,
-        binary: deps.cloudflaredBinary ?? `${dataDir.path}/bin/cloudflared`,
-        termux: deps.termux ?? detectTermux(),
-      });
-      tunnel = new Supervisor({
-        name: "tunnel",
-        spawn: () => spawnChild(command.command, command.args, command.env),
-        onOutput: (line, stream) => {
-          const url = parseTunnelUrl(line);
-          if (url) {
-            if (tunnelChanged(tunnelUrl, url)) {
-              log(
-                `the quick tunnel restarted with a new URL (${tunnelUrl} → ${url}); ` +
-                  "PWA installs and push subscriptions on the old origin are dead",
-              );
-            }
-            tunnelUrl = url;
-            deps.onTunnelUrl?.(url);
-            settleTunnelWait(url);
-          }
-          if (stream === "stderr" && !url) log(line);
-        },
-        onError: (error) => log(`tunnel could not start: ${error.message}`),
-        onRestart: ({ attempt, delayMs, lastExit }) =>
-          log(`${describeExit("tunnel", lastExit)}; restart ${attempt} in ${delayMs} ms`),
-        onGiveUp: ({ attempts }) => {
-          // Only reachable when the wait outlives the restart budget (10 attempts,
-          // ~180 s, against a 30 s default): it exists so a longer configured wait
-          // still ends instead of hanging.
-          settleTunnelWait(undefined);
-          fatal(`tunnel gave up after ${attempts} restarts`);
-        },
-        ...(deps.now ? { now: deps.now } : {}),
-      });
-      tunnel.start();
-    };
-
     // Owner mint runs before the server exists: the sign-in link is the trust
     // root and `--reissue-owner` must work even when the server program is
     // missing (P1-06). Only a mint or reissue writes the file.
     let ownerLink: AnnounceResult | undefined;
     const mint = deps.mintOwnerLink ?? defaultMintOwnerLink;
     try {
-      // The origin the owner will actually open. Minting before the tunnel exists
-      // would otherwise print a loopback URL nobody can reach, and the cookie is
-      // origin-scoped, so it cannot be corrected later.
-      let origin = tunnelUrl ?? plan.origin ?? plan.displayUrl;
-      let minted = await mint(dataDir.path, origin, options.reissueOwner);
-      if (minted === "no-origin" && mode === "cloudflare") {
-        // A fresh `cloudflare` start has no origin at all, so this used to be an
-        // ownerless server that refused to boot and crash-looped (P5-01b,
-        // Finding 4). Start the tunnel, wait for the URL it announces, and mint on
-        // that origin — the same wait `--reissue-owner` needs on an existing owner,
-        // which refuses rather than booting on the old token and saying nothing.
-        const timeoutMs = deps.tunnelUrlTimeoutMs ?? DEFAULT_TUNNEL_URL_TIMEOUT_MS;
-        log(
-          `cloudflare mode: waiting up to ${timeoutMs} ms for the quick tunnel's URL ` +
-            "before minting the owner link",
-        );
-        startTunnel();
-        origin = await awaitTunnelUrl(timeoutMs);
-        if (origin) minted = await mint(dataDir.path, origin, options.reissueOwner);
-        if (minted === "no-origin") {
-          // Refusing here beats starting a server that will refuse to boot and be
-          // restarted ten times: the operator gets one sentence and the reason.
-          // A stop is not a tunnel defect, so it is not reported as one.
-          const message = stopping
-            ? "stopped while waiting for the quick tunnel's URL; no owner link was minted"
-            : origin
-              ? `no owner link was minted for ${origin}: the mint reported no origin for it. ` +
-                "Start again, or mint one with --reissue-owner."
-              : `no owner link can be minted: the quick tunnel reported no URL within ${timeoutMs} ms, ` +
-                "so there is no origin to mint one for. Fix the tunnel first (its own log lines are above), " +
-                "then start again — or start once with --access local and rotate onto the tunnel origin " +
-                "with --reissue-owner.";
-          log(stopping ? message : `fatal: ${message}`);
-          await stop();
-          return { ok: false, code: EXIT_NO_ORIGIN, message, plan, dataDir: dataDir.path };
-        }
-      }
+      // The origin the owner will actually open: the mint and the session cookie
+      // are origin-scoped, so they cannot be corrected after the fact.
+      const origin = plan.origin ?? plan.displayUrl;
+      const minted = await mint(dataDir.path, origin, options.reissueOwner);
       if (minted === "no-origin") {
+        // Only a mode with no URL to print can get here (`lan` with no usable
+        // address). A loopback-less link is a credential nobody can use, so
+        // nothing is minted; the sentence names the way out.
         log(
-          "the tunnel URL is not known yet, so no owner link can be printed for this origin. " +
-            "Run --reissue-owner once the tunnel is up.",
+          "no origin is known for this mode, so no owner link can be printed. " +
+            "Run --reissue-owner once the server is reachable on a real address.",
         );
       } else if (minted) {
         ownerLink = await announceOwnerLink({
@@ -409,9 +278,6 @@ export function createLauncher(options: LauncherOptions, deps: LauncherDeps = {}
     });
     server.start();
 
-    // A fresh `cloudflare` start has already started it to learn the origin.
-    if (mode === "cloudflare") startTunnel();
-
     if (mode === "lan") {
       const address = lanAddress(interfaces);
       if (address) log(`LAN peers should open http://${address}:${options.port}`);
@@ -447,8 +313,8 @@ async function defaultMintOwnerLink(
   await auth.pruneInvites();
 
   if (config.ownerTokenHash !== null && !reissue) return undefined;
-  // No origin means no printable link: a loopback URL in `owner-link.txt` is a
-  // credential nobody can use.
+  // No origin means no printable link: a URL in `owner-link.txt` that no browser
+  // can open is a credential nobody can use.
   if (!origin) return "no-origin";
 
   const { link } = await auth.mintOwner(origin);
@@ -456,9 +322,8 @@ async function defaultMintOwnerLink(
 }
 
 /**
- * One restart line for both children. The server's version is what told the
- * operator the child had been SIGKILLed in P5-01b's matrix; the tunnel's printed
- * only `tunnel restart 3 in 4000 ms`, so the cause was invisible (Finding 4).
+ * One restart line for the server child. The server's version is what told the
+ * operator the child had been SIGKILLed in P5-01b's matrix.
  */
 function describeExit(name: string, info: ExitInfo): string {
   return (

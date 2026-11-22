@@ -92,7 +92,7 @@ export const TRUSTED_PROXY_REQUIRED =
  * Validate `PUPKEEP_TRUSTED_PROXY`.
  *
  * Required with an origin (see `TRUSTED_PROXY_REQUIRED`), optional without one:
- * `local`, `lan` and `tailscale` never read forwarded headers, so an absent
+ * `local` and `lan` never read forwarded headers, so an absent
  * address is simply "ignore them". A present-but-malformed value is refused in
  * every mode — a hostname or a `host:port` would never equal a peer address,
  * which is the same silent no-match this check exists to prevent.
