@@ -21,8 +21,8 @@ if (options.help) {
 
 const launcher = createLauncher(options, {
   // The server is a separate process on purpose: the launcher can then restart
-  // a failed harness without touching the tunnel, and the server's own lock
-  // (`server.pid`) survives a launcher crash. Same Node binary, no shell.
+  // a failed harness, and the server's own lock (`server.pid`) survives a
+  // launcher crash. Same Node binary, no shell.
   serverEntry: {
     command: process.execPath,
     args: [fileURLToPath(new URL("./server.js", import.meta.url))],
@@ -32,11 +32,6 @@ const launcher = createLauncher(options, {
   // crash-looped is indistinguishable from a clean stop. The launcher has
   // already stopped its children and released the lock when this runs.
   onFatal: () => process.exit(1),
-  termux: process.env.PUPKEEP_TERMUX === "1",
-  // The quick tunnel's hostname only exists once cloudflared has registered, and
-  // it changes on every restart. Without this the operator is left hunting for
-  // the URL the runbook tells them to open; the URL is public, not a secret.
-  onTunnelUrl: (url) => process.stderr.write(`pupkeep: quick tunnel at ${url}\n`),
 });
 
 let stopping = false;
