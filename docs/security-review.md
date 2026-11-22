@@ -8,6 +8,14 @@ artifact named. **Nothing below is a checklist tick**: where a claim has a test,
 there is a test name; where only a code read can settle it, the section says why
 and does not pretend otherwise.
 
+**The tunnel and the tailnet this review examined were deleted afterwards
+(`P6-08`).** The findings stand as the record of the code at this commit: the
+`cloudflare` mode, its loopback trust and the `CF-Connecting-IP` read are gone,
+and the tailnet HTTP origin is gone as an access mode. The auth, matrix, origin,
+log-scrub, agent-escape and backup findings still describe the current code unless
+a later task says otherwise, and the proxy-trust rule was re-cut by `P6-02`
+(`PUPKEEP_TRUSTED_PROXY`, rightmost values).
+
 The executable half lives in [`../test/security.test.ts`](../test/security.test.ts);
 the rest names the suite that already proved the claim. No secret, link, token or
 cookie appears in this document.
@@ -187,16 +195,20 @@ that lists a control which does not exist is worse than one that lists fewer.
 
 ## Accepted risks, restated for the release
 
-These are PLAN §14.4's, unchanged, and none of them is an accident:
+These are PLAN §14.4's, unchanged, and none of them is an accident. **Read them
+as of the review's commit:** the tailnet daily path and the Cloudflare quick
+tunnel were deleted with their modes (`P6-08`); the public origin, its single
+proxy hop and the LAN fallback are the current front doors.
 
-- Any device on the tailnet can reach the port; the app's auth still applies.
-  Tailscale ACL hardening is a later, optional step.
-- Daily access is **HTTP** over WireGuard: no service worker, no PWA install, no
-  Web Push. Encrypted in transit, but no browser secure context.
+- The public origin is the single front door; only Caddy reaches the app, and the
+  proxy trust is correct for exactly one appending hop (PLAN §6.10).
+- The retired tailnet daily access was **HTTP** over WireGuard: no service worker,
+  no PWA install, no Web Push. That limit is gone with the mode, and HTTPS on the
+  origin is what bought Web Push.
 - `lan` mode is plain HTTP on every interface, with a launcher warning and a
   caretaker's choice behind it.
-- The Cloudflare quick tunnel is for HTTPS/PWA/push testing only; its URL changes
-  on every restart and Cloudflare can see its traffic.
+- The retired Cloudflare quick tunnel was for HTTPS/PWA/push testing only; its URL
+  changed on every restart and Cloudflare could see its traffic.
 - ntfy.sh sees the topic and the category-only message (no names, no notes).
 - Either caregiver can confirm or decline an approval: a trusted pair, with the
   requester shown in the card.
@@ -205,18 +217,20 @@ These are PLAN §14.4's, unchanged, and none of them is an accident:
 
 ## Follow-ups this review leaves behind
 
-1. **P5-09** — known limitations: member recovery is an operator procedure, the
-   quick tunnel is testing-only, and `lan` is plain HTTP.
+1. **P5-09** — known limitations: member recovery is an operator procedure and
+   `lan` is plain HTTP. (P5-09 landed; the quick-tunnel row went with the mode.)
 2. **P5-08** — deploy notes: keep the VPS reverse proxy on loopback (§F4), and do
-   not print a token in release output.
+   not print a token in release output. (P5-08 landed; the box's proxy trust is
+   `P6-02`'s.)
 3. **Backlog** — a `--reset-member` CLI that performs the §F2 procedure inside the
    app (purge push first, then mark removed, then re-invite), so the operator does
    not edit `config.json` by hand.
 4. **P5-09** — cheap cleanups this review did not take: consolidate the four
    inlined origin checks into one helper, and decide whether to close the tool
-   schemas (§F7).
-5. **P0-10** — the device legs: the tunnel mutation from a real browser, the
-   partner's iPhone, and Termux:API notifications in anger.
+   schemas (§F7). (The origin check was consolidated by `P6-02`.)
+5. **P0-10** — the device legs that remain: the partner's iPhone Web Push receipt
+   on the public origin, and ntfy in anger. The tunnel mutation and the host's
+   Termux:API notification are gone with their code (`P6-08`).
 
 ## How to re-run this review
 

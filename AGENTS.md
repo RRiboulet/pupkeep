@@ -31,13 +31,14 @@ What Phase 5 landed, and where the record is:
   pick. The cipher now writes `<name>.partial` and renames after verification. A
   clean-host restore, the Docker/VPS leg and a schedule are still open.
 - **P5-04 — the phone scripts.** `scripts/termux-install.sh` upgrades the index
-  before installing, refuses a `node` that cannot link, pins cloudflared and
-  writes the boot wrapper and the optional supervised tunnel; `termux-boot.sh`
-  writes the boot line, takes a wake lock and **waits for the tailnet** (180 s,
-  `PUPKEEP_BOOT_TAILNET_WAIT`) instead of giving up at the first refusal;
-  `termux-sshd.sh` binds the tailnet address and loopback only; `termux-tunnel.sh`
-  refuses an alias that would starve it and prints the exit status of a dead
-  tunnel.
+  before installing, refuses a `node` that cannot link, installs the package
+  allowlist and writes the boot wrapper and the optional supervised tunnel;
+  `termux-boot.sh` writes the boot line, takes a wake lock and starts the
+  launcher; `termux-sshd.sh` binds the tailnet address and loopback only;
+  `termux-tunnel.sh` refuses an alias that would starve it and prints the exit
+  status of a dead tunnel. **Revised by P6-08:** the installer no longer fetches
+  `cloudflared`, and the boot script starts `--access lan` and no longer waits
+  for the tailnet (see Phase 6 below).
 - **P5-06 — the security review**, [`docs/security-review.md`](docs/security-review.md)
   and `test/security.test.ts` (thirteen adversarial attempts, plus the
   agent-escape allowlist over tools and named imports).
@@ -58,9 +59,26 @@ What Phase 5 landed, and where the record is:
   phone's fonts and font-size slider) is still open, as is the partner's iPhone
   (P0-10).
 
-What is open is device-gated (P5-01b's reboot, P5-03's second client, P5-05's
-day-long run, P5-10's phone leg, P0-10's partner checks) or blocked on a host we
-do not have (P5-02's clean-host and Docker legs).
+What is open is device-gated (P5-03's second client, P5-05's day-long run,
+P5-10's phone leg, P0-10's partner checks, the fallback's boot path since
+`P6-08`) or blocked on a host we do not have (P6-09's box, the clean-host restore
+and `P6-10`'s 7-day run).
+
+**Phase 6 moved the host off the phone, and `P6-08` finished the retirement.**
+The household's daily server is the Oracle arm64 box behind Caddy on
+`https://pupkeep.duckdns.org` (PLAN §2.1, §6; the operator's sequence is
+`deploy/README.md`); the phone is a browser and an offline fallback that starts
+`--access lan` on the household LAN. `ACCESS_MODES` is `local | lan | public`:
+`tailscale` and `cloudflare` are refused as unknown modes, `src/launcher/tunnel.ts`
+is deleted, the boot-time tailnet wait and the installer's `cloudflared` fetch are
+gone, and the Termux:API notification transport is deleted — notifications are
+in-app (authoritative) + Web Push + optional per-user ntfy. What P6-08 deliberately
+left: `test/devcontainer.test.ts` and `.devcontainer/*` still pin `cloudflared`
+for the dev container's own HTTPS testing, and `scripts/termux-sshd.sh` /
+`scripts/termux-tunnel.sh` remain operator tooling that still needs Tailscale —
+they no longer share a rule with the launcher, which has no tailnet code left.
+The box has **not** been built, deployed or reached through Caddy; that is `P6-09`
+and `P6-10`, and nothing here claims otherwise.
 
 The agent can only *propose* an appointment or meal-schedule change; a
 caregiver's confirmation route executes the stored action in one commit. The
@@ -74,7 +92,9 @@ The partner-delivery claim is gated on P0-10 and is unproven. G1's host-side cri
 `test/e2e.test.ts` and `test/setup.test.ts`.
 The devcontainer is `.devcontainer/` (Node 24, pi `1.5.0`,
 sqlite3/cloudflared/rclone/tmux/gh, plus the host tools); `postCreate.sh` runs
-`npm ci`, typecheck and the tests. The image bakes `my-agent-setup` at the tag
+`npm ci`, typecheck and the tests. Its `cloudflared` is the dev container's own
+HTTPS-testing tool (`P6-08` left it there deliberately), never part of the phone
+runtime. The image bakes `my-agent-setup` at the tag
 in `.devcontainer/pi-agent-setup.version`, and `postCreate.sh` declares that
 baked path in the container's personal settings — never in this repo's
 `.pi/settings.json`.
@@ -96,12 +116,15 @@ the running image carries a different tag than the checkout pins.
 
 ## Shape
 
-- **Host:** Android phone → Termux → Node 24 → Pupkeep server → browser/PWA.
+- **Host:** the Oracle arm64 box (Docker Compose: `pupkeep` + `caddy`) runs the
+  household's server behind Caddy on `https://pupkeep.duckdns.org`. The phone is
+  a browser client and an offline fallback (`--access lan` on the household LAN).
   No APK, no Android SDK, no pidabl, no embedded rootfs.
-- **Access:** Tailscale is the daily path (HTTP, no PWA/Web Push); a Cloudflare
-  quick tunnel is for HTTPS/PWA/Web Push testing only; a named tunnel waits for
-  a domain. Daily notifications: in-app, host Termux:API, and a recommended
-  per-user ntfy topic for the partner.
+- **Access:** one configured public HTTPS origin (`public` mode); `local` for the
+  devcontainer and drills; `lan` for the fallback. The old Tailscale daily path
+  and Cloudflare quick tunnel were deleted with their modes (`P6-08`).
+  Notifications: in-app (authoritative) + Web Push (daily) + optional per-user
+  ntfy; the Termux:API transport is deleted.
 - **Runtime:** Pi Durable `1.4.0` for conversations, tasks, tools, documents and
   SQLite storage. Pin exact versions.
 - **Client:** no build step; plain ES modules + Preact/htm, served by the same
@@ -131,13 +154,14 @@ the running image carries a different tag than the checkout pins.
 - The agent must not receive shell, filesystem, browser or network tools.
 - Do not add native modules to the phone runtime. `node:sqlite` only.
 - Do not run SQLite on the Windows/9p workspace mount. Use `/tmp` or a volume in
-  development, and the phone's internal storage in production.
+  development, and the box's data directory in production (the phone's internal
+  storage, if it runs the fallback).
 - A backup archive carries its real name only **after** it has been decrypted and
   seq-checked: the job writes `<name>.partial` and renames. A killed run may leave
   a `.partial` and a `.staging-*` directory holding the **plaintext** bundle
   (including the VAPID private keys) until the next run sweeps it — which is one
-  reason the job needs a schedule (open, P5-04), and why that staging directory is
-  0700 inside a 0700 parent.
+  reason the box runs the job on a timer (`deploy/systemd/`, `P6-09`), and why
+  that staging directory is 0700 inside a 0700 parent.
 - Keep Pi Pocket, Pi Durable and other upstream notices in `NOTICE.md` and
   beside copied files.
 
@@ -153,7 +177,8 @@ A release is: set the version in `package.json`, turn `CHANGELOG.md`'s
 above it, merge through a PR, let CI on `main` pass, then create an **annotated**
 tag on that commit and a GitHub release whose notes are the changelog section
 (`gh release create --notes-file`, never inline — inline markdown's backticks get
-executed by the shell). Deploy the **tag** to the phone (`docs/DEPLOY.md`), never
+executed by the shell). Deploy the **tag** to the box (`docs/DEPLOY.md` and
+`deploy/README.md`) and, if the household runs the fallback, to the phone, never
 a branch. A tag goes on a commit whose typecheck, suite and devcontainer build
 passed; `v0.1.0` did.
 
@@ -176,24 +201,27 @@ npm run restore -- ... # restore one archive; the server must be stopped
 stream and the PWA shell. The client needs no build step: `web/vendor/` holds
 pinned Preact/htm ES modules that `test/vendor.test.ts` verifies against
 `NOTICE.md`. `scripts/termux-install.sh` and `scripts/termux-boot.sh` are the
-phone's entry points; `docs/DEPLOY.md` is how a tag gets there.
+phone's entry points; `docs/DEPLOY.md` is how a tag gets to the box and the
+fallback.
 
 The development pi agent (the one reading this file) has shell and file tools.
 The **product** agent must never: it gets app tools only — no shell, filesystem,
 browser, network or SQL. Adding a general-purpose tool to it is a security defect.
 
-On the phone:
+On the phone (the offline fallback):
 
 ```bash
 git clone <repo> ~/pupkeep && cd ~/pupkeep
-./scripts/termux-install.sh          # packages, cloudflared, npm ci, boot wrapper
-~/pupkeep-start.sh --access tailscale --port 8791
-# HTTPS/PWA/push testing only: npm start -- --access cloudflare --data ~/.pupkeep
+./scripts/termux-install.sh          # packages, npm ci, boot wrapper
+~/pupkeep-start.sh --access lan --port 8791
 ```
 
-Deploying a release is `git checkout v0.1.0` + restart, not the installer (the
-installer upgrades the whole device); `docs/DEPLOY.md` has the exact sequence,
-including why the daily port is 8791 and not 8787.
+The boot script starts `--access lan` and does not wait for a tailnet. Tailscale
+on the phone is operator tooling only (`scripts/termux-sshd.sh`,
+`scripts/termux-tunnel.sh`), not an access mode. Deploying a release is
+`git checkout v0.1.0` + restart, not the installer (the installer upgrades the
+whole device); `docs/DEPLOY.md` has the exact sequence, including why the
+fallback port is 8791 and not 8787.
 
 ## When in doubt
 

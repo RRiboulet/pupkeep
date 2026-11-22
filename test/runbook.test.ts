@@ -9,10 +9,21 @@ import { spawnSync } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { isTailscaleAddress } from "../src/launcher/access.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const read = (path: string): Promise<string> => readFile(join(ROOT, path), "utf8");
+
+/**
+ * 100.64.0.0/10, the same shape `scripts/termux-sshd.sh` re-derives for its own
+ * bind decision. The launcher's copy of this predicate is gone with the retired
+ * `tailscale` mode (P6-08); the sshd script is operator tooling and keeps its
+ * own range check, which this test pins independently of any launcher code.
+ */
+function isTailnetAddress(address: string): boolean {
+  const match = /^(\d+)\.(\d+)\./.exec(address);
+  if (!match) return false;
+  return match[1] === "100" && Number(match[2]) >= 64 && Number(match[2]) <= 127;
+}
 
 const SCRIPTS = [
   "scripts/termux-install.sh",
@@ -38,7 +49,10 @@ test("the boot script runs the launcher through --boot and logs into the data di
   const boot = await read("scripts/termux-boot.sh");
   // `--boot` and a non-TTY stdout are both required; either alone is one edit
   // away from a boot that writes the owner token into server.log (PLAN §6.3).
-  assert.match(boot, /--access tailscale/, "the boot path is the daily tailscale mode");
+  // The mode is `lan` (P6-08): plain HTTP on the household LAN, with the
+  // launcher's RFC1918 guard as the fail-closed safety net.
+  assert.match(boot, /--access lan/, "the boot path is the offline LAN fallback");
+  assert.doesNotMatch(boot, /--access (tailscale|cloudflare)/, "the retired modes are gone");
   assert.match(boot, /--boot/);
   assert.match(boot, /server\.log/);
   assert.match(boot, /termux-wake-lock/);
@@ -51,19 +65,13 @@ test("the boot script runs the launcher through --boot and logs into the data di
   // The flags mirror `npm start`'s `--env-file-if-exists=.env`, so the boot path
   // is the same entry point with the same environment file.
   assert.match(boot, /^ {2}--env-file-if-exists=\.env \\$/m);
-  // Operator SSH is attempted but never fatal: a phone with no shell beats a
-  // phone with no care app.
-  // The interpreter is explicit: Termux has no /usr/bin/env, so an exec of the
-  // tracked script relies on a shebang that cannot resolve there (P5-01b).
+  // Operator SSH is attempted but never fatal, and never waited on: the app's
+  // access mode no longer depends on the tailnet (P6-08), so a slow Tailscale
+  // reconnect cannot hold the care app hostage at boot.
   assert.match(boot, /"\$\{BASH:-\$\{PREFIX\}\/bin\/bash\}" "\$REPO_ROOT\/scripts\/termux-sshd\.sh"/);
-  // 2026-11-16: a correct boot line, then the launcher refused 4 s later because
-  // Android had not reconnected Tailscale yet. The wait is what makes a late
-  // tailnet recover without hands; exit 2 is the condition it loops on, and the
-  // give-up path must not require the launcher to explain itself.
-  assert.match(boot, /PUPKEEP_BOOT_TAILNET_WAIT:-/, "the wait is bounded and overridable");
-  assert.match(boot, /-ne 2/, "only 'no tailnet address' is worth waiting for");
-  assert.match(boot, /no tailnet address after %ss, so the app is not started/);
-  assert.match(boot, /^ {2}exit 1$/m, "a wait that runs out starts nothing");
+  assert.match(boot, /sshd not started/, "a failed sshd attempt is logged, not fatal");
+  assert.doesNotMatch(boot, /TAILNET_WAIT/, "the boot-time tailnet wait is gone with the mode");
+  assert.doesNotMatch(boot, /sleep /, "and with it every boot-time polling loop");
 });
 
 test("sshd is started on demand, re-resolves the tailnet address and never binds everything", async () => {
@@ -87,13 +95,13 @@ test("sshd is started on demand, re-resolves the tailnet address and never binds
   assert.match(sshd, /pgrep -x sshd/);
 });
 
-test("the install script pins cloudflared by version and checksum and refuses a non-arm64 host", async () => {
+test("the install script refuses a non-arm64 host and installs only the package allowlist", async () => {
   const install = await read("scripts/termux-install.sh");
-  assert.match(install, /CLOUDFLARED_VERSION=2026\.10\.5/);
-  assert.match(install, /CLOUDFLARED_SHA256_ARM64=[0-9a-f]{64}/);
-  // The checksum is verified, not printed: a bare download would make a rebuild
-  // a different binary (PLAN §5.1 says the same for the devcontainer).
-  assert.match(install, /sha256sum -c -/);
+  // The cloudflared pin is gone with the retired `cloudflare` mode (P6-08); a
+  // re-introduced third-party binary download would be a new decision, not a
+  // forgotten leftover, so its absence is asserted rather than assumed.
+  assert.doesNotMatch(install, /cloudflared/i);
+  assert.doesNotMatch(install, /CLOUDFLARED_/);
   assert.match(install, /aarch64 \| arm64/);
   // The package list is an allowlist, not a search: `cloudflared` does not exist
   // in the Termux repo (P0-03) and nothing else may appear without this test
@@ -108,16 +116,18 @@ test("the install script pins cloudflared by version and checksum and refuses a 
   assert.match(install, /termux-boot\.sh/);
 });
 
-test("the runbook is the operator path: modes, boot, sshd, tunnel wrapper, notifications, backup", async () => {
+test("the runbook is the fallback operator path: three modes, boot, sshd, notifications, backup", async () => {
   const doc = await read("docs/PHONE-RUNBOOK.md");
   for (const needle of [
-    "--access tailscale",
-    "--access cloudflare",
+    "--access lan",
+    "--access local",
+    "public",
     "--reissue-owner",
     "owner-link.txt",
     "scripts/termux-install.sh",
     "scripts/termux-boot.sh",
     "scripts/termux-sshd.sh",
+    "scripts/termux-tunnel.sh",
     "termux-wake-lock",
     "Termux:Boot",
     "ntfy",
@@ -130,12 +140,17 @@ test("the runbook is the operator path: modes, boot, sshd, tunnel wrapper, notif
   }
   // The payload rule that makes a third-party relay acceptable (P0-08).
   assert.match(doc, /category-only/i);
-  // PLAN §6.7's wrapper, verbatim enough that copying it works.
-  assert.match(doc, /SSL_CERT_FILE=\/etc\/tls\/cert\.pem termux-chroot/);
+  // P6-08: the retired modes are named as deleted, never offered as commands,
+  // and the quick tunnel's chroot wrapper is gone with the mode.
+  assert.match(doc, /`--access tailscale`[^.]*deleted|deleted[^.]*`--access tailscale`/);
+  assert.doesNotMatch(doc, /npm start -- --access (tailscale|cloudflare)/);
+  assert.doesNotMatch(doc, /SSL_CERT_FILE=\/etc\/tls\/cert\.pem termux-chroot/);
+  assert.doesNotMatch(doc, /trycloudflare/i);
   // The limits that keep the product honest, stated where an operator will read
-  // them rather than only in the plan.
-  assert.match(doc, /HTTP, not HTTPS|no service worker, no PWA install and no Web Push/);
-  assert.match(doc, /testing only|Testing only/);
+  // them rather than only in the plan: the fallback is HTTP and the box is the
+  // HTTPS path.
+  assert.match(doc, /no service worker, no PWA install and no Web Push/);
+  assert.match(doc, /public origin/);
 });
 
 test("the runbook carries no credential and no real host address", async () => {
@@ -149,9 +164,10 @@ test("the runbook carries no credential and no real host address", async () => {
   // somebody's phone, and a real one cannot be committed by accident.
   assert.doesNotMatch(doc, /\b100\.\d{1,3}\.\d{1,3}\.\d{1,3}:8787/, "use 100.x.y.z in examples");
   assert.match(doc, /100\.x\.y\.z/);
-  // A bare quick-tunnel hostname is a live origin; only the shape belongs here.
-  assert.doesNotMatch(doc, /https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-  assert.match(doc, /https:\/\/<random>\.trycloudflare\.com/);
+  // The tunnel mode is deleted (P6-08), so the runbook carries neither a live
+  // tunnel origin nor a placeholder for one. A bare quick-tunnel hostname was a
+  // live origin when the mode existed; the shape placeholder went with it.
+  assert.doesNotMatch(doc, /trycloudflare/i);
 });
 
 test("every script in scripts/ is listed in the plan's repository layout", async () => {
@@ -163,6 +179,23 @@ test("every script in scripts/ is listed in the plan's repository layout", async
     const name = path.replace("scripts/", "");
     assert.ok(layout.includes(name), `PLAN §4 must list ${path}`);
   }
+});
+
+test("the plan records P6-08 as landed, with what it deleted and deliberately left", async () => {
+  const plan = await read("docs/PLAN.md");
+  const entry = /- \[x\] \*\*P6-08\*\*[\s\S]*?(?=\n- \[)/.exec(plan);
+  assert.ok(entry, "PLAN §16 must tick P6-08");
+  // The deletion itself, and the one mode the fallback keeps.
+  assert.match(entry[0], /local \| lan \| public/);
+  assert.match(entry[0], /--access lan/);
+  assert.match(entry[0], /termux\.ts/);
+  // The two things left on purpose, named so a later cleanup does not "finish"
+  // the retirement by deleting the dev container's HTTPS tool or the operator's
+  // SSH path.
+  assert.match(entry[0], /devcontainer\.test\.ts/);
+  assert.match(entry[0], /operator tooling/);
+  // The plan must not still claim the modes parse "until P6-08".
+  assert.doesNotMatch(plan, /still parses until/);
 });
 
 test("the plan records P1-13 as landed", async () => {
@@ -247,16 +280,16 @@ echo "$!" > "$(awk '$1 == "PidFile" { print $2 }' "$2")"`,
   assert.match(refused.stderr, /Tailscale is not connected/);
   await assert.rejects(rf(join(data, "sshd", "sshd_config")), "no config is written without an address");
 
-  // 1b. The script's rule and the launcher's rule are the same rule. If one is
-  // widened to all of 100/8, this is where it shows: the launcher is the
-  // authority (`src/launcher/access.ts`) and the phone must not disagree.
+  // 1b. The script's range rule is its own now (P6-08 deleted the launcher's
+  // copy), so this pins it in isolation: if it is widened to all of 100/8,
+  // sshd would bind an address outside the tailnet's shared space.
   for (const outside of ["100.63.255.255", "100.128.0.1", "192.168.1.20"]) {
-    assert.equal(isTailscaleAddress(outside), false, `${outside} is not in 100.64.0.0/10`);
+    assert.equal(isTailnetAddress(outside), false, `${outside} is not in 100.64.0.0/10`);
     const refusedOutside = run(outside);
     assert.equal(refusedOutside.status, 2, outside);
     assert.match(refusedOutside.stderr, /Tailscale is not connected/);
   }
-  assert.equal(isTailscaleAddress("100.101.102.61"), true);
+  assert.equal(isTailnetAddress("100.101.102.61"), true);
 
   // 2. Tailscale up: two listeners, the tailnet one and loopback, never a wildcard.
   const started = run("100.101.102.61");
@@ -313,30 +346,29 @@ echo "$!" > "$(awk '$1 == "PidFile" { print $2 }' "$2")"`,
 
 const ACCESS_GUIDE = "docs/access-and-notifications.md";
 
-test("the caregivers' guide covers the daily path, the invite, ntfy and the tunnel test", async () => {
+test("the caregivers' guide covers the public origin, the invite, Web Push, ntfy and the fallback", async () => {
   const doc = await read(ACCESS_GUIDE);
   for (const needle of [
-    // Daily access, and the invite flow the Settings card implements.
-    "tailscale",
-    "100.x.y.z",
+    // The daily origin, and the invite flow the Settings card implements.
+    "https://pupkeep.duckdns.org",
     "Invite your partner",
     "15 minutes",
-    // The three notification paths, with the in-app centre named as the record.
+    // The notification paths, with the in-app centre named as the record.
     "notification centre",
-    "Termux:API",
+    "Web Push",
     "ntfy",
     "128 bits",
-    // The test path and its two limits.
-    "--access cloudflare",
-    "https://<random>.trycloudflare.com",
-    "notifications on this device",
+    // The device step and iOS's gate.
+    "Enable notifications on this device",
     "iOS 16.4",
+    // The fallback, and the two things it cannot carry.
+    "LAN fallback",
+    "no Web Push",
   ]) {
     assert.ok(doc.includes(needle), `the guide must mention ${needle}`);
   }
   // The limits that keep the product honest for a *user* (not only an operator).
-  assert.match(doc, /HTTP, not HTTPS/);
-  assert.match(doc, /testing only|test only|Testing only/i);
+  assert.match(doc, /plain HTTP/);
   assert.match(doc, /no named tunnel/i);
   assert.match(doc, /category-only/i);
   // A decision cannot be taken from a notification; the guide names the Agent
@@ -354,10 +386,11 @@ test("the caregivers' guide carries no credential, topic or real host address", 
   const doc = await read(ACCESS_GUIDE);
   // Same guardrail as the operator runbook: reference secrets by path or shape.
   assert.doesNotMatch(doc, /[?&](token|invite|code)=[A-Za-z0-9_%.-]{4,}/, "no token, invite or code value");
-  assert.doesNotMatch(doc, /\b100\.\d{1,3}\.\d{1,3}\.\d{1,3}:8787/, "use 100.x.y.z in examples");
-  assert.match(doc, /100\.x\.y\.z:8787/);
-  assert.doesNotMatch(doc, /https:\/\/[a-z0-9-]+\.trycloudflare\.com/, "no live tunnel origin");
-  assert.match(doc, /https:\/\/<random>\.trycloudflare\.com/);
+  assert.doesNotMatch(doc, /\b100\.\d{1,3}\.\d{1,3}\.\d{1,3}:8787/);
+  assert.match(doc, /192\.168\.x\.y:8787/, "the LAN example stays a placeholder");
+  // The mode is deleted (P6-08): the guide must not carry a tunnel origin or a
+  // placeholder for one.
+  assert.doesNotMatch(doc, /trycloudflare/i, "no tunnel origin: the mode is gone");
   // An ntfy topic is a bearer secret; the guide must talk about it, never show one.
   assert.doesNotMatch(doc, /\bntfy\.sh\/[A-Za-z0-9_-]{22,}/, "no real ntfy topic");
 });

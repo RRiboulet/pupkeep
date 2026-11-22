@@ -12,11 +12,20 @@ does not do, the DNS timer's real cadence, the backup invocation the unit
 actually runs, the restore advice that no longer names a flag the restore
 script rejects, and the off-box upload check as shipped.
 
-**This change is part one.** It adds `public` mode and makes every other mode
-refuse to start once an origin is configured; it does **not** delete `tailscale`
-and `cloudflare`, retire the Termux transport or rewrite the phone scripts. That
-deletion is a later slice (`P6-08` in the plan), and until it lands both modes
-still parse and the fallback host still starts `tailscale`.
+Revision 4 (2026-11-21): **`P6-08` landed.** The retired `tailscale`/`cloudflare`
+modes, the tailnet detection and boot wait, the tunnel module and URL wait and
+the Termux notification transport are deleted, `scripts/termux-boot.sh` starts
+`--access lan`, and the installer no longer fetches `cloudflared`. R2's rejection
+rows, R6's transport removal and R13/R14's script/doc/test rewrites are met at
+the **test level** (`access`, `options`, `outbox`, `runbook`, `termux-scripts` and
+`security` tests, 940 green); no phone walk has re-run them. The box-dependent
+rows below are still the operator's legs and are untouched by this revision.
+
+**The design was built in two slices.** The first added `public` mode and made
+every other mode refuse to start once an origin was configured; `P6-08` then
+deleted the old path. What the design says about `tailscale`/`cloudflare` as
+future deletions is therefore implemented history; the rest of the narrative is
+kept as revision 2/3 wrote it.
 
 Two limits stated where they are load-bearing rather than discovered later:
 **the off-box copy is proved by a size gate and then a sha256 of the object read
@@ -420,13 +429,13 @@ places there. The plan update records the addition.
 
 ## Acceptance criteria
 
-**Two kinds of box are unticked for different reasons, and part one does not
-close them.** Everything that needs the box (R0, R1, R7's unattended run, R8's
-report, R9, R10, R11's host pull, the restore drill) is the operator's leg and
-has not been run from this repository. The items that need the **deletion**
-slice — R2's rejection of `tailscale`/`cloudflare`, R6's removal of the Termux
-transport, R13's rewritten scripts and R14's rewritten docs assertions — are
-`P6-08`'s and are not met here; part one retires the modes at runtime instead.
+**Two kinds of box are unticked for different reasons.** Everything that needs
+the box (R0, R1, R7's unattended run, R8's report, R9, R10, R11's host pull, the
+restore drill) is the operator's leg and has not been run from this repository.
+The deletion slice's rows — R2's rejection of `tailscale`/`cloudflare`, R6's
+removal of the Termux transport, R13's rewritten scripts and R14's rewritten docs
+assertions — are met at the test level by `P6-08` and are ticked below with that
+caveat; none of them has been re-walked on a phone.
 
 - [ ] R0 — a page served by a temporary listener on 80 and on 443 arrived on a
   phone using mobile data; the listeners were removed. If it did not, no other
@@ -440,9 +449,11 @@ transport, R13's rewritten scripts and R14's rewritten docs assertions — are
 - [ ] R1 — the app reaches the model provider, `ntfy` and the push endpoint from
   inside its container (`compose exec pupkeep node -e 'fetch(...)'`), proving the
   network is not `internal`.
-- [ ] R2 — `--access tailscale` and `--access cloudflare` are rejected; a
+- [x] R2 — `--access tailscale` and `--access cloudflare` are rejected as unknown
+  modes (test-level, `test/access.test.ts`, `test/options.test.ts`); a
   `public` start with no origin, with `http://…`, and with a URL carrying a path
-  each exit non-zero and start nothing; the image's `command:` is `public`.
+  each exit non-zero and start nothing; the image's `command:` is `public`
+  (P6-06, unbuilt).
 - [ ] R2b — with `PUPKEEP_PUBLIC_ORIGIN` set, `--access lan` and `--access local`
   refuse to start; `--access lan` alone refuses when the discovered address is
   public.
@@ -458,9 +469,10 @@ transport, R13's rewritten scripts and R14's rewritten docs assertions — are
   subscription is gone; ten failed sign-ins from one address do not prevent a
   correct sign-in from another; a successful sign-in resets the bucket; session
   rows are capped and expired ones pruned.
-- [ ] R6 — no `termux-notification` in `src/`; a delivered notification reaches
-  the in-app centre and a Web Push subscription with ntfy absent; an ntfy topic
-  below 128 bits of entropy is refused.
+- [x] R6 — no `termux-notification` in `src/` (`P6-08`; `test/outbox.test.ts`
+  and `test/security.test.ts`); a delivered notification reaches the in-app centre
+  and a Web Push subscription with ntfy absent; an ntfy topic below 128 bits of
+  entropy is refused. Test-level, no phone walk.
 - [ ] R7 — the unit's command produces a new `.age` archive, its `config.json`
   has a null `ownerTokenHash` and empty `sessions`/`invites`, the off-box copy's
   sha256 matches the local archive's (the size gate, then the read-back digest;
@@ -481,9 +493,11 @@ transport, R13's rewritten scripts and R14's rewritten docs assertions — are
 - [ ] R12 — PLAN has a Phase 6 with `P6-*` IDs and the re-cut gate table; every
   listed doc matches shipped behavior or is marked historical; `.env.example`
   reflects the real `PUPKEEP_PUBLIC_ORIGIN` contract.
-- [ ] R13/R14 — `termux-boot.sh` starts `--access lan`; the installer no longer
+- [x] R13/R14 — `termux-boot.sh` starts `--access lan`; the installer no longer
   fetches `cloudflared`; the tests that pinned the old modes and the cloudflared
   pin are rewritten; the new negative header tests fail if the old trust returns.
+  Pinned by `test/runbook.test.ts` and `test/termux-scripts.test.ts` at the
+  source level; no phone run has exercised the scripts since.
 - [ ] Restore drill — an archive restores into a throwaway directory with a
   Compose override (second `--data`, loopback port), boots on it, matches the
   durable seq, and cannot sign in until `--reissue-owner`.

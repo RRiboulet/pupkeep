@@ -36,7 +36,8 @@ and aes128gcm on `node:crypto`, the reminder tasks write one intent per
 caregiver in their terminal commit, and the service worker shows the
 category-only title. **P4-06** is complete: a top-level notification centre with
 per-member items and a nav badge, Settings prefs/test/push/ntfy, and delivery to
-ntfy (the partner's daily path) and the host's Termux:API. The partner-device
+ntfy (the partner's daily path then) and the host's Termux:API (deleted by
+`P6-08`). The partner-device
 claim remains gated on P0-10 and was not tested here. **P4-07** is complete:
 `app.approvals` holds complete, validated proposals with a 24h expiry (derived,
 not stored); the agent can only propose (`create_appointment`,
@@ -54,16 +55,18 @@ is complete: `app.usage` is a baseline, not a ledger (the month's spend is
 verbatim at the cap while a free one runs, `secrets.json` is the only credential
 source (no environment), and the provider catalog, the allowlist probe and the
 picker are served by `/api/models/*` with the Settings card. **P4-09** is complete:
-`docs/access-and-notifications.md` is the caregivers' copy (daily tailnet access,
-the one-time invite, the three notification paths with ntfy onboarding, and the
-quick-tunnel HTTPS/PWA/push test), the Settings invite card makes its day-one
+`docs/access-and-notifications.md` is the caregivers' copy (daily access, the
+one-time invite, the notification paths with ntfy onboarding, and the
+HTTPS/PWA/push test — the tailnet and quick-tunnel path it landed was rewritten
+by `P6-08`), the Settings invite card makes its day-one
 step real, and the guide states what is not yet true (the approval card, P0-10's
 partner delivery, no named tunnel). **P4-10** is complete: `test/phase4.test.ts` closes
 Gate G4's automated half (an armed reminder fires after a real close/reopen, a
 cancelled one never fires, the dedupe key is authoritative and is the push tag),
 and it found a real bug — the "At the start" reminder offset could never fire,
-which is now fixed with a five-minute grace. The device legs of G4 (Termux:API,
-Web Push over the tunnel, the partner's iPhone) stay P0-10/P4-09 checks. The next
+which is now fixed with a five-minute grace. The device legs of G4 (Web Push on
+the public origin, the partner's iPhone) stay P0-10/P4-09 checks; the Termux:API
+and tunnel legs went with their modes (`P6-08`). The next
 task is **P5-01**, split into **P5-01a** (the host half: the kill matrix as
 `test/kill-matrix.test.ts` — a real SIGKILL mid-turn and right after four write
 acks — plus `--retry-parked`, the operator's only way out of a task parked at the
@@ -102,6 +105,17 @@ where P4-06's bodyless-mutation 415 lived: the suite fails on that regression.
 **Source of truth:** [`docs/PLAN.md`](PLAN.md). The local todos in `.pi/todos/`
 are the working view; they are not committed and are ignored by git. The
 durable backlog is PLAN §16.
+
+**Phase 6 status (2026-11-21): the host moved, and `P6-08` finished the
+retirement.** The household's server is the Oracle box behind Caddy
+(`https://pupkeep.duckdns.org`); the phone is a browser and an offline fallback
+on `--access lan`. `ACCESS_MODES` is `local | lan | public`, the `tailscale` and
+`cloudflare` modes and the Termux:API notification transport are deleted, and
+notifications are in-app + Web Push + optional ntfy. The Phase 4/5 narrative
+below describes what those tasks landed at the time (including the tailnet daily
+path and the quick tunnel `P6-08` later deleted); the current statements are the
+plan and the three guides. What remains open is `P6-09` (the box's legs) and
+`P6-10` (the 7-day run).
 
 This guide exists so a new agent can pick one todo and work it without
 re-reading the whole 1,700-line plan. Read the plan sections named in the todo,
@@ -166,10 +180,12 @@ P0-07 can run in parallel where the phone/devcontainer permits.
   arbitrary HTTP tools.
 - **No secrets in git, logs, tool output, ntfy or push bodies.** The owner link,
   invite tokens, cookies, session tokens and provider keys are all sensitive.
-- **No domain.** Tailscale is daily; the Cloudflare quick tunnel is testing-only;
-  ntfy is the recommended partner notification path.
-- **No Web Push claim on Tailscale HTTP.** Host localhost and the HTTPS test path
-  only.
+- **One configured public origin, or an explicit fallback.** `public` is the
+  household's path; `lan` is the offline fallback on a household LAN; ntfy is the
+  optional per-user notification path. The old tailnet daily mode and the quick
+  tunnel were deleted (`P6-08`).
+- **No Web Push claim on plain HTTP.** Web Push is the public HTTPS origin's; the
+  LAN fallback has no service worker, no PWA install and no push.
 - **No general puppy/vet advice.** Deterministic trend copy only.
 - **One puppy, no photos, no external calendar sync, no offline writes, no
   email/SMS, no multi-dog in v1.**
@@ -284,10 +300,10 @@ Next: <task IDs>
 
 - Pi Durable cannot run on Termux → move the server to Docker/VPS; keep the same
   code and restore the backup.
-- Tailscale binding fails → LAN or quick tunnel explicitly; never bind `0.0.0.0`
-  silently.
-- ntfy is rejected → in-app only or buy a domain; do not pretend Tailscale HTTP
-  has Web Push.
+- A launcher mode cannot honour its bind → refuse and say why; never bind
+  `0.0.0.0` silently. `lan` is an explicit fallback, not a default.
+- ntfy is rejected → in-app only, or Web Push on the public origin; the fallback's
+  LAN origin has no push.
 - Termux is killed too often → move to the VPS; the phone becomes a client.
 - Default model unavailable → use the live probe’s cheapest paid fallback; the
   $10 cap stands.

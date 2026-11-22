@@ -1,12 +1,17 @@
 # Kill/restart matrix — the host phone (P5-01b)
 
-**Status: walked 2026-11-10, cells 4 and 5 re-walked 2026-11-16/17 on the same
-phone.** Cells 1–3 pass; the reboot cell's wrapper fix is now verified on the
-device while the recovery itself still fails on Tailscale; the operator tunnel
-cell passes for the supervised unit after an ssh-config fix; and the
-agent-mid-turn cell still cannot be observed on this host (no provider key).
-Every row below says what was seen, when, and on which device — nothing is
-inferred from a devcontainer run.
+**Status: historical record, kept verbatim.** Walked 2026-11-10, cells 4 and 5
+re-walked 2026-11-16/17 on the same phone; every row says what was seen, when,
+and on which device, and nothing is inferred from a devcontainer run.
+
+**The access path it walked was deleted (`P6-08`, 2026-11-21).** This file is the
+Phase 5 record of the daily phone, including `--access tailscale`, the boot-time
+tailnet wait and the cloudflared quick tunnel. Those modes, the wait,
+`src/launcher/tunnel.ts` and the Termux notification transport are gone; the
+household host is now the box behind Caddy (PLAN §2.1, §6) and the phone is the
+offline fallback on `--access lan`. The observations below are **not** rewritten
+— they are what happened, and cell 5's operator tunnel still describes
+`scripts/termux-tunnel.sh`, which survives as operator tooling.
 
 **Owner of the device:** the household owner. **Owner of the host-side claims:**
 [`../test/kill-matrix.test.ts`](../test/kill-matrix.test.ts) (P5-01a).

@@ -12,18 +12,27 @@ A shared, agent-operated puppy care app for two caregivers, built on
 > checks. Every pull request typechecks and runs the full suite
 > (`.github/workflows/ci.yml`).
 >
+> **Phase 6 has moved the intended host off the phone.** The household's daily
+> server is designed to be the Oracle arm64 box behind Caddy on
+> `https://pupkeep.duckdns.org`; the phone is a browser and an offline fallback on
+> the household LAN (`--access lan`).
+> `P6-08` deleted the `tailscale` and `cloudflare` access modes and the
+> Termux:API notification transport; `ACCESS_MODES` is `local | lan | public`, and
+> notifications are in-app + Web Push + optional ntfy. The box has **not** been
+> built, deployed or reached through Caddy yet — that is `P6-09`/`P6-10`.
+>
 > **What is still unproven is listed in [Known limitations](#known-limitations),
-> not here.** The short version: the partner's iPhone, a phone reboot recovering
-> with no hands, a restore on a genuinely clean host, two real devices at once, a
-> day-long phone run, and no schedule yet runs the backup job.
+> not here.** The short version: the box's deployment legs, the partner's iPhone,
+> a restore on a genuinely clean host, two real devices at once, a day-long phone
+> run, and the fallback's boot path on a phone since `P6-08`.
 >
 > The source of truth is [`docs/PLAN.md`](docs/PLAN.md);
 > [`docs/TODO-GUIDE.md`](docs/TODO-GUIDE.md) says how to pick the next task. Three
 > guides, on purpose: [`docs/PHONE-RUNBOOK.md`](docs/PHONE-RUNBOOK.md) is the
-> operator's copy for the host phone,
+> operator's copy for the offline fallback host,
 > [`docs/access-and-notifications.md`](docs/access-and-notifications.md) is the
 > caregivers' copy, and [`docs/DEPLOY.md`](docs/DEPLOY.md) is how a version gets
-> onto the phone and onto the fallback.
+> onto the box and onto the fallback.
 
 ## What it is
 
@@ -34,8 +43,9 @@ Pupkeep is a household cockpit for raising a puppy:
   ending walks, recording weights, adding vet appointments, updating milestones;
 - a live Today view, calendar, growth chart, milestone board and shower log;
 - one source of truth, durable commits, and no double feeding;
-- a browser/PWA client, hosted from a phone running Termux — no native app, no
-  APK, no port to Android, iOS or Linux.
+- a browser/PWA client on the public HTTPS origin, and an offline fallback that
+  runs the same server on a phone — no native app, no APK, no port to Android,
+  iOS or Linux.
 
 The agent is not a puppy-care chatbot. It has no shell, file, web or veterinary
 knowledge tools. It can only read and change the app through Pupkeep tools. The
@@ -45,25 +55,26 @@ non-veterinary disclaimer.
 ## Host stack
 
 ```text
-Android phone (Termux)
-  └─ Node 24 (pinned for development; the phone measured Node 26) + Pi Durable 1.4.0 + SQLite
-      ├─ Pupkeep server (HTTP, SSE, PWA)
+Oracle A1 (arm64, Docker Compose)          the household's host
+  caddy — publishes 80/443, ACME for pupkeep.duckdns.org
+  pupkeep — Node 24+ · Pi Durable 1.4.0 · SQLite
+      ├─ Pupkeep server (HTTP, SSE, PWA) on the configured origin
       ├─ one shared household agent conversation
       ├─ durable reminder tasks
-      └─ in-app notifications + optional Web Push over HTTPS
-           ▲
-           │ host: localhost · partner: Tailscale (daily)
-           │ testing: Cloudflare quick tunnel (HTTPS)
-     Chrome on both caregivers' phones
+      └─ in-app notifications + Web Push + optional ntfy
+           ▲ https://pupkeep.duckdns.org
+     caregiver browsers/PWAs on any network
+
+Android phone (Termux)                     offline fallback + client
+  └─ same launcher and server at --access lan on the household LAN
 ```
 
 The host stack follows the **Pi Pocket** pattern (TannerMidd/pi-pocket):
 Termux, a launcher that chooses how devices connect, a browser UI, owner/invite
-auth, in-app notifications, host local notifications, a recommended ntfy bridge
-for the partner, and one process owning one SQLite file. PWA installation/Web
-Push is available on localhost and over an HTTPS quick tunnel for testing; daily
-partner access is Tailscale HTTP. The host infrastructure is
-reused or adapted from Pi Pocket under MIT, with attribution.
+auth, in-app notifications, Web Push and an optional per-user ntfy bridge, and
+one process owning one SQLite file. `P6-08` retired the two tunnel-era access
+modes; the phone's copy of the server survives as the offline fallback. The host
+infrastructure is reused or adapted from Pi Pocket under MIT, with attribution.
 
 No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
 
@@ -72,19 +83,21 @@ No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
 - [`docs/PLAN.md`](docs/PLAN.md) — product, architecture, data model, shared
   thread, models and budget, host runbook, phases, task breakdown, risks. §4 is
   the repository layout, §2.3 the Phase 0 go/no-go.
-- [`docs/PHONE-RUNBOOK.md`](docs/PHONE-RUNBOOK.md) — the host phone: install,
-  boot and supervision, on-demand SSH, access modes, notifications, backup,
-  troubleshooting.
-- [`docs/DEPLOY.md`](docs/DEPLOY.md) — deploying a tag to the phone, and the
-  VPS/Docker fallback (which is unbuilt; the note says so).
+- [`docs/PHONE-RUNBOOK.md`](docs/PHONE-RUNBOOK.md) — the offline fallback host:
+  install, boot and supervision, the `--access lan` boot path, operator SSH,
+  notifications, backup, troubleshooting.
+- [`docs/DEPLOY.md`](docs/DEPLOY.md) — deploying a tag to the box and to the
+  phone fallback (the box is unbuilt; the note says so).
 - [`docs/access-and-notifications.md`](docs/access-and-notifications.md) — the
-  caregivers' copy: daily access, the invite, ntfy, the HTTPS test path.
+  caregivers' copy: the public origin, the invite, Web Push, ntfy, the LAN
+  fallback.
 - [`CHANGELOG.md`](CHANGELOG.md) — what each release shipped, with its task IDs,
   and what that release does **not** prove.
 - [`docs/backup-drill.md`](docs/backup-drill.md) — the P5-02 drill: what a real
   bundle survived, and the three things it caught.
 - [`docs/kill-restart-matrix.md`](docs/kill-restart-matrix.md) — the phone's
-  kill/reboot/tunnel matrix, with the observations and their timestamps.
+  kill/reboot/tunnel matrix, a **historical** Phase 5 record with its
+  observations and timestamps (the tunnel mode it walked was deleted by `P6-08`).
 - [`docs/security-review.md`](docs/security-review.md) — the P5-06 record:
   thirteen attempts, each naming the test that produced its evidence.
 - [`docs/data-growth.md`](docs/data-growth.md) — the P5-07 measurements (host and
@@ -101,8 +114,8 @@ No pidabl. No embedded Termux rootfs. No Android Gradle build. No targetSdk 28.
 [`docs/PLAN.md`](docs/PLAN.md) §4 is authoritative. In short: `src/` for the
 server, launcher and shared code; `web/` for the no-build browser client;
 `bin/` for the launcher entry point; `scripts/` for the Termux and backup
-scripts; `test/` for `node --test`; `Dockerfile` and `docker-compose.yml` for
-the VPS fallback. No `android/`, no rootfs, no Gradle.
+scripts; `test/` for `node --test`; `deploy/` and `Dockerfile` for the box, with
+`docker-compose.yml` as its stack. No `android/`, no rootfs, no Gradle.
 
 ## Development tooling
 
@@ -159,8 +172,9 @@ from a phone reaches the dev server without opening a port to the internet.
   `2.103.2`.
 - `npm start` reads `.env` with `--env-file-if-exists`; a real environment
   variable wins over the file. The container installs the cloudflared build for
-  its own architecture (amd64 or arm64), each pinned by SHA-256; the phone uses
-  the arm64 release.
+  its own architecture (amd64 or arm64), each pinned by SHA-256. That copy is for
+  the **devcontainer's** HTTPS testing only — `P6-08` deleted the phone's
+  `cloudflared` and the `cloudflare` mode, so it is not part of the product path.
 - The development database is `/tmp/pupkeep-dev`, never the workspace mount.
 - The `my-agent-setup` package is baked into the image at `v1.14.0` and
   declared in the container's personal pi settings; it is deliberately not
@@ -209,17 +223,16 @@ Preact/htm ES modules, checked against `NOTICE.md` by `test/vendor.test.ts`.
 
 ```bash
 git clone <repo> ~/pupkeep && cd ~/pupkeep
-./scripts/termux-install.sh          # packages, cloudflared, npm ci, boot wrapper
-~/pupkeep-start.sh --access tailscale --port 8791
-# for HTTPS/PWA/push testing only:
-#   npm start -- --access cloudflare --data ~/.pupkeep
+./scripts/termux-install.sh          # packages, npm ci, boot wrapper
+~/pupkeep-start.sh --access lan --port 8791
 ```
 
 `scripts/termux-install.sh` upgrades the package index first, refuses a `node`
-that cannot link, pins and checksums cloudflared (not in the Termux repo, P0-03)
-and writes the Termux:Boot wrapper. Deploying a released version is different:
-`git checkout v0.1.0` and restart — see [`docs/DEPLOY.md`](docs/DEPLOY.md).
-Port 8791 here because an operator's own `ssh` forward lands on 8787.
+that cannot link and writes the Termux:Boot wrapper; it no longer fetches
+`cloudflared` (`P6-08`). The boot script starts `--access lan` and does not wait
+for a tailnet. Deploying a released version is different: `git checkout v0.1.0`
+and restart — see [`docs/DEPLOY.md`](docs/DEPLOY.md). Port 8791 here because an
+operator's own `ssh` forward lands on 8787.
 
 ## Known limitations
 
@@ -227,22 +240,27 @@ Every line here is something that was **not** verified, not something that "shou
 work". The guardrail is the same one P5-09 was given: honest about verification,
 silent about intent.
 
-**Device legs**
+**The host and the device legs**
 
-- **The partner's iPhone (P0-10).** Reach over the tailnet, PWA install, Web Push
-  subscribe and re-subscribe after a tunnel restart, and ntfy receipts were never
-  run on the partner's device. The web client and the push path are covered by
-  tests and by the host phone; the *second device* is not.
-- **A phone reboot recovering by itself (P5-01b).** The boot wrapper, the boot
-  line and the 180 s tailnet wait are verified on the device, and the boot line was
-  written after a real reboot. The cell is still not a pass: it needs one reboot
-  with Android's **Always-on VPN** enabled, because Tailscale does not reconnect
-  by itself after a reboot and every boot-path step fails closed on that.
+- **The box is unbuilt and undeployed (P6-06/P6-09).** `Dockerfile`,
+  `docker-compose.yml` and `deploy/` parse and their tests pass; no daemon here
+  built them, no certificate was issued, no timer fired, and no page was served
+  through Caddy. R0's preflight, the image, the certificate, the timers, the
+  restore drill on the box and the partner's browser sign-in are all `P6-09`'s
+  operator legs, and the 7-day resource run is `P6-10`'s.
+- **The partner's iPhone (P0-10).** Reach on the public origin, PWA install, Web
+  Push subscribe and re-subscribe after a browser-data clear, and ntfy receipts
+  were never run on the partner's device. The web client and the push path are
+  covered by tests and by the host-side suite; the *second device* is not.
+- **The fallback's boot path since `P6-08`.** The boot wrapper and the boot line
+  were verified on the device, but the script now starts `--access lan` and no
+  longer waits for a tailnet, and that version has not been walked on a phone.
 - **Two real clients at once (P5-03).** The two-caregiver paths are covered by
   tests with two sessions (feed races, 409s, the shared thread, approvals). Two
-  actual phones in one session were never part of a run.
+  actual devices in one session were never part of a run.
 - **A day-long phone run (P5-05).** Battery, heat and the wake-lock effect are
-  unmeasured. A five-minute seeded run is not that.
+  unmeasured, and they now matter only for the fallback. A five-minute seeded run
+  is not that.
 - **The phone's browser layout (P5-10's device half).** The render suite lays the
   app out in a pinned Chromium at 320/360/390/430 px, including Android text
   scale. A real panel with real fonts and Android's own font-size slider was not
@@ -254,28 +272,30 @@ silent about intent.
   restored on a *different* machine (this devcontainer, Node 24 against the
   phone's 26) and on a fresh directory on the phone, and it booted with
   `secrets.json` absent. Neither was a clean install.
-- **The Docker/VPS fallback is unbuilt.** `Dockerfile` and `docker-compose.yml`
-  exist because PLAN §4 and §6.9 always specified them; no daemon here has built
-  them, and `docs/DEPLOY.md` says so. Treat the phone as the only verified target.
+- **The Docker/VPS image has never been run.** `Dockerfile`, `docker-compose.yml`
+  and `deploy/` exist for the box (PLAN §6.1–§6.9); no daemon here has built
+  them, and `docs/DEPLOY.md` says so. Treat the phone fallback as the only host
+  path this repository has exercised, and the box as `P6-09`'s to prove.
 - **An interrupted restore is unproven.** The window between moving the old state
   aside and installing the new one is milliseconds; twelve `SIGKILL` attempts
   never landed in it. The error path names the leftover directory and the code is
   read, but the drill did not observe it.
-- **No schedule runs the backup job.** There is no `crontab` and no `sv` unit on
-  the phone, so the job only runs when somebody runs it. An unattended run also
-  needs a passphrase source that is *not* beside the archive, which is an operator
-  decision, not a default this repo can pick for you.
+- **No schedule runs the backup job from this repository.** The host's timer is
+  in `deploy/systemd/` and is one of the `P6-09` legs; the phone has no `crontab`
+  and no `sv` unit, so the job there only runs when somebody runs it. An
+  unattended run also needs a passphrase source that is *not* beside the archive,
+  which is an operator decision, not a default this repo can pick for you.
 
 **Product limits, by decision**
 
-- **No domain.** Tailscale is the daily path over HTTP, so no PWA install and no
-  Web Push on the daily path; the Cloudflare quick tunnel is for HTTPS/PWA/push
-  *testing* only, and its URL changes on every restart. A named tunnel waits for a
-  domain.
-- **A quick tunnel cannot carry the live stream.** Cloudflare buffers a streaming
-  response on account-less quick tunnels, so the client falls back to polling
-  every 4 s and probes the stream again every 60 s (`web/live.js`). Live SSE is a
-  tailnet/local property.
+- **No purchased domain.** The free DuckDNS name is the origin; a purchased
+  domain would be a rename, not a code change. The old Tailscale daily path and
+  the quick tunnel were deleted with their modes (`P6-08`), not hidden.
+- **The LAN fallback has no push.** Plain HTTP on a household LAN is not a secure
+  context: no service worker, no PWA install and no Web Push there, and the
+  in-app centre is its notification record. The client still falls back to polling
+  every 4 s and probes the stream again every 60 s if the live stream dies
+  (`web/live.js`), which is a resilience path rather than a daily limitation.
 - **Member recovery is an operator procedure.** There is no self-service reset;
   the procedure is documented and tested, and a `--reset-member` CLI is backlog.
 - **Agent proposals are limited to what it has tools for.** An appointment or meal
@@ -286,6 +306,7 @@ silent about intent.
   than compare-and-swap, so two *simultaneous manual* starts on one stale lock can
   in principle both clear it — the accepted Phase 1 residual (PLAN §3.2), since
   `flock` would need a native module the phone runtime forbids.
-- **The partner's daily notifications are best-effort.** ntfy is a recommended
-  per-user topic, not a guaranteed delivery channel; the in-app centre is
-  authoritative.
+- **The partner's out-of-app notifications are best-effort.** Web Push is the
+  daily channel on the public origin, and it still awaits P0-10's device receipt;
+  ntfy is an optional per-user topic, not a guaranteed delivery channel. The
+  in-app centre is authoritative.

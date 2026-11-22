@@ -4,6 +4,16 @@
 **not** been run. **Owner:** the household owner, on the partner's iPhone. This is
 the only Phase 0 work that needs a second phone.
 
+**The access path it was written against was deleted (`P6-08`, 2026-11-21).** The
+tailnet harness, the cloudflared tunnel run and the `100.x.y.z` URLs below are the
+Phase 0 record, not instructions: the household's origin is now
+`https://pupkeep.duckdns.org` (PLAN §2.1, §6.6), the `tailscale` and `cloudflare`
+modes are gone, and there is no quick tunnel to restart. What `P0-10` still needs
+— does the partner's iPhone receive **Web Push on the installed PWA**, and does
+**ntfy arrive while the phone is locked** — is run against that origin, and the
+push receipts are the rows that still matter. Every row below that asks for a
+tailnet bind or a tunnel restart is kept as history.
+
 It carries the partner-device rows that P0-03 and P0-08 could not close,
 re-expressed for an **iPhone** (the partner's device) instead of the Android phone
 they were written against. Everything else in Phase 0 is measured on the host
