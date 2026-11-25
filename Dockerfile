@@ -97,8 +97,14 @@ EXPOSE 8787
 # free-disk floor on the data directory, answering 503 and naming the failed
 # check when either is wrong. That is the endpoint the outside probe reads, so a
 # sick database or a full disk is *reported* rather than bounced.
+# The probe must present the configured origin as its `Host`: in `public` mode
+# the server refuses every request for another host (R2's origin check), so a
+# loopback probe without the header would die with 403 at every interval —
+# found by P6-09, which saw the container stay "unhealthy" while `/healthz`
+# answered 200 through Caddy. `fetch` cannot set `Host` (a forbidden header);
+# `node:http` can. Still liveness only: `/health` does no storage read.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "const p=process.env.PUPKEEP_PORT||8787;fetch('http://127.0.0.1:'+p+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "const http=require('node:http'),p=process.env.PUPKEEP_PORT||8787,h=process.env.PUPKEEP_PUBLIC_ORIGIN?new URL(process.env.PUPKEEP_PUBLIC_ORIGIN).host:'127.0.0.1:'+p;http.get({host:'127.0.0.1',port:p,path:'/health',headers:{host:h}},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 # `public` is the only mode that can serve the public origin (R2); it refuses to
 # start without `PUPKEEP_PUBLIC_ORIGIN`, which the Compose service supplies. The
