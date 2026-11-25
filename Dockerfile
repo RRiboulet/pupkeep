@@ -45,6 +45,11 @@ COPY . .
 # Why each package is here:
 #   age     — the only cipher the archive has; `--verify` and `--rotate` run it
 #             too, so it is not optional for a read-only drill either.
+#   ca-certificates — rclone is Go: its TLS stack reads the system store
+#             (/etc/ssl/certs), which `node:slim` does not ship — without it
+#             every off-device upload dies with "certificate signed by
+#             unknown authority" (found by P6-09's first real run). Unpinned
+#             like tzdata: a trust store, not code; pinning one ships stale roots.
 #   rclone  — the off-device copy. `--require-remote` makes a missing or broken
 #             remote a failed run instead of a quiet local-only archive.
 #   expect  — age prompts for its passphrase on a PTY, and the job answers that
@@ -62,12 +67,13 @@ COPY . .
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
  && apt-get install -y --no-install-recommends \
       "age=${AGE_VERSION}" \
+      "ca-certificates" \
       "rclone=${RCLONE_VERSION}" \
       "expect=${EXPECT_VERSION}" \
       tzdata \
  && rm -rf /var/lib/apt/lists/* \
  && tar --version \
- && dpkg-query -W age rclone expect tzdata
+ && dpkg-query -W age ca-certificates rclone expect tzdata
 
 # The data directory holds the database, the owner link and the push keys; it is
 # 0700 and owned by the runtime user (PLAN §6.3, §14.4). The Compose bind mount
