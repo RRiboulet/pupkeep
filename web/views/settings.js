@@ -43,6 +43,7 @@ import { disablePush, enablePush, pushSupported } from "../push.js";
 import { Setup } from "./setup.js";
 import { MealTimes } from "./meal-times.js";
 import { Invite } from "./invite.js";
+import { MyName } from "./my-name.js";
 
 const html = htm.bind(h);
 
@@ -690,6 +691,7 @@ export class Settings extends Component {
           role=${this.state.role}
           full=${(household?.members.length ?? 0) >= 2}
         />
+        <${MyName} request=${this.request} />
         ${this.renderNotifications()}
         ${profile?.setup?.complete ? html`<${MealTimes} request=${this.request} />` : null}
         ${this.renderModels()}

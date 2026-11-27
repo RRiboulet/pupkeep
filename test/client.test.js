@@ -2524,3 +2524,83 @@ test("an opened stream re-reads the thread, approvals and status; a reconnect is
   assert.equal(agent.state.connection, "reconnecting");
   assert.ok(vnodeText(agent.render(), "Reconnecting to the shared thread"), "the caregiver is told");
 });
+
+// --- the your-name card (R12: a caregiver renames themselves) ---------------
+
+const { MyName } = await import("../web/views/my-name.js");
+
+test("the your-name card sends one rev-guarded rename and shows the result", async () => {
+  setState({ profile: profileOf() });
+  const calls = [];
+  const card = new MyName({});
+  card.setState = (patch) => Object.assign(card.state, patch);
+  card.state.me = { memberId: "owner", role: "owner", label: "Alex" };
+  card.state.draft = "  Alexandra  ";
+  card.request = async (path, options) => {
+    calls.push({ path, options });
+    // The server's answer carries the whole care view, with the new name in it.
+    const renamed = profileOf({ members: [{ id: "owner", name: "Alexandra" }] });
+    return { status: 200, ok: true, body: { profile: renamed, replayed: false } };
+  };
+
+  await card.save();
+
+  assert.equal(calls.length, 1, "one request, not a retry");
+  assert.equal(calls[0].path, "/api/me");
+  assert.equal(calls[0].options.method, "PATCH");
+  assert.deepEqual(calls[0].options.body, { rev: 0, name: "Alexandra" }, "the name is trimmed on the wire");
+  assert.match(String(card.state.message), /Alexandra/, "the card says what the name now is");
+  assert.equal(card.state.error, null, "a saved rename is not an error");
+});
+
+test("the your-name card refuses an empty name without touching the wire", async () => {
+  setState({ profile: profileOf() });
+  const calls = [];
+  const card = new MyName({});
+  card.setState = (patch) => Object.assign(card.state, patch);
+  card.state.me = { memberId: "owner", role: "owner", label: "Alex" };
+  card.state.draft = "   ";
+  card.request = async (path, options) => {
+    calls.push({ path, options });
+    return { status: 200, ok: true, body: {} };
+  };
+
+  await card.save();
+
+  assert.equal(calls.length, 0, "an empty name never reaches the server");
+  assert.match(String(card.state.error), /empty/i);
+});
+
+test("the your-name card shows the server's refusal, never a silent failure", async () => {
+  setState({ profile: profileOf() });
+  const calls = [];
+  const card = new MyName({});
+  card.setState = (patch) => Object.assign(card.state, patch);
+  card.state.me = { memberId: "owner", role: "owner", label: "Alex" };
+  card.state.draft = "Sam";
+  card.request = async (path, options) => {
+    calls.push({ path, options });
+    return { status: 409, ok: false, body: { error: "someone in the household is already called Sam" } };
+  };
+
+  await card.save();
+
+  assert.equal(calls.length, 1, "the attempt was made");
+  assert.match(String(card.state.error), /already called Sam/);
+  assert.equal(card.state.message, null, "no success message sits beside the refusal");
+});
+
+test("the card renders the signed-in member's own name and nobody else's", () => {
+  setState({ profile: profileOf({ members: [{ id: "owner", name: "Alex" }, { id: "partner", name: "Sam" }] }) });
+  const card = new MyName({});
+  card.state.me = { memberId: "owner", role: "owner", label: "Alex" };
+  card.state.draft = "Alex";
+
+  const vnode = card.render();
+  assert.ok(vnodeText(vnode, "Your name"), "the card names itself");
+  assert.ok(vnodeText(vnode, "Your display name"), "the field is labelled");
+  assert.ok(vnodeText(vnode, "Save name"), "the save action is on the card");
+  // Only the owner's own row is in the draft; the partner's name is never
+  // offered for editing here.
+  assert.ok(vnodeText(vnode, "You can change only your own"), "the card says whose name it edits");
+});
