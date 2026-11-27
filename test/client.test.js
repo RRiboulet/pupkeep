@@ -1949,6 +1949,43 @@ test("settings renders the notification card and saves prefs and an empty topic"
   assert.deepEqual(calls[1].options.body, { topic: null });
 });
 
+test("settings copy names the household origin and drops the retired paths", () => {
+  setState({ profile: profileOf() });
+  const settings = new Settings({});
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({
+    supported: false,
+    prefs: { enabled: true, categories: [] },
+    ntfy: null,
+    ntfyDraft: "",
+  });
+
+  const insecure = settings.render();
+  assert.ok(vnodeText(insecure, "cannot receive Web Push"), "the insecure-context copy still says why");
+  assert.ok(vnodeText(insecure, "household's address"), "the plain-HTTP branch names the household origin");
+  assert.ok(vnodeText(insecure, "this screen makes no delivery claim"), "the P0-10 hedge stays");
+  assert.ok(!vnodeText(insecure, "Backup is on its way"), "the orphan backup claim is gone");
+
+  settings.setState({ supported: true });
+  const secure = settings.render();
+  assert.ok(vnodeText(secure, "household's address"), "the HTTPS hint names the household origin");
+  assert.ok(vnodeText(secure, "on localhost"), "localhost stays a valid HTTPS origin for development");
+
+  for (const stale of ["Tailscale", "quick tunnel", "host phone prints", "arrive with their phases", "Backup is on its way"]) {
+    assert.ok(!vnodeText(insecure, stale), `Settings still says ${stale}`);
+    assert.ok(!vnodeText(secure, stale), `Settings still says ${stale}`);
+  }
+});
+
+test("Today's placeholder describes what Today shows, not a build phase", () => {
+  setState({ profile: profileOf() });
+  const vnode = new Today({}).render();
+  assert.ok(vnodeText(vnode, "Meals, the walk and the next appointment"), "the line names the cards that are live");
+  assert.ok(vnodeText(vnode, "shared between both caregivers live"));
+  assert.ok(!vnodeText(vnode, "arrive with their phases"), "no build-phase language");
+  assert.ok(!vnodeText(vnode, "agent bar"), "no promise of a control that is not on this screen");
+});
+
 test("Settings shows the meal-times card only once setup is complete", () => {
   const settings = new Settings({});
   settings.setState = (patch) => Object.assign(settings.state, patch);
@@ -2156,6 +2193,8 @@ test("the invite card is owner-only, shows the link once and explains its lifeti
   const full = new Invite({ role: "owner", full: true });
   assert.ok(vnodeText(full.render(), "Your partner has joined"));
   assert.ok(!vnodeText(full.render(), "Create a one-time invite"));
+  assert.ok(vnodeText(full.render(), "household's address"), "the joined card names the household origin");
+  assert.ok(!vnodeText(full.render(), "host phone prints"), "the retired host-phone claim is gone");
 });
 
 test("the invite lifetime in the client copy matches the server's constant", async () => {

@@ -1,9 +1,9 @@
 // Today — the care surface the two caregivers live on (PLAN §13.1).
 //
-// This build owns the meals card (fed/pending/overdue, mark-fed, extra feeding)
-// and the walk card (start, a live server-corrected timer, end, and a stale
-// discard). The agent bar, weight and recent activity arrive with their phases;
-// the first-run setup gate already lives here (P1-14).
+// This build owns the meals card (fed/pending/overdue, mark-fed, extra feeding),
+// the walk card (start, a live server-corrected timer, end, and a stale
+// discard) and the next-appointment line. The first-run setup gate already
+// lives here (P1-14).
 //
 // Three rules shape the screen:
 //   * **never optimistic.** Nothing is marked fed until the server's commit
@@ -835,10 +835,7 @@ export class Today extends Component {
         ${this.renderNextAppointment()}
         ${this.renderWalk()}
         ${this.renderMeals()}
-        <p class="placeholder">
-          Weight and the agent bar arrive with their phases; meals and the walk are already shared
-          between both caregivers live.
-        </p>
+        <p class="placeholder">Meals, the walk and the next appointment are shared between both caregivers live.</p>
       </section>
     `;
   }
