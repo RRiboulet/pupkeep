@@ -2011,6 +2011,42 @@ test("Settings shows the meal-times card only once setup is complete", () => {
   );
 });
 
+test("Settings drops the completed first-run wizard but keeps a short summary", () => {
+  setState({ profile: profileOf() });
+  const settings = new Settings({});
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({
+    supported: false,
+    prefs: { enabled: true, categories: [] },
+    ntfy: null,
+    ntfyDraft: "",
+  });
+
+  const vnode = settings.render();
+  assert.equal(findVnode(vnode, "Setup"), undefined, "a finished household does not embed the wizard");
+  assert.ok(vnodeText(vnode, "Setup is complete"), "one short line says where editing now lives");
+  assert.equal(countVnode(vnode, "MealTimes"), 1, "the meal-times card is still the editing surface");
+});
+
+test("Settings still embeds the wizard while setup is incomplete", () => {
+  setState({ profile: { ...profileOf(), setup: { complete: false, missing: ["meals"] } } });
+  const settings = new Settings({});
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({
+    supported: false,
+    prefs: { enabled: true, categories: [] },
+    ntfy: null,
+    ntfyDraft: "",
+  });
+
+  const vnode = settings.render();
+  const wizard = findVnode(vnode, "Setup");
+  assert.ok(wizard, "an unfinished household still gets the wizard on Settings");
+  assert.equal(wizard.props.embedded, true, "it is still the embedded wizard");
+  assert.equal(new Today({}).render().type, Setup, "the first-run path on Today is unchanged");
+  assert.equal(countVnode(vnode, "MealTimes"), 0, "meal times are still edited in the wizard");
+});
+
 test("the notifications route is a real hash route, not a fallback to Today", async () => {
   const { hashRoute } = await import("../web/store.js");
   assert.equal(hashRoute("#notifications"), "notifications");

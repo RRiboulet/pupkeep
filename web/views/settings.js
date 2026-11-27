@@ -1,7 +1,7 @@
 // Settings — household, notifications, models and budget (PLAN §13.1).
 //
-// This build owns the household card (the embedded wizard and, since P4-09, the
-// one-time partner invite), the
+// This build owns the household card (the household name and, since P4-09, the
+// one-time partner invite, plus the embedded wizard until setup is complete), the
 // notification card (P4-06): this device's Web Push switch, the per-category
 // preferences, the ntfy topic for a phone without Web Push, and a test button,
 // and the model card (P4-08): the current model, this month's spend against the
@@ -693,7 +693,11 @@ export class Settings extends Component {
         ${this.renderNotifications()}
         ${profile?.setup?.complete ? html`<${MealTimes} request=${this.request} />` : null}
         ${this.renderModels()}
-        <${Setup} embedded=${true} />
+        ${
+          profile?.setup?.complete === true
+            ? html`<p class="field__hint">Setup is complete. Edit your puppy on Pup and meal times in the card above.</p>`
+            : html`<${Setup} embedded=${true} />`
+        }
       </section>
     `;
   }
