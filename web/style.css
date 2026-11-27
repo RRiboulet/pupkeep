@@ -12,6 +12,22 @@
   --focus: #9a6ef1;
   --radius: 12px;
   --nav-height: 3.25rem;
+  --hairline: #e4e0ec;
+  --input-border: #cfc7dd;
+  --tint: #f0e9fd;
+  --calendar-outside-bg: #fbfaff;
+  --code-bg: #ffffff;
+  --status-ok: #2f7d4f;
+  --status-warn: #b58a1c;
+  --status-bad: #b0413e;
+  --status-neutral: #8b8494;
+  --status-bad-ink: #7a1f1f;
+  --notice-warn-ink: #5a3c00;
+  --notice-warn-bg: #fdf1d6;
+  --notice-error-ink: #7a1f1f;
+  --notice-error-bg: #fbe4e4;
+  --budget-track: rgba(36, 28, 51, 0.12);
+  --shadow-composer: rgba(36, 28, 51, 0.06);
 }
 
 * {
@@ -78,7 +94,7 @@ body {
   height: calc(var(--nav-height) + env(safe-area-inset-bottom, 0));
   padding-bottom: env(safe-area-inset-bottom, 0);
   background: var(--surface);
-  border-top: 1px solid #e4e0ec;
+  border-top: 1px solid var(--hairline);
   z-index: 1;
 }
 
@@ -152,7 +168,7 @@ body {
 
 .card {
   background: var(--surface);
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
   padding: 1rem;
 }
@@ -180,7 +196,7 @@ body {
   font: inherit;
   color: var(--ink);
   background: var(--bg);
-  border: 1px solid #cfc7dd;
+  border: 1px solid var(--input-border);
   border-radius: var(--radius);
 }
 
@@ -227,13 +243,13 @@ body {
 }
 
 .notice--warn {
-  color: #5a3c00;
-  background: #fdf1d6;
+  color: var(--notice-warn-ink);
+  background: var(--notice-warn-bg);
 }
 
 .notice--error {
-  color: #7a1f1f;
-  background: #fbe4e4;
+  color: var(--notice-error-ink);
+  background: var(--notice-error-bg);
 }
 
 /* --- First-run setup (P1-14) -------------------------------------------- */
@@ -255,13 +271,13 @@ body {
 .button--ghost {
   color: var(--ink);
   background: transparent;
-  border: 1px solid #cfc7dd;
+  border: 1px solid var(--input-border);
 }
 
 .slot {
   margin: 0 0 1rem;
   padding: 0.75rem;
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
 }
 
@@ -315,7 +331,7 @@ a.button {
 
 .meal {
   padding: 0.75rem;
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-left-width: 4px;
   border-radius: var(--radius);
 }
@@ -323,15 +339,15 @@ a.button {
 /* Status is never colour-only: the text says "Overdue" / "Pending" / "Fed",
    and the border is the redundant cue. */
 .meal--fed {
-  border-left-color: #2f7d4f;
+  border-left-color: var(--status-ok);
 }
 
 .meal--pending {
-  border-left-color: #b58a1c;
+  border-left-color: var(--status-warn);
 }
 
 .meal--overdue {
-  border-left-color: #b0413e;
+  border-left-color: var(--status-bad);
 }
 
 .meal__head {
@@ -356,7 +372,7 @@ a.button {
 }
 
 .meal--overdue .meal__status {
-  color: #7a1f1f;
+  color: var(--status-bad-ink);
   font-weight: 600;
 }
 
@@ -394,11 +410,11 @@ a.button {
 
 .growth-chart__plot {
   fill: var(--bg);
-  stroke: #e4e0ec;
+  stroke: var(--hairline);
 }
 
 .growth-chart__grid {
-  stroke: #e4e0ec;
+  stroke: var(--hairline);
   stroke-width: 1;
 }
 
@@ -443,7 +459,7 @@ a.button {
   padding: 0.1rem 0.6rem;
   color: var(--muted);
   font-size: 0.85rem;
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: 999px;
 }
 
@@ -483,7 +499,7 @@ a.button {
 .growth__table td {
   padding: 0.3rem 0.4rem;
   text-align: left;
-  border-bottom: 1px solid #e4e0ec;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .growth__table thead th {
@@ -494,7 +510,7 @@ a.button {
 .growth__form {
   margin-top: 1.25rem;
   padding-top: 1rem;
-  border-top: 1px solid #e4e0ec;
+  border-top: 1px solid var(--hairline);
 }
 
 .form__title {
@@ -529,7 +545,7 @@ a.button {
 
 .milestone {
   padding: 0.6rem 0;
-  border-bottom: 1px solid #e4e0ec;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .milestone:last-child {
@@ -550,7 +566,7 @@ a.button {
   padding: 0 0.4rem;
   color: var(--muted);
   font-size: 0.75rem;
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: 999px;
 }
 
@@ -599,7 +615,7 @@ a.button {
   padding: 0.4rem 0.6rem;
   font: inherit;
   background: var(--bg);
-  border: 1px solid #cfc7dd;
+  border: 1px solid var(--input-border);
   border-radius: var(--radius);
 }
 
@@ -610,7 +626,7 @@ a.button {
 .milestones__form {
   margin-top: 1.25rem;
   padding-top: 1rem;
-  border-top: 1px solid #e4e0ec;
+  border-top: 1px solid var(--hairline);
 }
 
 /* --- Showers (P3-07) ----------------------------------------------------- */
@@ -644,7 +660,7 @@ a.button {
 
 .shower {
   padding: 0.6rem 0;
-  border-bottom: 1px solid #e4e0ec;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .shower:last-child {
@@ -675,7 +691,7 @@ a.button {
 .showers__form {
   margin-top: 1rem;
   padding-top: 1rem;
-  border-top: 1px solid #e4e0ec;
+  border-top: 1px solid var(--hairline);
 }
 
 .visually-hidden {
@@ -709,7 +725,7 @@ a.button {
 
 .calendar__grid {
   background: var(--surface);
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
   overflow: hidden;
 }
@@ -725,14 +741,14 @@ a.button {
   font-size: 0.75rem;
   color: var(--muted);
   text-align: center;
-  border-bottom: 1px solid #e4e0ec;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .calendar__day {
   min-height: 5.5rem;
   padding: 0.25rem;
-  border-bottom: 1px solid #e4e0ec;
-  border-right: 1px solid #e4e0ec;
+  border-bottom: 1px solid var(--hairline);
+  border-right: 1px solid var(--hairline);
 }
 
 .calendar__day:nth-child(7n) {
@@ -740,7 +756,7 @@ a.button {
 }
 
 .calendar__day--outside {
-  background: #fbfaff;
+  background: var(--calendar-outside-bg);
 }
 
 .calendar__day--outside .calendar__day-number {
@@ -782,7 +798,7 @@ a.button {
   padding: 0.1rem 0.25rem;
   border: 0;
   border-radius: 4px;
-  background: #f0e9fd;
+  background: var(--tint);
   color: var(--ink);
   font: inherit;
   font-size: 0.72rem;
@@ -817,7 +833,7 @@ a.button {
   width: 100%;
   padding: 0.5rem 0.25rem;
   border: 0;
-  border-bottom: 1px solid #e4e0ec;
+  border-bottom: 1px solid var(--hairline);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -857,7 +873,7 @@ a.button {
   margin: 0 0.4rem 0.2rem 0;
   padding: 0.05rem 0.4rem;
   border-radius: 999px;
-  background: #f0e9fd;
+  background: var(--tint);
   font-size: 0.8rem;
 }
 
@@ -870,7 +886,7 @@ a.button {
 .calendar__reminders {
   margin: 0.75rem 0 0;
   padding: 0.5rem 0.75rem;
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
 }
 
@@ -945,7 +961,7 @@ a.button {
 
 .notification {
   padding: 0.6rem 0.75rem;
-  border-bottom: 1px solid #e4e0ec;
+  border-bottom: 1px solid var(--hairline);
   background: var(--surface);
 }
 
@@ -1007,11 +1023,11 @@ a.button {
   border-radius: 999px;
   overflow: hidden;
   appearance: none;
-  background: rgba(36, 28, 51, 0.12);
+  background: var(--budget-track);
 }
 
 .budget-bar::-webkit-progress-bar {
-  background: rgba(36, 28, 51, 0.12);
+  background: var(--budget-track);
 }
 
 .budget-bar::-webkit-progress-value {
@@ -1068,7 +1084,7 @@ a.button {
   margin-left: 0.35rem;
   padding: 0.05rem 0.45rem;
   border-radius: 999px;
-  background: #f0e9fd;
+  background: var(--tint);
   color: var(--muted);
   font-size: 0.75rem;
   font-weight: 600;
@@ -1078,7 +1094,7 @@ a.button {
   margin: 0 0 0.75rem;
   padding: 0.6rem 0.75rem;
   border-radius: var(--radius);
-  background: #f0e9fd;
+  background: var(--tint);
   font-weight: 600;
 }
 
@@ -1129,7 +1145,7 @@ a.button {
   margin: 0;
   padding: 0.55rem 0.75rem;
   background: var(--surface);
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1142,7 +1158,7 @@ a.button {
 }
 
 .thread__bubble--agent {
-  background: #f0e9fd;
+  background: var(--tint);
 }
 
 /* A reply's bubble holds real blocks (web/markdown-view.js), not one text node.
@@ -1167,7 +1183,7 @@ a.button {
 
 .thread__bubble--agent code {
   padding: 0 0.2rem;
-  background: #ffffff;
+  background: var(--code-bg);
   border-radius: 4px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 0.92em;
@@ -1182,7 +1198,7 @@ a.button {
 .tool-card {
   padding: 0.5rem 0.75rem;
   background: var(--surface);
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
   font-size: 0.9rem;
 }
@@ -1206,7 +1222,7 @@ a.button {
 }
 
 .tool-card__args {
-  border-left: 2px solid #cfc7dd;
+  border-left: 2px solid var(--input-border);
 }
 
 .approvals {
@@ -1226,25 +1242,25 @@ a.button {
 .approval-card {
   padding: 0.65rem 0.75rem;
   background: var(--surface);
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-left-width: 4px;
   border-radius: var(--radius);
 }
 
 .approval-card--pending {
-  border-left-color: #b58a1c;
+  border-left-color: var(--status-warn);
 }
 
 .approval-card--confirmed {
-  border-left-color: #2f7d4f;
+  border-left-color: var(--status-ok);
 }
 
 .approval-card--cancelled {
-  border-left-color: #8b8494;
+  border-left-color: var(--status-neutral);
 }
 
 .approval-card--expired {
-  border-left-color: #b0413e;
+  border-left-color: var(--status-bad);
 }
 
 .approval-card__head {
@@ -1263,7 +1279,7 @@ a.button {
 .approval-card__state {
   flex: none;
   padding: 0.05rem 0.45rem;
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: 999px;
   color: var(--muted);
   font-size: 0.75rem;
@@ -1282,16 +1298,16 @@ a.button {
 .approval-note {
   padding: 0.5rem 0.75rem;
   background: var(--bg);
-  border: 1px dashed #cfc7dd;
+  border: 1px dashed var(--input-border);
   border-radius: var(--radius);
 }
 
 .approval-note--confirmed {
-  border-color: #2f7d4f;
+  border-color: var(--status-ok);
 }
 
 .approval-note--cancelled {
-  border-color: #8b8494;
+  border-color: var(--status-neutral);
 }
 
 .approval-note__text {
@@ -1305,9 +1321,9 @@ a.button {
   margin-top: 1rem;
   padding: 0.75rem;
   background: var(--surface);
-  border: 1px solid #e4e0ec;
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
-  box-shadow: 0 -2px 12px rgba(36, 28, 51, 0.06);
+  box-shadow: 0 -2px 12px var(--shadow-composer);
 }
 
 .agent__input {
@@ -1317,7 +1333,7 @@ a.button {
   font: inherit;
   color: var(--ink);
   background: var(--bg);
-  border: 1px solid #cfc7dd;
+  border: 1px solid var(--input-border);
   border-radius: var(--radius);
   resize: vertical;
 }
