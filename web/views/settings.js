@@ -24,6 +24,7 @@ import htm from "../vendor/htm.mjs";
 import { NetworkError, newIdempotencyKey, requestJson } from "../client.js";
 import { getState } from "../store.js";
 import { categoryOptions, ntfyBody, prefsBody } from "../notifications.js";
+import { householdLeadMetaText } from "../household.js";
 import {
   allowlistLines,
   budgetBody,
@@ -677,10 +678,10 @@ export class Settings extends Component {
           ? html`
               <p class="lead">
                 ${household.name}
-                <span class="lead__meta">
-                  · ${household.timezone} ·
-                  ${household.members.map((member) => member.name).join(" and ")}
-                </span>
+                <span class="lead__meta">${householdLeadMetaText(
+                  household.timezone,
+                  household.members.map((member) => member.name),
+                )}</span>
               </p>
             `
           : null}
