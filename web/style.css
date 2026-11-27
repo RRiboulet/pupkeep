@@ -2,6 +2,7 @@
    so what is here is the whole styling surface: no inline styles anywhere. */
 
 :root {
+  color-scheme: light dark;
   --bg: #faf9fc;
   --surface: #ffffff;
   --ink: #241c33;
@@ -28,6 +29,39 @@
   --notice-error-bg: #fbe4e4;
   --budget-track: rgba(36, 28, 51, 0.12);
   --shadow-composer: rgba(36, 28, 51, 0.06);
+}
+
+/* The system scheme decides the palette (no toggle, no stored preference).
+   Everything below overrides colour token values only: layout, the breakpoints
+   and the reduced-motion rules are untouched, and every rule body keeps
+   reading these tokens. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141118;
+    --surface: #1d1924;
+    --ink: #ede9f5;
+    --muted: #b0a7bd;
+    --accent: #b99cf9;
+    --accent-ink: #1b1329;
+    --banner: #d8c9f8;
+    --focus: #c4a8ff;
+    --hairline: #39323f;
+    --input-border: #706384;
+    --tint: #2a2335;
+    --calendar-outside-bg: #18141d;
+    --code-bg: #100d15;
+    --status-ok: #5cc98a;
+    --status-warn: #e3b341;
+    --status-bad: #f2857f;
+    --status-neutral: #a49caf;
+    --status-bad-ink: #f6a19b;
+    --notice-warn-ink: #f5d27a;
+    --notice-warn-bg: #3a2f14;
+    --notice-error-ink: #f7b3ae;
+    --notice-error-bg: #3d1f1f;
+    --budget-track: rgba(237, 233, 245, 0.16);
+    --shadow-composer: rgba(0, 0, 0, 0.45);
+  }
 }
 
 * {
