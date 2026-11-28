@@ -356,6 +356,8 @@ test("a frame that completes setup drops the unsavable meal draft and says so", 
   const setup = new Setup({});
   setup.state = {
     profile: before,
+    name: before.household.name,
+    nameDirty: false,
     zone: before.household.timezone,
     zoneDirty: false,
     puppy: draftOf(before),
@@ -379,6 +381,215 @@ test("a frame that completes setup drops the unsavable meal draft and says so", 
   assert.equal(setup.state.slotsDirty, false);
   assert.equal(setup.state.slots[0].timeLocal, "07:00", "the committed schedule replaces the unsavable draft");
   assert.ok(!vnodeText(setup.render(), "Save meal times"), "no orphan save button after completion");
+});
+
+// --- the setup page's five cards (the mandatory first-run setup, ticket 02) ---
+
+/** An unconfigured household: all five steps are still open. */
+function unconfigured() {
+  const profile = profileOf({ slots: [], name: "" });
+  return { ...profile, setup: { complete: false, missing: ["name", "timezone", "puppy", "meals", "key"] } };
+}
+
+/** A Setup with its state mounted by hand, as the frame tests above do. */
+function wizardOf(profile, { request, overrides = {} } = {}) {
+  const setup = new Setup({});
+  setup.state = {
+    profile,
+    name: profile.household.name,
+    nameDirty: false,
+    zone: profile.household.timezone,
+    zoneDirty: false,
+    puppy: draftOf(profile),
+    puppyDirty: false,
+    slots: slotDraftsOf(profile.meals.slots),
+    slotsDirty: false,
+    busy: null,
+    error: null,
+    message: null,
+    conflict: null,
+    pending: {},
+    models: null,
+    role: null,
+    keyDrafts: {},
+    modelsBusy: null,
+    modelsMessage: null,
+    modelsError: null,
+    ...overrides,
+  };
+  setup.setState = (patch) => Object.assign(setup.state, patch);
+  if (request) setup.request = request;
+  return setup;
+}
+
+/** A card's text with the whitespace the vnode walk introduces collapsed. */
+function cardText(vnode) {
+  return textsOf(vnode).join(" ").replace(/\s+/g, " ");
+}
+
+function inputsOf(vnode, found = []) {
+  if (vnode === null || vnode === undefined || typeof vnode !== "object") return found;
+  if (Array.isArray(vnode)) {
+    for (const child of vnode) inputsOf(child, found);
+    return found;
+  }
+  if (vnode.type === "input") found.push(vnode);
+  inputsOf(vnode.props?.children, found);
+  return found;
+}
+
+test("the setup page renders five numbered cards and derives the lead from the step list", () => {
+  const text = cardText(wizardOf(unconfigured()).render());
+  assert.match(text, /0 of 5 ready/, "the lead counts what is missing, not a hardcoded 3");
+  assert.match(text, /1\. Household name \(\s*to do\s*\)/);
+  assert.match(text, /2\. Household timezone \(\s*to do\s*\)/);
+  assert.match(text, /3\. Your puppy \(\s*to do\s*\)/);
+  assert.match(text, /4\. Meal times \(\s*to do\s*\)/);
+  assert.match(text, /5\. Provider key \(\s*to do\s*\)/);
+
+  const oneLeft = { ...unconfigured(), setup: { complete: false, missing: ["key"] } };
+  const later = cardText(wizardOf(oneLeft).render());
+  assert.match(later, /4 of 5 ready/, "the ready count follows the derived step list");
+  assert.match(later, /1\. Household name \(\s*done\s*\)/);
+  assert.match(later, /5\. Provider key \(\s*to do\s*\)/);
+});
+
+test("the name card saves through the household route and confirms an unchanged name", async () => {
+  const before = unconfigured();
+  const confirmed = {
+    ...before,
+    household: { ...before.household, rev: 1, nameConfirmedAt: "2026-11-28T09:00:00.000Z" },
+    setup: { complete: false, missing: ["timezone", "puppy", "meals", "key"] },
+  };
+  const request = fakeRequest({ status: 200, ok: true, body: { profile: confirmed, replayed: false } });
+  const setup = wizardOf(before, { request });
+
+  // The default name, untouched: confirming is still a write, like the timezone.
+  await setup.saveName({ preventDefault() {} });
+  const call = request.calls[0];
+  assert.equal(call.path, "/api/household");
+  assert.deepEqual(call.options.body, { rev: 0, name: "Our household" }, "an unchanged name is sent, not skipped");
+  assert.ok(call.options.idempotencyKey, "one care write carries its key");
+  assert.equal(setup.state.conflict, null);
+  assert.equal(setup.state.profile.household.rev, 1);
+  assert.equal(setup.state.profile.setup.missing.includes("name"), false, "the step flips to done");
+
+  // The button names the two cases apart, as the timezone card does.
+  const untouched = wizardOf(before);
+  const idleButton = buttonsOf(untouched.render()).map((button) => textsOf(button).join("")).find((text) => /name/i.test(text));
+  assert.equal(idleButton, "Confirm name");
+  const typed = wizardOf(before, { overrides: { name: "The Burrow", nameDirty: true } });
+  const saveButton = buttonsOf(typed.render()).map((button) => textsOf(button).join("")).find((text) => /name/i.test(text));
+  assert.equal(saveButton, "Save name");
+
+  // A blank name is refused before anything is sent, as the server would.
+  const blankRequest = fakeRequest({ status: 200, ok: true, body: { profile: confirmed } });
+  const blank = wizardOf(before, { request: blankRequest, overrides: { name: "   ", nameDirty: true } });
+  await blank.saveName({ preventDefault() {} });
+  assert.match(blank.state.error, /name/);
+  assert.equal(blankRequest.calls.length, 0, "an empty name is not sent");
+
+  // The field is bounded like the server's rule.
+  const field = inputsOf(untouched.render()).find((input) => input.props.id === "setup-household-name");
+  assert.equal(field.props.maxlength, "60");
+});
+
+test("saving a provider key flips the key step with no probe run and never echoes the value", async () => {
+  const before = unconfigured();
+  const after = {
+    ...before,
+    setup: { complete: false, missing: ["name", "timezone", "puppy", "meals"] },
+  };
+  const request = fakeRequest((path, options) => {
+    if (path === "/api/models/keys") {
+      assert.equal(options.method, "PUT");
+      assert.deepEqual(options.body, { provider: "openrouter", key: "sk-test" });
+      assert.ok(options.idempotencyKey, "the key write carries an Idempotency-Key");
+      return { status: 200, ok: true, body: { providers: { "opencode-go": false, openrouter: true } } };
+    }
+    if (path === "/api/models") {
+      return { status: 200, ok: true, body: { role: "owner", providers: { "opencode-go": false, openrouter: true }, current: null, probe: null } };
+    }
+    if (path === "/api/puppy") return { status: 200, ok: true, body: after };
+    return { status: 404, ok: false, body: { error: "not_found" } };
+  });
+  const setup = wizardOf(before, {
+    request,
+    overrides: {
+      role: "owner",
+      models: { role: "owner", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+      keyDrafts: { openrouter: "sk-test" },
+    },
+  });
+
+  await setup.saveKey("openrouter", "sk-test");
+  assert.equal(setup.state.modelsMessage, "Key saved for openrouter.");
+  assert.equal(setup.state.keyDrafts.openrouter ?? "", "", "the value is never kept for a re-render");
+
+  // The key save publishes no profile frame (secrets.json is not a Pi
+  // document), so the card re-reads the care view to see the step flip.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(request.calls.some((call) => call.path === "/api/puppy"), "the profile is re-read after the save");
+  assert.equal(setup.state.profile.setup.missing.includes("key"), false, "the step is done on the re-read");
+  assert.ok(!request.calls.some((call) => call.path === "/api/models/probe"), "no probe was needed");
+
+  // The inputs stay masked, like the Settings card's.
+  const masked = inputsOf(setup.render()).filter((input) => input.props.id?.startsWith("setup-key-"));
+  assert.ok(masked.length > 0);
+  for (const input of masked) assert.equal(input.props.type, "password");
+});
+
+test("a member sees the read-only key card and a refused write surfaces its 403", async () => {
+  const before = unconfigured();
+  const member = wizardOf(before, {
+    overrides: {
+      role: "member",
+      models: { role: "member", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+    },
+  });
+  const text = textsOf(member.render()).join(" ");
+  assert.match(text, /Only the owner can add provider keys/);
+  const saveButtons = buttonsOf(member.render()).filter((button) => /Save key/.test(textsOf(button).join("")));
+  assert.equal(saveButtons.length, 0, "no key button is offered to a member");
+
+  // A stale role (or a hand-built write) still meets the server's fence; the
+  // answer surfaces without taking the page down.
+  const request = fakeRequest({ status: 403, ok: false, body: { error: "ForbiddenError", message: "role member may not providers" } });
+  const refused = wizardOf(before, {
+    request,
+    overrides: {
+      role: "member",
+      models: { role: "member", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+      keyDrafts: { openrouter: "sk-test" },
+    },
+  });
+  await refused.saveKey("openrouter", "sk-test");
+  assert.match(refused.state.modelsError, /may not providers/, "the 403 is surfaced");
+  const stillUp = cardText(refused.render());
+  assert.match(stillUp, /5\. Provider key \(\s*(?:to do|done)\s*\)/, "the page still renders");
+  assert.equal(refused.state.modelsBusy, null, "the card is not left busy");
+});
+
+test("a household frame keeps a dirty name draft and blames only the section that moved", () => {
+  const before = unconfigured();
+
+  const typing = wizardOf(before, { overrides: { name: "The Burrow", nameDirty: true } });
+  typing.onStore({ profile: { ...before, household: { ...before.household, rev: 1, name: "Partner's choice" } } });
+  assert.equal(typing.state.name, "The Burrow", "the draft is kept");
+  assert.match(String(typing.state.conflict), /Someone else changed this while you were editing/);
+
+  const idle = wizardOf(before);
+  idle.onStore({ profile: { ...before, household: { ...before.household, rev: 1, name: "Partner's choice" } } });
+  assert.equal(idle.state.name, "Partner's choice", "an idle name follows the frame");
+  assert.equal(idle.state.conflict, null);
+
+  // The frame that the caregiver's own save usually beats is not an accusation.
+  const mine = wizardOf(before, {
+    overrides: { name: "The Burrow", nameDirty: true, pending: { name: { key: "k", signature: "s" } } },
+  });
+  mine.onStore({ profile: { ...before, household: { ...before.household, rev: 1, name: "The Burrow" } } });
+  assert.equal(mine.state.conflict, null);
+  assert.equal(mine.state.name, "The Burrow");
 });
 
 // --- the shared meal-slot editor (P1-14's wizard, reused by Settings) -------
@@ -405,6 +616,8 @@ test("the wizard hides its meal section once setup is complete and says where it
   const unfinished = new Setup({});
   unfinished.state = {
     profile: unfinishedProfile,
+    name: unfinishedProfile.household.name,
+    nameDirty: false,
     zone: "Europe/Paris",
     zoneDirty: false,
     puppy: emptyDraft(),

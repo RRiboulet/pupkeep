@@ -19,8 +19,9 @@
 
 import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
-import { NetworkError, requestJson } from "../client.js";
+import { NetworkError, newIdempotencyKey, requestJson } from "../client.js";
 import { changedFields, CONFLICT_MESSAGE, draftOf, emptyDraft, isNewer, pendingSave } from "../profile-form.js";
+import { currentModelText, probeResultLines, probeText, providerKeyBody } from "../models.js";
 import { getState, setState, subscribe } from "../store.js";
 import {
   MEAL_CONFLICT_MESSAGE,
@@ -36,6 +37,16 @@ import {
 } from "./meal-slots.js";
 
 const html = htm.bind(h);
+
+/**
+ * The setup steps in card order (§R3): the derivation in `setup.missing` names
+ * the same five, so the lead's ready count and every card's (done)/(to do) come
+ * from this one list rather than from a hardcoded number.
+ */
+const SETUP_STEPS = ["name", "timezone", "puppy", "meals", "key"];
+
+/** The providers one key can be stored for, in the card's order. */
+const PROVIDERS = ["opencode-go", "openrouter"];
 
 /**
  * Shown when the other caregiver's save completes setup while this screen holds
@@ -110,6 +121,9 @@ function zonePreview(zone) {
 export class Setup extends Component {
   state = {
     profile: null,
+    /** The household-name card's draft. */
+    name: "",
+    nameDirty: false,
     zone: "",
     zoneDirty: false,
     puppy: emptyDraft(),
@@ -122,22 +136,37 @@ export class Setup extends Component {
     conflict: null,
     /** Per section: the key of the save on the wire with the body it belongs to. */
     pending: {},
+    /** `GET /api/models`: the key card's provider presence, probe and role. */
+    models: null,
+    role: null,
+    /** The key fields' drafts, per provider; never rendered back. */
+    keyDrafts: {},
+    modelsBusy: null,
+    modelsMessage: null,
+    modelsError: null,
   };
 
   componentDidMount() {
+    this.request = this.props?.request ?? requestJson;
     this.unsubscribe = subscribe((state) => this.onStore(state));
     const cached = getState().profile;
     if (cached) this.adopt(cached);
     else void this.load();
+    void this.loadModels();
   }
 
   componentWillUnmount() {
     this.unsubscribe?.();
   }
 
+  /** The HTTP half, swappable from the tests (the Today screen's pattern). */
+  get http() {
+    return this.request ?? requestJson;
+  }
+
   async load() {
     try {
-      const result = await requestJson("/api/puppy");
+      const result = await this.http("/api/puppy");
       if (result.status === 401) {
         this.setState({ error: "Please sign in again." });
         return;
@@ -160,6 +189,7 @@ export class Setup extends Component {
     const next = current !== null && !isNewer(profile, current) ? current : profile;
     this.setState({
       profile: next,
+      ...(this.state.nameDirty ? {} : { name: next.household.name }),
       ...(this.state.zoneDirty ? {} : { zone: next.household.timezone }),
       ...(this.state.puppyDirty ? {} : { puppy: draftOf(next) }),
       ...(this.state.slotsDirty ? {} : { slots: scheduleDrafts(next.meals) }),
@@ -194,7 +224,12 @@ export class Setup extends Component {
     const blame = (section) => {
       if (!mine(section)) moved.push(section);
     };
+    // The name and the timezone live in the same household document, so one
+    // frame can move either or both drafts; each dirty section is blamed for
+    // itself, never for its neighbour.
     if (incoming.household.rev !== current.household.rev) {
+      if (!this.state.nameDirty) next.name = incoming.household.name;
+      else blame("name");
       if (!this.state.zoneDirty) next.zone = incoming.household.timezone;
       else blame("timezone");
     }
@@ -226,7 +261,7 @@ export class Setup extends Component {
   }
 
   /** One care write, with the replay/stale handling every section shares. */
-  async send(section, path, body, done) {
+  async send(section, path, method, body, done) {
     if (this.state.busy) return;
     const pending = pendingSave(this.state.pending[section], body);
     this.setState({
@@ -236,7 +271,7 @@ export class Setup extends Component {
       pending: { ...this.state.pending, [section]: pending },
     });
     try {
-      const result = await requestJson(path, { method: "PATCH", body, idempotencyKey: pending.key });
+      const result = await this.http(path, { method, body, idempotencyKey: pending.key });
       if (result.status === 401) {
         this.setState({ busy: null, error: "Please sign in again." });
         return;
@@ -280,6 +315,23 @@ export class Setup extends Component {
     }
   }
 
+  /** The household name: one care write, sent even when the text is unchanged
+   * — confirming the default name is the step, not a no-op (R4). */
+  saveName = (event) => {
+    event.preventDefault();
+    const { profile, name } = this.state;
+    if (!profile) return;
+    const trimmed = name.trim();
+    if (trimmed === "") {
+      this.setState({ error: "Give the household a name first." });
+      return;
+    }
+    void this.send("name", "/api/household", "PATCH", { rev: profile.household.rev, name: trimmed }, (saved) => ({
+      name: saved.household.name,
+      nameDirty: false,
+    }));
+  };
+
   saveZone = (event) => {
     event.preventDefault();
     const { profile, zone } = this.state;
@@ -289,7 +341,7 @@ export class Setup extends Component {
       this.setState({ error: "Pick the household's timezone first." });
       return;
     }
-    void this.send("timezone", "/api/household", { rev: profile.household.rev, timezone }, (saved) => ({
+    void this.send("timezone", "/api/household", "PATCH", { rev: profile.household.rev, timezone }, (saved) => ({
       zone: saved.household.timezone,
       zoneDirty: false,
     }));
@@ -308,7 +360,7 @@ export class Setup extends Component {
       this.setState({ message: "No changes to save.", error: null });
       return;
     }
-    void this.send("puppy", "/api/puppy", { rev: profile.rev, ...patch }, (saved) => ({
+    void this.send("puppy", "/api/puppy", "PATCH", { rev: profile.rev, ...patch }, (saved) => ({
       puppy: draftOf(saved),
       puppyDirty: false,
     }));
@@ -322,10 +374,14 @@ export class Setup extends Component {
       this.setState({ error: "Add at least one meal time." });
       return;
     }
-    void this.send("slots", "/api/feeding/slots", { rev: profile.meals.rev, slots: wireSlots(slots) }, (saved) => ({
+    void this.send("slots", "/api/feeding/slots", "PATCH", { rev: profile.meals.rev, slots: wireSlots(slots) }, (saved) => ({
       slots: slotDraftsOf(saved.meals.slots),
       slotsDirty: false,
     }));
+  };
+
+  onNameInput = (event) => {
+    this.setState({ name: event.target.value, nameDirty: true, message: null });
   };
 
   onZoneInput = (event) => {
@@ -358,8 +414,99 @@ export class Setup extends Component {
     this.setState({ slots: removeSlotAt(this.state.slots, index), slotsDirty: true, message: null });
   };
 
+  // --- the provider-key card (the Settings model card's patterns) ----------
+
+  get owner() {
+    return this.state.role === "owner";
+  }
+
+  /** One read of the key card's facts: the role, the providers and the probe. */
+  async loadModels() {
+    let result;
+    try {
+      result = await this.http("/api/models");
+    } catch (error) {
+      this.setState({ modelsError: error instanceof NetworkError ? error.message : "Could not load the model settings." });
+      return;
+    }
+    if (result.status === 401) {
+      this.setState({ modelsError: "Please sign in again." });
+      return;
+    }
+    if (!result.ok || !result.body) {
+      this.setState({ modelsError: "Could not load the model settings." });
+      return;
+    }
+    this.setState({
+      models: result.body,
+      role: result.body.role ?? null,
+      modelsError: null,
+    });
+  }
+
+  onKeyInput(provider, event) {
+    this.setState({ keyDrafts: { ...this.state.keyDrafts, [provider]: event.target.value }, modelsMessage: null });
+  }
+
+  /**
+   * Save one provider key (owner-only on the server). A key exists in
+   * `secrets.json`, not in a Pi document, so the save publishes no profile
+   * frame: the card re-reads the care view itself so the key step flips to
+   * done, and re-reads the provider presence for its own display.
+   */
+  async saveKey(provider, key) {
+    if (this.state.modelsBusy !== null) return;
+    this.setState({ modelsBusy: `key:${provider}`, modelsMessage: null, modelsError: null });
+    let result;
+    try {
+      result = await this.http("/api/models/keys", {
+        method: "PUT",
+        body: providerKeyBody(provider, key ?? ""),
+        idempotencyKey: newIdempotencyKey(),
+      });
+    } catch (error) {
+      this.setState({ modelsBusy: null, modelsError: error instanceof NetworkError ? error.message : "Could not save the key." });
+      return;
+    }
+    if (!result.ok) {
+      // A member's refused write (403) lands here and surfaces, without
+      // taking the rest of the page down.
+      this.setState({ modelsBusy: null, modelsError: result.body?.message ?? result.body?.error ?? "Could not save the key." });
+      return;
+    }
+    this.setState({
+      modelsBusy: null,
+      keyDrafts: { ...this.state.keyDrafts, [provider]: "" },
+      modelsMessage: key === null || key === "" ? `Key cleared for ${provider}.` : `Key saved for ${provider}.`,
+    });
+    void this.load();
+    void this.loadModels();
+  }
+
+  /** The optional model check: visible status, never a requirement (R5). */
+  async runProbe() {
+    if (this.state.modelsBusy !== null) return;
+    this.setState({ modelsBusy: "probe", modelsMessage: null, modelsError: null });
+    let result;
+    try {
+      result = await this.http("/api/models/probe", {
+        method: "POST",
+        idempotencyKey: newIdempotencyKey(),
+      });
+    } catch (error) {
+      this.setState({ modelsBusy: null, modelsError: error instanceof NetworkError ? error.message : "The check could not run." });
+      return;
+    }
+    if (!result.ok) {
+      this.setState({ modelsBusy: null, modelsError: result.body?.message ?? result.body?.error ?? "The check could not run." });
+      return;
+    }
+    this.setState({ modelsBusy: null, modelsMessage: "Model check finished." });
+    void this.loadModels();
+  }
+
   render() {
-    const { profile, zone, puppy, slots, busy, error, message, conflict } = this.state;
+    const { profile, name, zone, puppy, slots, busy, error, message, conflict } = this.state;
 
     // Embedded in Settings the wizard sits under the page's own heading; on
     // Today it *is* the page.
@@ -377,9 +524,12 @@ export class Setup extends Component {
     }
 
     const { setup } = profile;
+    // The lead and every card's state come from the one derived step list.
+    const ready = SETUP_STEPS.filter((step) => !setup.missing.includes(step)).length;
+    const stepState = (step) => (setup.missing.includes(step) ? "to do" : "done");
+    const nameChanged = name.trim() !== profile.household.name;
     const preview = zonePreview(zone.trim());
     const zoneChanged = zone.trim() !== profile.household.timezone;
-    const stepState = (step) => (setup.missing.includes(step) ? "to do" : "done");
 
     return html`
       <section class=${this.props.embedded ? "setup" : "view"} aria-labelledby="setup-heading">
@@ -387,21 +537,48 @@ export class Setup extends Component {
         <p class="lead">
           ${setup.complete
             ? "Everything is set up."
-            : html`<span>${3 - setup.missing.length} of 3 ready</span>`}
+            : html`<span>${ready} of ${SETUP_STEPS.length} ready</span>`}
         </p>
         ${setup.complete
           ? html`<p class="notice">Both caregivers can use Pupkeep from today on. You can change any of this later in Settings.</p>`
           : html`<p class="placeholder">
-              Three quick things before Today: the household timezone, your puppy, and the meal
-              times you want to keep.
+              Five quick things before Today: the household's name and timezone, your puppy, the meal
+              times you want to keep, and one provider key for the agent.
             </p>`}
 
         ${conflict ? html`<p class="notice notice--warn" role="status">${conflict}</p>` : null}
         ${error ? html`<p class="notice notice--error" role="alert">${error}</p>` : null}
         ${message ? html`<p class="notice" role="status">${message}</p>` : null}
 
+        <form class="card form" onSubmit=${this.saveName}>
+          <h2 class="card__title">1. Household name (${stepState("name")})</h2>
+          <p class="field__hint">
+            Every feed, walk and notification belongs to this household. Save the name you want, or
+            confirm the one boot chose — confirming it as it is counts.
+          </p>
+          <div class="field">
+            <label for="setup-household-name">Household name</label>
+            <input
+              id="setup-household-name"
+              name="name"
+              type="text"
+              maxlength="60"
+              required
+              autocomplete="off"
+              value=${name}
+              onInput=${this.onNameInput}
+              disabled=${busy !== null}
+            />
+          </div>
+          <div class="form__actions">
+            <button class="button" type="submit" disabled=${busy !== null}>
+              ${busy === "name" ? "Saving…" : nameChanged ? "Save name" : "Confirm name"}
+            </button>
+          </div>
+        </form>
+
         <form class="card form" onSubmit=${this.saveZone}>
-          <h2 class="card__title">1. Household timezone (${stepState("timezone")})</h2>
+          <h2 class="card__title">2. Household timezone (${stepState("timezone")})</h2>
           <p class="field__hint">
             Every date in Pupkeep — meals, walks, growth — is worked out in this zone. Boot captured
             ${profile.household.timezone}; please check it.
@@ -439,7 +616,7 @@ export class Setup extends Component {
         </form>
 
         <form class="card form" onSubmit=${this.savePuppy}>
-          <h2 class="card__title">2. Your puppy (${stepState("puppy")})</h2>
+          <h2 class="card__title">3. Your puppy (${stepState("puppy")})</h2>
           <div class="field">
             <label for="setup-name">Name</label>
             <input
@@ -518,7 +695,7 @@ export class Setup extends Component {
         ${setup.complete
           ? html`<p class="field__hint">Meal times are edited in the Meal times card above.</p>`
           : html`<form class="card form" onSubmit=${this.saveSlots}>
-              <h2 class="card__title">3. Meal times (${stepState("meals")})</h2>
+              <h2 class="card__title">4. Meal times (${stepState("meals")})</h2>
               <p class="field__hint">${SLOT_HINT}</p>
               <${MealSlots}
                 slots=${slots}
@@ -534,6 +711,88 @@ export class Setup extends Component {
                 </button>
               </div>
             </form>`}
+
+        <section class="card form">
+          <h2 class="card__title">5. Provider key (${stepState("key")})</h2>
+          ${!this.state.models
+            ? html`<p class="placeholder">${this.state.modelsError ?? "Loading the model settings…"}</p>`
+            : html`
+                <p class="field__hint">
+                  One key is enough: the agent uses it to think. Keys are stored on this phone in
+                  <code>secrets.json</code> and are never shown again, logged or backed up. The step is
+                  done as soon as one key is saved; the check below is optional.
+                </p>
+                <p class="field__hint">${currentModelText(this.state.models)}</p>
+                ${PROVIDERS.map((provider) => {
+                  const hasKey = Boolean(this.state.models.providers?.[provider]);
+                  const drafts = this.state.keyDrafts ?? {};
+                  return html`
+                    <div class="field" key=${provider}>
+                      <label for=${`setup-key-${provider}`}>${provider}${hasKey ? " (a key is stored)" : ""}</label>
+                      <input
+                        id=${`setup-key-${provider}`}
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        disabled=${!this.owner || this.state.modelsBusy !== null}
+                        value=${drafts[provider] ?? ""}
+                        onInput=${(event) => this.onKeyInput(provider, event)}
+                      />
+                      ${this.owner
+                        ? html`
+                            <div class="form__actions">
+                              <button
+                                type="button"
+                                class="button button--ghost"
+                                disabled=${this.state.modelsBusy !== null}
+                                onClick=${() => void this.saveKey(provider, drafts[provider] ?? "")}
+                              >
+                                ${this.state.modelsBusy === `key:${provider}` ? "Saving…" : "Save key"}
+                              </button>
+                              ${hasKey
+                                ? html`<button
+                                    type="button"
+                                    class="button button--ghost"
+                                    disabled=${this.state.modelsBusy !== null}
+                                    onClick=${() => void this.saveKey(provider, null)}
+                                  >
+                                    Clear key
+                                  </button>`
+                                : null}
+                            </div>
+                          `
+                        : null}
+                    </div>
+                  `;
+                })}
+                ${this.owner ? null : html`<p class="field__hint">Only the owner can add provider keys.</p>`}
+                <h3 class="notification-subhead">Check the models</h3>
+                <p class="field__hint">${probeText(this.state.models.probe)}</p>
+                ${this.owner
+                  ? html`<div class="form__actions">
+                      <button
+                        type="button"
+                        class="button"
+                        disabled=${this.state.modelsBusy !== null}
+                        onClick=${() => void this.runProbe()}
+                      >
+                        ${this.state.modelsBusy === "probe" ? "Checking…" : "Check models now"}
+                      </button>
+                    </div>`
+                  : null}
+                ${probeResultLines(this.state.models.probe).length > 0
+                  ? html`<ul class="model-list">
+                      ${probeResultLines(this.state.models.probe).map((line) => html`<li key=${line.id}>${line.text}</li>`)}
+                    </ul>`
+                  : null}
+                <div class="form__status">
+                  ${this.state.modelsError ? html`<p class="notice notice--error" role="alert">${this.state.modelsError}</p>` : null}
+                  ${!this.state.modelsError && this.state.modelsMessage
+                    ? html`<p class="notice" role="status">${this.state.modelsMessage}</p>`
+                    : null}
+                </div>
+              `}
+        </section>
 
         ${setup.complete
           ? html`<p class="form__actions"><a class="button" href="#today">Go to Today</a></p>`
