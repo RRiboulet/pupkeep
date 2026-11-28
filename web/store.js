@@ -46,21 +46,34 @@ export function gatedRoute(route, profile) {
 }
 
 /**
- * The gate's URL half (R1/R2): the browser's address must agree with the
- * gated screen, so a reload, a bookmark or back/forward all land where the
- * gate says. The rewrite is `history.replaceState`, never a hash assignment:
- * assigning pushes a history entry, and on a gated app the back button then
- * fights this function forever — `history.back()` landed on the user's
- * original entry, the `hashchange` → draw → reconcile cycle pushed the gated
- * hash right back on top, and neither ever gave ground. Replacing corrects
- * the address in place, so the user's real history stays intact. A no-op
- * when they already agree, and `replaceState` fires no `hashchange`.
+ * The gate's reconcile (R1/R2): both halves of the gate must agree with the
+ * gated screen — the browser's address, so a reload, a bookmark or
+ * back/forward all land where the gate says, and the shell's route state, so
+ * the frame that lifts the gate lands where the gate held the user.
+ *
+ * The rewrite is `history.replaceState`, never a hash assignment: assigning
+ * pushes a history entry, and on a gated app the back button then fights
+ * this function forever — `history.back()` landed on the user's original
+ * entry, the `hashchange` → draw → reconcile cycle pushed the gated hash
+ * right back on top, and neither ever gave ground. Replacing corrects the
+ * address in place, so the user's real history stays intact. A no-op when
+ * they already agree, and `replaceState` fires no `hashchange`.
+ *
+ * The route-state half matters because the address rewrite itself fires no
+ * `hashchange`: a hashchange can store a route the user typed *before* this
+ * function bounced the address back, and the shell would then keep painting
+ * the forced setup screen over a poisoned route. When the profile later
+ * flips to complete (the key save's re-read), the store's listener re-schedules
+ * with that stale route and the completion would land on the screen the user
+ * typed mid-setup instead of Today, with the address still saying #/setup.
+ * So a gated route heals to `setup` here, the same place the address does.
  */
 export function reconcileHash(route, profile) {
   if (!globalThis.location || profile === null || profile === undefined) return;
   const rewrite = (hash) => globalThis.history?.replaceState(null, "", hash);
   if (profile.setup?.complete === false) {
     if (hashRoute() !== "setup") rewrite("#/setup");
+    if (route !== "setup") setState({ route: "setup" });
     return;
   }
   if (route === "setup" && hashRoute() !== "today") rewrite("#/today");

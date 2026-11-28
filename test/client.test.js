@@ -310,6 +310,70 @@ test("the gate rewrites the browser address in place, never as a history push", 
   }
 });
 
+test("a gated escape attempt must not poison the route the completion lands on", () => {
+  // The live repro: the owner is on the gated setup page and types another
+  // hash into the address bar. The hashchange handler stores the typed route
+  // before the gate reconciles — the gate's rewrite is `replaceState`, which
+  // fires no `hashchange` — so the route state points at a screen the gate
+  // never shows, and when the key save's re-read flips the profile to
+  // complete, the shell would land there instead of Today with the address
+  // still saying #/setup.
+  const unfinished = { ...profileOf(), setup: { complete: false, missing: ["meals"] } };
+  const ready = profileOf();
+  const original = globalThis.location;
+  const originalHistory = globalThis.history;
+  let current = "#/setup";
+  let assigned = 0;
+  const location = {
+    get hash() {
+      return current;
+    },
+    set hash(value) {
+      assigned += 1;
+      current = value;
+    },
+  };
+  const replaced = [];
+  globalThis.history = {
+    replaceState: (state, title, url) => {
+      replaced.push(url);
+      current = url;
+    },
+  };
+  globalThis.location = location;
+  try {
+    setState({ route: "setup", profile: unfinished });
+
+    // The escape attempt: another hash reaches the shell's route state before
+    // the gate reconciles the address back to #/setup. Typing moves the
+    // address too — the gate bounces it right back.
+    current = "#/calendar";
+    setState({ route: "calendar" });
+    assert.equal(gatedRoute("calendar", unfinished).screen, "setup", "the gate still holds the screen");
+
+    // The shell's draw reconciles with the poisoned route; the route state
+    // must come out of it agreeing with the screen the gate forces.
+    reconcileHash("calendar", getState().profile);
+    assert.equal(getState().route, "setup", "the gate heals the route state to the screen it forces");
+    assert.deepEqual(replaced, ["#/setup"], "the address is the setup page's, replaced in place");
+    assert.equal(assigned, 0, "the rewrite is replaceState, so no history entry is pushed");
+
+    // The completion (the key save's re-read publishing the fresh profile)
+    // lands on Today — on this screen and in the address — however many
+    // hashes were typed mid-setup.
+    setState({ profile: ready });
+    assert.equal(gatedRoute(getState().route, getState().profile).screen, "today", "the completion lands on Today");
+    reconcileHash(getState().route, getState().profile);
+    assert.deepEqual(replaced, ["#/setup", "#/today"], "the address redirects to Today too");
+    assert.equal(assigned, 0, "the redirect is replaceState too");
+  } finally {
+    globalThis.location = original;
+    if (originalHistory === undefined) delete globalThis.history;
+    else globalThis.history = originalHistory;
+    setState({ route: hashRoute(), profile: null });
+  }
+});
+
 test("the idempotency key is held with the body it belongs to", () => {
   const body = { rev: 0, timezone: "Europe/Paris" };
   const first = pendingSave(undefined, body);

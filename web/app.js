@@ -153,8 +153,9 @@ if (root) {
 
   const draw = () => {
     pending = false;
-    // The gate's URL half runs with the paint, so a deep link into a gated app
-    // lands on the address the gate wants before anything else reads it.
+    // The gate's reconcile runs with the paint, so a deep link into a gated
+    // app lands on the address the gate wants — and on the route state the
+    // gate forces — before anything else reads either.
     reconcileHash(latest.route, getState().profile);
     render(html`<${App} route=${latest.route} online=${latest.online} />`, root);
   };
