@@ -1,12 +1,12 @@
 ---
-status: ready
+status: done
 blocked-by: ["02", "03"]
 ---
 
 # 04: The mandatory #/setup route
 
 **Blocked by:** 02, 03
-**Status:** ready
+**Status:** done
 
 ## What to build
 Setup becomes a real `#/setup` route and the whole app locks behind it: while setup is incomplete, every hash route redirects to `#/setup` and the bottom navigation is not rendered; once setup is complete, `#/setup` redirects to Today and the page is unreachable. The Today-tab gate and the Settings embedded wizard are removed (Settings' Household section from ticket 03 is now the only post-completion home for name and timezone). The plan's P1-14 "wizard is not a route" decision is reversed and recorded in the plan in this same change.
