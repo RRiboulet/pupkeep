@@ -1,12 +1,12 @@
 ---
-status: ready
+status: done
 blocked-by: ["01"]
 ---
 
 # 02: Setup page — household-name card and provider-key card
 
 **Blocked by:** 01
-**Status:** ready
+**Status:** done
 
 ## What to build
 The Setup component (wherever it is mounted today) renders five numbered cards with an "N of 5 ready" lead. Two cards are new: a household-name card with the confirm-if-unchanged semantics of the timezone card, and an owner-only provider-key card that reuses the Settings model-card pieces — key inputs for the known providers, the probe/model status visible, but a failed or skipped probe never blocks completion. A member sees a read-only card saying only the owner can add keys, and a key write attempt gets 403. Saving a key flips the step to done with no probe run required.

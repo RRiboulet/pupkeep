@@ -1,12 +1,12 @@
 ---
-status: ready
+status: done
 blocked-by: ["01"]
 ---
 
 # 03: Settings Household section
 
 **Blocked by:** 01
-**Status:** ready
+**Status:** done
 
 ## What to build
 Settings gains a Household section: the household name and timezone, editable at any time by either caregiver, with the same revision-conflict and idempotency behavior as today's wizard cards. This gives the post-completion home for these two settings before the embedded wizard is removed. The embedded wizard itself stays untouched in this ticket (a later ticket removes it).
