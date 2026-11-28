@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Fixed:
+
+- **Saving the provider key did not lift the setup gate on the screen that
+  saved it.** A key write lands in `secrets.json`, not in a Pi document, so the
+  server answers presence booleans and publishes no `profile` frame; the setup
+  card re-read the care view into its own state but never told the shell's
+  store. With the key as the last step, `gatedRoute` kept the app locked on
+  `#/setup` and "Go to Today" bounced back until a reload. The re-read now
+  hands the profile to the store under the same revision guard a care write
+  uses, so a stale read that raced a newer frame cannot regress it.
+
 Added:
 
 - **A caregiver can now use their own name, and both caregivers see the change
@@ -24,6 +35,19 @@ Added:
   phone widths with zero console errors. The light scheme is unchanged.
   (tickets 03-04, R8-R11, #85)
 
+- **A mandatory first-run setup page at `#/setup`.** The whole app is locked
+  until the household is configured: the shell forces the setup route, the
+  bottom navigation disappears and no other view is reachable until the five
+  steps are done — household name confirmed, timezone confirmed, puppy named,
+  meal times saved and a provider key present. Setup keeps its derived truth
+  (never a stored done flag) and gains the name-confirm and key-presence steps;
+  a saved key counts without a probe, and its value never reaches any client.
+  Settings trades its embedded wizard for a Household section (name and
+  timezone), either caregiver may finish setup except the owner-only key write,
+  and a partner invited after completion lands straight in the app, never gated.
+  Households complete under the old three-step rule are re-gated once under the
+  five-step rule — an honest visit, no grandfather flag.
+
 Fixed:
 
 - **The UI's copy now tells the truth about the household's hosting.** Since
@@ -43,8 +67,8 @@ Fixed:
 - **Settings no longer embeds the completed first-run wizard.** With setup
   complete, Settings rendered a full second copy of the puppy profile form
   inside the wizard; it now shows one summary line, the Pup profile and Meal
-  times cards remain the editing surface, and incomplete households still get
-  the wizard. (ticket 06, R14, #85)
+  times cards remain the editing surface (the mandatory `#/setup` gate above is
+  what an incomplete household meets instead). (ticket 06, R14, #85)
 
 ## v0.1.1 — 2026-11-18
 

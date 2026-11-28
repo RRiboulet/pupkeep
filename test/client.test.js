@@ -7,9 +7,10 @@
 //     may touch the draft, a household change may not;
 //   * a stream that reconnects re-reads the care state, because the thread's SSE
 //     snapshot carries none;
-//   * the setup gate: an unfinished household never lands on Today (P1-14), and
-//     the idempotency key stays with the body it belongs to (P1-11's rule, now
-//     shared with the wizard's form).
+//   * the setup gate: while setup is incomplete every route is the mandatory
+//     `#/setup` page with no navigation, and once it is complete `#/setup`
+//     redirects to Today; and the idempotency key stays with the body it
+//     belongs to (P1-11's rule, now shared with the setup page's form).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -19,12 +20,12 @@ const { Today } = await import("../web/views/today.js");
 const { Setup } = await import("../web/views/setup.js");
 const { MealTimes } = await import("../web/views/meal-times.js");
 const { slotDraftsOf, wireSlots } = await import("../web/views/meal-slots.js");
-const { applyCareView, startLive, subscribeThread } = await import("../web/live.js");
+const { applyCareView, refreshProfile, startLive, subscribeThread } = await import("../web/live.js");
 const { feedTimeText, localDate, localMinutes, mealClock, mealRows, mealStatus, minutesOf } = await import(
   "../web/meals.js"
 );
 const { correctedNow, timerText, walkSeconds, walkStale, walkTimeText } = await import("../web/walks.js");
-const { getState, setState } = await import("../web/store.js");
+const { getState, setState, gatedRoute, hashRoute, reconcileHash } = await import("../web/store.js");
 const { changedFields, draftOf, emptyDraft, isNewer, pendingSave, wireOf } = await import("../web/profile-form.js");
 const { CHART_SIZE, chartGeometry, daysBetweenLocalDates, formatKg, measurementRows, windowLabel } =
   await import("../web/growth-chart.js");
@@ -167,6 +168,34 @@ test("a reconnect re-reads the care state instead of trusting the thread snapsho
   live.close();
 });
 
+test("a 401 on the first read makes the loading screen say sign-in again, and a later read clears it", async () => {
+  const realFetch = globalThis.fetch;
+  setState({ profile: null, signedOut: false });
+  try {
+    // The real `refreshProfile`, through the real client, against a stubbed
+    // `fetch`: the seam the browser's own first read takes on every connect.
+    globalThis.fetch = async () => ({ status: 401, ok: false, text: async () => "" });
+    await refreshProfile();
+    assert.equal(getState().signedOut, true, "the shell is told the browser is signed out");
+    assert.equal(gatedRoute("today", getState().profile).screen, "loading", "no profile has arrived, so the gate stays on the loading screen");
+    // The Loading screen (web/app.js) renders its sign-in sentence from this
+    // flag while `gatedRoute` says "loading"; the sentence itself is the
+    // shell's render glue, not reachable from a Node test.
+
+    // A later read succeeds (the caregiver followed the sign-in link): the
+    // flag clears with the profile, so a future loading paint is not stuck on
+    // a stale accusation.
+    const view = profileOf({ rev: 2, name: "Back again" });
+    globalThis.fetch = async () => ({ status: 200, ok: true, text: async () => JSON.stringify(view) });
+    await refreshProfile();
+    assert.equal(getState().signedOut, false, "a successful read clears the sign-out flag");
+    assert.equal(getState().profile.puppy.name, "Back again", "the profile lands too");
+  } finally {
+    globalThis.fetch = realFetch;
+    setState({ profile: null, signedOut: false });
+  }
+});
+
 test("a profile frame replaces the store's view whole", () => {
   const listeners = new Map();
   const source = {
@@ -209,25 +238,140 @@ test("the one stream forwards the thread's snapshot, batch and connection frames
   live.close();
 });
 
-test("the setup gate sends an unfinished household to the wizard, and a finished one to Today", () => {
+test("the shell's gate: an unfinished household lands on the setup route from anywhere", () => {
   const unfinished = { ...profileOf(), meals: { rev: 0, slots: [] }, setup: { complete: false, missing: ["meals"] } };
-  setState({ profile: unfinished });
-  const gated = new Today({}).render();
-  assert.equal(gated.type, Setup, "an unfinished household never lands on Today");
+  for (const route of ["today", "calendar", "pup", "agent", "notifications", "settings", "setup"]) {
+    assert.equal(gatedRoute(route, unfinished).screen, "setup", `${route} is the setup page while setup is incomplete`);
+  }
 
-  const ready = {
-    ...profileOf(),
-    meals: { rev: 1, slots: [{ id: "slot-a", label: "Breakfast", timeLocal: "07:00", active: true }] },
-    setup: { complete: true, missing: [] },
+  // No profile read yet: a neutral loading screen and no navigation — never a
+  // flash of Today (or the nav) at a household whose state nobody knows.
+  assert.equal(gatedRoute("today", null).screen, "loading");
+  assert.equal(gatedRoute("setup", null).screen, "loading");
+
+  const ready = profileOf();
+  assert.equal(gatedRoute("today", ready).screen, "today", "a finished household sees Today");
+  assert.equal(gatedRoute("calendar", ready).screen, "calendar", "the other screens keep their routes");
+  assert.equal(gatedRoute("setup", ready).screen, "today", "#/setup is Today's address once setup is complete");
+});
+
+test("the gate rewrites the browser address in place, never as a history push", () => {
+  const unfinished = { ...profileOf(), setup: { complete: false, missing: ["meals"] } };
+  const ready = profileOf();
+  const original = globalThis.location;
+  const originalHistory = globalThis.history;
+  let current = "#/calendar";
+  let assigned = 0;
+  const location = {
+    get hash() {
+      return current;
+    },
+    // A real browser pushes a history entry here; the gate must never take
+    // that path, or `history.back()` ping-pongs against the next reconcile.
+    set hash(value) {
+      assigned += 1;
+      current = value;
+    },
   };
-  setState({ profile: ready });
-  const today = new Today({}).render();
-  assert.notEqual(today.type, Setup, "a finished household sees Today");
+  const replaced = [];
+  globalThis.history = {
+    replaceState: (state, title, url) => {
+      replaced.push(url);
+      current = url;
+    },
+  };
+  globalThis.location = location;
+  try {
+    reconcileHash("calendar", unfinished);
+    assert.deepEqual(replaced, ["#/setup"], "an unfinished household's address is the setup page's, whatever was linked");
+    assert.equal(assigned, 0, "the rewrite is replaceState, so no history entry is pushed");
 
-  // No profile read yet: Today shows itself rather than flashing the wizard at
-  // a household that set up months ago.
-  setState({ profile: null });
-  assert.notEqual(new Today({}).render().type, Setup, "an unread profile is not an unfinished one");
+    current = "#/today";
+    reconcileHash("today", unfinished);
+    assert.deepEqual(replaced, ["#/setup", "#/setup"]);
+
+    // Already right: a no-op, so nothing is replaced and no `hashchange` fires.
+    current = "#/setup";
+    reconcileHash("setup", unfinished);
+    assert.deepEqual(replaced, ["#/setup", "#/setup"]);
+
+    reconcileHash("setup", ready);
+    assert.deepEqual(replaced, ["#/setup", "#/setup", "#/today"], "a completed setup's page redirects to Today in the URL too");
+
+    reconcileHash("today", ready);
+    assert.deepEqual(replaced, ["#/setup", "#/setup", "#/today"], "an ordinary route's address is left alone");
+
+    reconcileHash("today", null);
+    assert.deepEqual(replaced, ["#/setup", "#/setup", "#/today"], "nothing is decided before the first profile read");
+  } finally {
+    globalThis.location = original;
+    if (originalHistory === undefined) delete globalThis.history;
+    else globalThis.history = originalHistory;
+  }
+});
+
+test("a gated escape attempt must not poison the route the completion lands on", () => {
+  // The live repro: the owner is on the gated setup page and types another
+  // hash into the address bar. The hashchange handler stores the typed route
+  // before the gate reconciles — the gate's rewrite is `replaceState`, which
+  // fires no `hashchange` — so the route state points at a screen the gate
+  // never shows, and when the key save's re-read flips the profile to
+  // complete, the shell would land there instead of Today with the address
+  // still saying #/setup.
+  const unfinished = { ...profileOf(), setup: { complete: false, missing: ["meals"] } };
+  const ready = profileOf();
+  const original = globalThis.location;
+  const originalHistory = globalThis.history;
+  let current = "#/setup";
+  let assigned = 0;
+  const location = {
+    get hash() {
+      return current;
+    },
+    set hash(value) {
+      assigned += 1;
+      current = value;
+    },
+  };
+  const replaced = [];
+  globalThis.history = {
+    replaceState: (state, title, url) => {
+      replaced.push(url);
+      current = url;
+    },
+  };
+  globalThis.location = location;
+  try {
+    setState({ route: "setup", profile: unfinished });
+
+    // The escape attempt: another hash reaches the shell's route state before
+    // the gate reconciles the address back to #/setup. Typing moves the
+    // address too — the gate bounces it right back.
+    current = "#/calendar";
+    setState({ route: "calendar" });
+    assert.equal(gatedRoute("calendar", unfinished).screen, "setup", "the gate still holds the screen");
+
+    // The shell's draw reconciles with the poisoned route; the route state
+    // must come out of it agreeing with the screen the gate forces.
+    reconcileHash("calendar", getState().profile);
+    assert.equal(getState().route, "setup", "the gate heals the route state to the screen it forces");
+    assert.deepEqual(replaced, ["#/setup"], "the address is the setup page's, replaced in place");
+    assert.equal(assigned, 0, "the rewrite is replaceState, so no history entry is pushed");
+
+    // The completion (the key save's re-read publishing the fresh profile)
+    // lands on Today — on this screen and in the address — however many
+    // hashes were typed mid-setup.
+    setState({ profile: ready });
+    assert.equal(gatedRoute(getState().route, getState().profile).screen, "today", "the completion lands on Today");
+    reconcileHash(getState().route, getState().profile);
+    assert.deepEqual(replaced, ["#/setup", "#/today"], "the address redirects to Today too");
+    assert.equal(assigned, 0, "the redirect is replaceState too");
+  } finally {
+    globalThis.location = original;
+    if (originalHistory === undefined) delete globalThis.history;
+    else globalThis.history = originalHistory;
+    setState({ route: hashRoute(), profile: null });
+  }
 });
 
 test("the idempotency key is held with the body it belongs to", () => {
@@ -356,6 +500,8 @@ test("a frame that completes setup drops the unsavable meal draft and says so", 
   const setup = new Setup({});
   setup.state = {
     profile: before,
+    name: before.household.name,
+    nameDirty: false,
     zone: before.household.timezone,
     zoneDirty: false,
     puppy: draftOf(before),
@@ -379,6 +525,294 @@ test("a frame that completes setup drops the unsavable meal draft and says so", 
   assert.equal(setup.state.slotsDirty, false);
   assert.equal(setup.state.slots[0].timeLocal, "07:00", "the committed schedule replaces the unsavable draft");
   assert.ok(!vnodeText(setup.render(), "Save meal times"), "no orphan save button after completion");
+});
+
+// --- the setup page's five cards (the mandatory first-run setup, ticket 02) ---
+
+/** An unconfigured household: all five steps are still open. */
+function unconfigured() {
+  const profile = profileOf({ slots: [], name: "" });
+  return { ...profile, setup: { complete: false, missing: ["name", "timezone", "puppy", "meals", "key"] } };
+}
+
+/** A Setup with its state mounted by hand, as the frame tests above do. */
+function wizardOf(profile, { request, overrides = {} } = {}) {
+  const setup = new Setup({});
+  setup.state = {
+    profile,
+    name: profile.household.name,
+    nameDirty: false,
+    zone: profile.household.timezone,
+    zoneDirty: false,
+    puppy: draftOf(profile),
+    puppyDirty: false,
+    slots: slotDraftsOf(profile.meals.slots),
+    slotsDirty: false,
+    busy: null,
+    error: null,
+    message: null,
+    conflict: null,
+    pending: {},
+    models: null,
+    role: null,
+    keyDrafts: {},
+    modelsBusy: null,
+    modelsMessage: null,
+    modelsError: null,
+    ...overrides,
+  };
+  setup.setState = (patch) => Object.assign(setup.state, patch);
+  if (request) setup.request = request;
+  return setup;
+}
+
+/** A card's text with the whitespace the vnode walk introduces collapsed. */
+function cardText(vnode) {
+  return textsOf(vnode).join(" ").replace(/\s+/g, " ");
+}
+
+function inputsOf(vnode, found = []) {
+  if (vnode === null || vnode === undefined || typeof vnode !== "object") return found;
+  if (Array.isArray(vnode)) {
+    for (const child of vnode) inputsOf(child, found);
+    return found;
+  }
+  if (vnode.type === "input") found.push(vnode);
+  inputsOf(vnode.props?.children, found);
+  return found;
+}
+
+test("the setup page renders five numbered cards and derives the lead from the step list", () => {
+  const text = cardText(wizardOf(unconfigured()).render());
+  assert.match(text, /0 of 5 ready/, "the lead counts what is missing, not a hardcoded 3");
+  assert.match(text, /1\. Household name \(\s*to do\s*\)/);
+  assert.match(text, /2\. Household timezone \(\s*to do\s*\)/);
+  assert.match(text, /3\. Your puppy \(\s*to do\s*\)/);
+  assert.match(text, /4\. Meal times \(\s*to do\s*\)/);
+  assert.match(text, /5\. Provider key \(\s*to do\s*\)/);
+
+  const oneLeft = { ...unconfigured(), setup: { complete: false, missing: ["key"] } };
+  const later = cardText(wizardOf(oneLeft).render());
+  assert.match(later, /4 of 5 ready/, "the ready count follows the derived step list");
+  assert.match(later, /1\. Household name \(\s*done\s*\)/);
+  assert.match(later, /5\. Provider key \(\s*to do\s*\)/);
+});
+
+test("the name card saves through the household route and confirms an unchanged name", async () => {
+  const before = unconfigured();
+  const confirmed = {
+    ...before,
+    household: { ...before.household, rev: 1, nameConfirmedAt: "2026-11-28T09:00:00.000Z" },
+    setup: { complete: false, missing: ["timezone", "puppy", "meals", "key"] },
+  };
+  const request = fakeRequest({ status: 200, ok: true, body: { profile: confirmed, replayed: false } });
+  const setup = wizardOf(before, { request });
+
+  // The default name, untouched: confirming is still a write, like the timezone.
+  await setup.saveName({ preventDefault() {} });
+  const call = request.calls[0];
+  assert.equal(call.path, "/api/household");
+  assert.deepEqual(call.options.body, { rev: 0, name: "Our household" }, "an unchanged name is sent, not skipped");
+  assert.ok(call.options.idempotencyKey, "one care write carries its key");
+  assert.equal(setup.state.conflict, null);
+  assert.equal(setup.state.profile.household.rev, 1);
+  assert.equal(setup.state.profile.setup.missing.includes("name"), false, "the step flips to done");
+
+  // The button names the two cases apart, as the timezone card does.
+  const untouched = wizardOf(before);
+  const idleButton = buttonsOf(untouched.render()).map((button) => textsOf(button).join("")).find((text) => /name/i.test(text));
+  assert.equal(idleButton, "Confirm name");
+  const typed = wizardOf(before, { overrides: { name: "The Burrow", nameDirty: true } });
+  const saveButton = buttonsOf(typed.render()).map((button) => textsOf(button).join("")).find((text) => /name/i.test(text));
+  assert.equal(saveButton, "Save name");
+
+  // A blank name is refused before anything is sent, as the server would.
+  const blankRequest = fakeRequest({ status: 200, ok: true, body: { profile: confirmed } });
+  const blank = wizardOf(before, { request: blankRequest, overrides: { name: "   ", nameDirty: true } });
+  await blank.saveName({ preventDefault() {} });
+  assert.match(blank.state.error, /name/);
+  assert.equal(blankRequest.calls.length, 0, "an empty name is not sent");
+
+  // The field is bounded like the server's rule.
+  const field = inputsOf(untouched.render()).find((input) => input.props.id === "setup-household-name");
+  assert.equal(field.props.maxlength, "60");
+});
+
+test("saving a provider key flips the key step with no probe run and never echoes the value", async () => {
+  const before = unconfigured();
+  const after = {
+    ...before,
+    setup: { complete: false, missing: ["name", "timezone", "puppy", "meals"] },
+  };
+  const request = fakeRequest((path, options) => {
+    if (path === "/api/models/keys") {
+      assert.equal(options.method, "PUT");
+      assert.deepEqual(options.body, { provider: "openrouter", key: "sk-test" });
+      assert.ok(options.idempotencyKey, "the key write carries an Idempotency-Key");
+      return { status: 200, ok: true, body: { providers: { "opencode-go": false, openrouter: true } } };
+    }
+    if (path === "/api/models") {
+      return { status: 200, ok: true, body: { role: "owner", providers: { "opencode-go": false, openrouter: true }, current: null, probe: null } };
+    }
+    if (path === "/api/puppy") return { status: 200, ok: true, body: after };
+    return { status: 404, ok: false, body: { error: "not_found" } };
+  });
+  const setup = wizardOf(before, {
+    request,
+    overrides: {
+      role: "owner",
+      models: { role: "owner", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+      keyDrafts: { openrouter: "sk-test" },
+    },
+  });
+
+  await setup.saveKey("openrouter", "sk-test");
+  assert.equal(setup.state.modelsMessage, "Key saved for openrouter.");
+  assert.equal(setup.state.keyDrafts.openrouter ?? "", "", "the value is never kept for a re-render");
+
+  // The key save publishes no profile frame (secrets.json is not a Pi
+  // document), so the card re-reads the care view to see the step flip.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(request.calls.some((call) => call.path === "/api/puppy"), "the profile is re-read after the save");
+  assert.equal(setup.state.profile.setup.missing.includes("key"), false, "the step is done on the re-read");
+  assert.ok(!request.calls.some((call) => call.path === "/api/models/probe"), "no probe was needed");
+
+  // The inputs stay masked, like the Settings card's.
+  const masked = inputsOf(setup.render()).filter((input) => input.props.id?.startsWith("setup-key-"));
+  assert.ok(masked.length > 0);
+  for (const input of masked) assert.equal(input.props.type, "password");
+});
+
+test("saving the last setup step lifts the shell's gate on this screen, not only in the card", async () => {
+  const before = { ...profileOf(), setup: { complete: false, missing: ["key"] } };
+  const done = { ...profileOf(), setup: { complete: true, missing: [] } };
+  // The key save publishes no profile frame (secrets.json is not a Pi
+  // document): the PUT answers presence booleans only, and the card re-reads
+  // the care view itself.
+  const request = fakeRequest((path, options) => {
+    if (path === "/api/models/keys") {
+      assert.equal(options.method, "PUT");
+      return { status: 200, ok: true, body: { providers: { "opencode-go": true, openrouter: false } } };
+    }
+    if (path === "/api/models") {
+      return { status: 200, ok: true, body: { role: "owner", providers: { "opencode-go": true, openrouter: false }, current: null, probe: null } };
+    }
+    if (path === "/api/puppy") return { status: 200, ok: true, body: done };
+    return { status: 404, ok: false, body: { error: "not_found" } };
+  });
+  const setup = wizardOf(before, {
+    request,
+    overrides: {
+      role: "owner",
+      models: { role: "owner", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+      keyDrafts: { "opencode-go": "sk-test" },
+    },
+  });
+
+  // The mounted flow: the shell's store still says the household is locked,
+  // and every route is the setup page while only the key is missing.
+  setState({ profile: before });
+  assert.equal(gatedRoute("today", getState().profile).screen, "setup", "the gate is closed before the save");
+
+  await setup.saveKey("opencode-go", "sk-test");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(getState().profile.setup.complete, true, "the shared store's profile flips to complete");
+  assert.equal(gatedRoute("today", getState().profile).screen, "today", "Today's gate lifts on this screen, with no reload");
+  assert.equal(getState().profile.setup.missing.length, 0, "the step list is empty in the store too");
+
+  setState({ profile: null });
+});
+
+test("a stale re-read after the key save does not regress the shell's profile", async () => {
+  const before = { ...profileOf(), setup: { complete: false, missing: ["key"] } };
+  const done = { ...profileOf(), setup: { complete: true, missing: [] } };
+  const frame = profileOf({ rev: 2, name: "Newer frame" });
+  // The race the guard exists for: a frame from the stream lands while the
+  // save is in flight, and the card's own re-read (an older GET) answers
+  // after it. The store must keep the frame, not the re-read.
+  const request = fakeRequest((path) => {
+    if (path === "/api/models/keys") {
+      setState({ profile: frame });
+      return { status: 200, ok: true, body: { providers: { "opencode-go": true, openrouter: false } } };
+    }
+    if (path === "/api/models") {
+      return { status: 200, ok: true, body: { role: "owner", providers: { "opencode-go": true, openrouter: false }, current: null, probe: null } };
+    }
+    if (path === "/api/puppy") return { status: 200, ok: true, body: done };
+    return { status: 404, ok: false, body: { error: "not_found" } };
+  });
+  const setup = wizardOf(before, {
+    request,
+    overrides: {
+      role: "owner",
+      models: { role: "owner", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+      keyDrafts: { "opencode-go": "sk-test" },
+    },
+  });
+  setState({ profile: before });
+
+  await setup.saveKey("opencode-go", "sk-test");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(getState().profile.rev, 2, "the store keeps the newer frame");
+  assert.equal(getState().profile.puppy.name, "Newer frame");
+  assert.equal(getState().profile.setup.complete, true, "and the gate stays lifted");
+
+  setState({ profile: null });
+});
+
+test("a member sees the read-only key card and a refused write surfaces its 403", async () => {
+  const before = unconfigured();
+  const member = wizardOf(before, {
+    overrides: {
+      role: "member",
+      models: { role: "member", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+    },
+  });
+  const text = textsOf(member.render()).join(" ");
+  assert.match(text, /Only the owner can add provider keys/);
+  const saveButtons = buttonsOf(member.render()).filter((button) => /Save key/.test(textsOf(button).join("")));
+  assert.equal(saveButtons.length, 0, "no key button is offered to a member");
+
+  // A stale role (or a hand-built write) still meets the server's fence; the
+  // answer surfaces without taking the page down.
+  const request = fakeRequest({ status: 403, ok: false, body: { error: "ForbiddenError", message: "role member may not providers" } });
+  const refused = wizardOf(before, {
+    request,
+    overrides: {
+      role: "member",
+      models: { role: "member", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+      keyDrafts: { openrouter: "sk-test" },
+    },
+  });
+  await refused.saveKey("openrouter", "sk-test");
+  assert.match(refused.state.modelsError, /may not providers/, "the 403 is surfaced");
+  const stillUp = cardText(refused.render());
+  assert.match(stillUp, /5\. Provider key \(\s*(?:to do|done)\s*\)/, "the page still renders");
+  assert.equal(refused.state.modelsBusy, null, "the card is not left busy");
+});
+
+test("a household frame keeps a dirty name draft and blames only the section that moved", () => {
+  const before = unconfigured();
+
+  const typing = wizardOf(before, { overrides: { name: "The Burrow", nameDirty: true } });
+  typing.onStore({ profile: { ...before, household: { ...before.household, rev: 1, name: "Partner's choice" } } });
+  assert.equal(typing.state.name, "The Burrow", "the draft is kept");
+  assert.match(String(typing.state.conflict), /Someone else changed this while you were editing/);
+
+  const idle = wizardOf(before);
+  idle.onStore({ profile: { ...before, household: { ...before.household, rev: 1, name: "Partner's choice" } } });
+  assert.equal(idle.state.name, "Partner's choice", "an idle name follows the frame");
+  assert.equal(idle.state.conflict, null);
+
+  // The frame that the caregiver's own save usually beats is not an accusation.
+  const mine = wizardOf(before, {
+    overrides: { name: "The Burrow", nameDirty: true, pending: { name: { key: "k", signature: "s" } } },
+  });
+  mine.onStore({ profile: { ...before, household: { ...before.household, rev: 1, name: "The Burrow" } } });
+  assert.equal(mine.state.conflict, null);
+  assert.equal(mine.state.name, "The Burrow");
 });
 
 // --- the shared meal-slot editor (P1-14's wizard, reused by Settings) -------
@@ -405,6 +839,8 @@ test("the wizard hides its meal section once setup is complete and says where it
   const unfinished = new Setup({});
   unfinished.state = {
     profile: unfinishedProfile,
+    name: unfinishedProfile.household.name,
+    nameDirty: false,
     zone: "Europe/Paris",
     zoneDirty: false,
     puppy: emptyDraft(),
@@ -2028,7 +2464,7 @@ test("Settings drops the completed first-run wizard but keeps a short summary", 
   assert.equal(countVnode(vnode, "MealTimes"), 1, "the meal-times card is still the editing surface");
 });
 
-test("Settings still embeds the wizard while setup is incomplete", () => {
+test("Settings mounts no wizard while setup is incomplete — the mandatory route owns that", () => {
   setState({ profile: { ...profileOf(), setup: { complete: false, missing: ["meals"] } } });
   const settings = new Settings({});
   settings.setState = (patch) => Object.assign(settings.state, patch);
@@ -2040,11 +2476,12 @@ test("Settings still embeds the wizard while setup is incomplete", () => {
   });
 
   const vnode = settings.render();
-  const wizard = findVnode(vnode, "Setup");
-  assert.ok(wizard, "an unfinished household still gets the wizard on Settings");
-  assert.equal(wizard.props.embedded, true, "it is still the embedded wizard");
-  assert.equal(new Today({}).render().type, Setup, "the first-run path on Today is unchanged");
-  assert.equal(countVnode(vnode, "MealTimes"), 0, "meal times are still edited in the wizard");
+  assert.equal(
+    findVnode(vnode, "Setup"),
+    undefined,
+    "the mandatory #/setup route is what an unfinished household meets, not an embedded wizard",
+  );
+  assert.equal(countVnode(vnode, "MealTimes"), 0, "meal times are still edited on the setup page");
 });
 
 test("the notifications route is a real hash route, not a fallback to Today", async () => {

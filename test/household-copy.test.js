@@ -58,20 +58,22 @@ const profile = {
   today: "2026-11-27",
 };
 
-test("the wizard renders the composed hint, not a glued sentence", () => {
+test("the setup page renders the composed hint, not a glued sentence", () => {
   const setup = new Setup({});
   setup.state = {
     profile,
+    name: "Our household",
     zone: "Europe/Paris",
     puppy: { name: "Biscuit", birthday: "2026-08-08", breed: "Beagle", sex: "female", targetWeightKg: "" },
     slots: [],
+    pending: {},
     busy: null,
     error: null,
     message: null,
     conflict: null,
   };
   const text = renderedText(setup.render());
-  assert.ok(text.includes(bootZoneHint("Europe/Paris")), "the wizard uses the composed hint");
+  assert.ok(text.includes(bootZoneHint("Europe/Paris")), "the setup page uses the composed hint");
   assert.ok(!text.includes("Boot capturedEurope/Paris"), "the zone has a space before it");
 });
 

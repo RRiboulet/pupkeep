@@ -12,7 +12,7 @@
 //     confirmed-once household rather than a reset or a 503.
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,7 +21,7 @@ import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc } from "@earendil-works/pi-durable";
 import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
 import { startApp, type AppHandle } from "../src/server/app.ts";
-import { dataStores, emptyConfig, type AppConfig, type MemberRecord } from "../src/server/config.ts";
+import { dataStores, emptyConfig, emptySecrets, type AppConfig, type MemberRecord } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
 import {
   ActivityDoc,
@@ -39,7 +39,7 @@ import {
   readFeeding,
   updateMealSlots,
 } from "../src/server/domain/feeding.ts";
-import { readHousehold, updateHouseholdTimezone } from "../src/server/domain/household.ts";
+import { readHousehold, updateHouseholdProfile } from "../src/server/domain/household.ts";
 import { readProfile, setupState } from "../src/server/domain/profile.ts";
 import { parseMealSlots, parseStoredMealSlots } from "../src/shared/feeding.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
@@ -72,12 +72,16 @@ function config(...members: MemberRecord[]): AppConfig {
 
 const actor = async () => ({ id: "owner", label: "Alex" });
 
+function nameInput(actionId: string, rev: number, name: string) {
+  return { actor, actionId, rev, name, now: NOW } as const;
+}
+
 const BREAKFAST: MealSlot = { id: "slot-a", label: "Breakfast", timeLocal: "07:00", active: true };
 const DINNER: MealSlot = { id: "slot-b", label: "Dinner", timeLocal: "18:00", portion: "80 g", active: true };
 
 // --- the shape --------------------------------------------------------------
 
-test("a version-1 household migrates to rev 0 and an unconfirmed timezone", () => {
+test("a version-1 household migrates to rev 0 and unconfirmed stamps", () => {
   const migrate = HouseholdDoc.definition.migrate;
   assert.ok(migrate, "the document declares its migration");
   const legacy = {
@@ -95,25 +99,43 @@ test("a version-1 household migrates to rev 0 and an unconfirmed timezone", () =
       agentBudgetUsd: 10,
     },
   };
-  assert.equal(HouseholdDoc.definition.version, 4, "the document version tracks the schema version");
-  assert.equal(emptyHousehold().schemaVersion, 4);
+  assert.equal(HouseholdDoc.definition.version, 5, "the document version tracks the schema version");
+  assert.equal(emptyHousehold().schemaVersion, 5);
   const migrated = migrate(legacy as never, 1);
-  assert.equal(migrated.schemaVersion, 4);
+  assert.equal(migrated.schemaVersion, 5);
   assert.equal(migrated.rev, 0);
   assert.equal(migrated.timezone, "Europe/Paris", "the captured zone is kept");
   assert.equal(migrated.timezoneConfirmedAt, null, "but nobody has confirmed it yet");
+  assert.equal(migrated.nameConfirmedAt, null, "and nobody has confirmed the name yet");
   assert.deepEqual(migrated.feedReminders, [], "no reminder was armed by an older build");
   assert.equal(migrated.feedPlannerTaskId, null, "no planner was armed by an older build");
   assert.throws(() => migrate(legacy as never, 0), /no migration/);
+
+  // A version-4 household (the three-step rule) keeps every fact and only
+  // gains the unconfirmed name stamp: it re-runs setup once, never resets (R9).
+  const versionFour = {
+    ...legacy,
+    schemaVersion: 4,
+    rev: 2,
+    timezoneConfirmedAt: "2026-10-29T11:00:00.000Z",
+    feedReminders: [],
+    feedPlannerTaskId: null,
+  };
+  const fromFour = migrate(versionFour as never, 4);
+  assert.equal(fromFour.schemaVersion, 5);
+  assert.equal(fromFour.rev, 2, "the revision is kept");
+  assert.equal(fromFour.timezoneConfirmedAt, "2026-10-29T11:00:00.000Z", "the zone confirmation is kept");
+  assert.equal(fromFour.nameConfirmedAt, null, "the name stamp is the new question");
 });
 
 test("the household parser needs a revision and a real confirmation instant", () => {
   const base = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     rev: 3,
     name: "Our household",
     timezone: "Europe/Paris",
     timezoneConfirmedAt: "2026-10-29T12:00:00.000Z",
+    nameConfirmedAt: null,
     members: [{ id: "owner", name: "Alex" }],
     conversationId: 1,
     systemConversationId: 2,
@@ -133,6 +155,9 @@ test("the household parser needs a revision and a real confirmation instant", ()
   assert.equal(parseHousehold({ ...base, timezoneConfirmedAt: "yesterday" }), undefined);
   assert.equal(parseHousehold({ ...base, timezone: "Not/AZone" }), undefined);
   assert.equal(parseHousehold({ ...base, timezoneConfirmedAt: null })?.timezoneConfirmedAt, null);
+  assert.equal(parseHousehold({ ...base, nameConfirmedAt: "yesterday" }), undefined);
+  assert.equal(parseHousehold({ ...base, nameConfirmedAt: null })?.nameConfirmedAt, null);
+  assert.equal(parseHousehold({ ...base, nameConfirmedAt: NOW.toISOString() })?.nameConfirmedAt, NOW.toISOString());
 });
 
 test("the meal-slot parser enforces the schedule invariants", () => {
@@ -168,11 +193,12 @@ test("the meal-slot parser enforces the schedule invariants", () => {
 
 test("the setup checklist is derived from the documents, in wizard order", () => {
   const household = {
-    schemaVersion: 4 as const,
+    schemaVersion: 5 as const,
     rev: 0,
     name: "Our household",
     timezone: "Europe/Paris",
     timezoneConfirmedAt: null,
+    nameConfirmedAt: null,
     members: [{ id: "owner", name: "Alex" }],
     conversationId: 1,
     systemConversationId: 2,
@@ -197,24 +223,46 @@ test("the setup checklist is derived from the documents, in wizard order", () =>
     createdAt: "2026-10-29T10:00:00.000Z",
   };
   const feeding = { ...emptyFeeding(), createdAt: "2026-10-29T10:00:00.000Z" };
+  const stamp = "2026-10-29T12:00:00.000Z";
 
-  assert.deepEqual(setupState(household, puppy, feeding), {
+  assert.deepEqual(setupState(household, puppy, feeding, false), {
     complete: false,
-    missing: ["timezone", "puppy", "meals"],
+    missing: ["name", "timezone", "puppy", "meals", "key"],
   });
+  // Every document fact confirmed, but no key stored: still one step short.
   assert.deepEqual(
     setupState(
-      { ...household, timezoneConfirmedAt: "2026-10-29T12:00:00.000Z" },
+      { ...household, nameConfirmedAt: stamp, timezoneConfirmedAt: stamp },
       { ...puppy, name: "Biscuit" },
       { ...feeding, slots: [BREAKFAST] },
+      false,
+    ),
+    { complete: false, missing: ["key"] },
+  );
+  assert.deepEqual(
+    setupState(
+      { ...household, nameConfirmedAt: stamp, timezoneConfirmedAt: stamp },
+      { ...puppy, name: "Biscuit" },
+      { ...feeding, slots: [BREAKFAST] },
+      true,
     ),
     { complete: true, missing: [] },
   );
   assert.deepEqual(
     setupState(
-      { ...household, timezoneConfirmedAt: "2026-10-29T12:00:00.000Z" },
+      { ...household, timezoneConfirmedAt: stamp },
+      { ...puppy, name: "Biscuit" },
+      { ...feeding, slots: [BREAKFAST] },
+      true,
+    ),
+    { complete: false, missing: ["name"] },
+  );
+  assert.deepEqual(
+    setupState(
+      { ...household, nameConfirmedAt: stamp, timezoneConfirmedAt: stamp },
       { ...puppy, name: "Biscuit" },
       feeding,
+      true,
     ),
     { complete: false, missing: ["meals"] },
   );
@@ -247,7 +295,7 @@ test("confirming the captured zone is one commit: revision, instant, activity", 
     assert.equal(before.timezone, "Europe/Paris");
     assert.equal(before.timezoneConfirmedAt, null);
 
-    const outcome = await updateHouseholdTimezone(harness, context, {
+    const outcome = await updateHouseholdProfile(harness, context, {
       actor,
       actionId: "http:zone-1",
       rev: 0,
@@ -264,9 +312,10 @@ test("confirming the captured zone is one commit: revision, instant, activity", 
     assert.equal(activity?.entries[0]?.kind, "household.timezone");
     assert.match(activity?.entries[0]?.summary ?? "", /Alex confirmed the household timezone \(Europe\/Paris\)/);
 
-    // The care view says the timezone step is done and keeps the other two.
-    const profile = await readProfile(harness, context, NOON);
-    assert.deepEqual(profile.setup.missing, ["puppy", "meals"]);
+    // The care view says the timezone step is done and keeps the others. With
+    // a key present the name step is what the derivation still asks for.
+    const profile = await readProfile(harness, context, NOON, true);
+    assert.deepEqual(profile.setup.missing, ["name", "puppy", "meals"]);
     assert.equal(profile.household.rev, 1);
   });
 });
@@ -274,7 +323,7 @@ test("confirming the captured zone is one commit: revision, instant, activity", 
 test("changing the zone names both zones, and a bad zone writes nothing", async () => {
   await withHarness(async ({ harness }) => {
     await bootstrapSession(harness, { config: config(owner), context, timezone: "Europe/Paris", now: () => NOON });
-    const changed = await updateHouseholdTimezone(harness, context, {
+    const changed = await updateHouseholdProfile(harness, context, {
       actor,
       actionId: "http:zone-1",
       rev: 0,
@@ -289,7 +338,7 @@ test("changing the zone names both zones, and a bad zone writes nothing", async 
     );
 
     await assert.rejects(
-      updateHouseholdTimezone(harness, context, {
+      updateHouseholdProfile(harness, context, {
         actor,
         actionId: "http:zone-bad",
         rev: 1,
@@ -309,9 +358,9 @@ test("a timezone save replays as success, refuses a reused key and a stale revis
   await withHarness(async ({ harness }) => {
     await bootstrapSession(harness, { config: config(owner), context, timezone: "Europe/Paris", now: () => NOON });
     const input = { actor, rev: 0, timezone: "Europe/Lisbon", now: NOW } as const;
-    assert.equal(await updateHouseholdTimezone(harness, context, { ...input, actionId: "http:k1" }), "updated");
+    assert.equal(await updateHouseholdProfile(harness, context, { ...input, actionId: "http:k1" }), "updated");
     assert.equal(
-      await updateHouseholdTimezone(harness, context, { ...input, actionId: "http:k1" }),
+      await updateHouseholdProfile(harness, context, { ...input, actionId: "http:k1" }),
       "replayed",
       "the same key and body is the same action",
     );
@@ -319,7 +368,7 @@ test("a timezone save replays as success, refuses a reused key and a stale revis
     assert.equal(activity?.entries.length, 1, "a replay is not a second care action");
 
     assert.equal(
-      await updateHouseholdTimezone(harness, context, {
+      await updateHouseholdProfile(harness, context, {
         actor,
         actionId: "http:k1",
         rev: 0,
@@ -329,7 +378,7 @@ test("a timezone save replays as success, refuses a reused key and a stale revis
       "key-conflict",
     );
     assert.equal(
-      await updateHouseholdTimezone(harness, context, {
+      await updateHouseholdProfile(harness, context, {
         actor,
         actionId: "http:k2",
         rev: 0,
@@ -342,6 +391,113 @@ test("a timezone save replays as success, refuses a reused key and a stale revis
     const after = await readHousehold(harness, context);
     assert.equal(after.rev, 1);
     assert.equal(after.timezone, "Europe/Lisbon");
+  });
+});
+
+test("confirming the default name is one commit: stamp, revision, activity", async () => {
+  await withHarness(async ({ harness }) => {
+    await bootstrapSession(harness, { config: config(owner), context, timezone: "Europe/Paris", now: () => NOON });
+    const before = await readHousehold(harness, context);
+    assert.equal(before.name, "Our household");
+    assert.equal(before.nameConfirmedAt, null, "a fresh household has not confirmed its name");
+
+    // Confirm-if-unchanged, exactly like the timezone: the caregiver has
+    // checked the name, so the stamp and the revision are the action.
+    const outcome = await updateHouseholdProfile(harness, context, nameInput("http:name-1", 0, "Our household"));
+    assert.equal(outcome, "updated");
+
+    const after = await readHousehold(harness, context);
+    assert.equal(after.name, "Our household", "an unchanged default is kept, not rewritten");
+    assert.equal(after.nameConfirmedAt, NOW.toISOString(), "the confirm stamps the document anyway");
+    assert.equal(after.rev, 1, "a confirmation is a real save");
+    const activity = await harness.snapshot(ActivityDoc, context);
+    assert.equal(activity?.entries.length, 1, "one care action, one activity line");
+    assert.equal(activity?.entries[0]?.kind, "household.name");
+    assert.match(activity?.entries[0]?.summary ?? "", /Alex confirmed the household name/);
+
+    // The care view: the name step is done; the key step follows presence.
+    const view = await readProfile(harness, context, NOON, false);
+    assert.ok(!view.setup.missing.includes("name"));
+    assert.ok(view.setup.missing.includes("key"));
+  });
+});
+
+test("a name save names the household, and a bad name writes nothing", async () => {
+  await withHarness(async ({ harness }) => {
+    await bootstrapSession(harness, { config: config(owner), context, timezone: "Europe/Paris", now: () => NOON });
+    const changed = await updateHouseholdProfile(harness, context, nameInput("http:name-1", 0, "  Seaside Cottage  "));
+    assert.equal(changed, "updated");
+    const after = await readHousehold(harness, context);
+    assert.equal(after.name, "Seaside Cottage", "the stored name is trimmed");
+    assert.equal(after.nameConfirmedAt, NOW.toISOString());
+    const activity = await harness.snapshot(ActivityDoc, context);
+    assert.equal(activity?.entries[0]?.kind, "household.name");
+    assert.match(activity?.entries[0]?.summary ?? "", /Alex named the household "Seaside Cottage"/);
+
+    for (const [index, bad] of ["", "   ", "x".repeat(61), "Seaside\nCottage"].entries()) {
+      await assert.rejects(
+        updateHouseholdProfile(harness, context, nameInput(`http:bad-${index}`, 1, bad)),
+        DomainConflictError,
+        `a household name cannot be ${JSON.stringify(bad).slice(0, 20)}`,
+      );
+    }
+    const settled = await readHousehold(harness, context);
+    assert.equal(settled.rev, 1, "a refused name does not burn a revision");
+    assert.equal(settled.name, "Seaside Cottage");
+    assert.equal(settled.nameConfirmedAt, NOW.toISOString(), "a refused name does not stamp");
+    assert.equal((await harness.snapshot(ActivityDoc, context))?.entries.length, 1);
+  });
+});
+
+test("a name save replays as success, refuses a reused key and a stale revision", async () => {
+  await withHarness(async ({ harness }) => {
+    await bootstrapSession(harness, { config: config(owner), context, timezone: "Europe/Paris", now: () => NOON });
+    assert.equal(await updateHouseholdProfile(harness, context, nameInput("http:k1", 0, "Seaside Cottage")), "updated");
+    assert.equal(
+      await updateHouseholdProfile(harness, context, nameInput("http:k1", 0, "Seaside Cottage")),
+      "replayed",
+      "the same key and body is the same action",
+    );
+    assert.equal((await harness.snapshot(ActivityDoc, context))?.entries.length, 1, "a replay writes nothing");
+
+    assert.equal(
+      await updateHouseholdProfile(harness, context, nameInput("http:k1", 0, "Hilltop")),
+      "key-conflict",
+      "the same key for a different name is a conflict",
+    );
+    assert.equal(
+      await updateHouseholdProfile(harness, context, nameInput("http:k2", 0, "Hilltop")),
+      "stale",
+      "a revision that was read before the first save is refused",
+    );
+    const after = await readHousehold(harness, context);
+    assert.equal(after.rev, 1);
+    assert.equal(after.name, "Seaside Cottage");
+  });
+});
+
+test("a name and a zone may be confirmed in one commit", async () => {
+  await withHarness(async ({ harness }) => {
+    await bootstrapSession(harness, { config: config(owner), context, timezone: "Europe/Paris", now: () => NOON });
+    const outcome = await updateHouseholdProfile(harness, context, {
+      actor,
+      actionId: "http:both-1",
+      rev: 0,
+      name: "Seaside Cottage",
+      timezone: "Europe/Paris",
+      now: NOW,
+    });
+    assert.equal(outcome, "updated");
+
+    const after = await readHousehold(harness, context);
+    assert.equal(after.rev, 1, "one save, one revision");
+    assert.equal(after.name, "Seaside Cottage");
+    assert.equal(after.nameConfirmedAt, NOW.toISOString());
+    assert.equal(after.timezoneConfirmedAt, NOW.toISOString());
+    const activity = await harness.snapshot(ActivityDoc, context);
+    assert.equal(activity?.entries.length, 2, "one line per confirmed aspect");
+    assert.equal(activity?.entries[0]?.kind, "household.name");
+    assert.equal(activity?.entries[1]?.kind, "household.timezone");
   });
 });
 
@@ -501,6 +657,26 @@ async function careView(fixture: Fixture, token: string): Promise<PuppyProfile> 
   return (await response.json()) as PuppyProfile;
 }
 
+/** Save one provider key through the real owner-only route (never echoed). */
+async function putKey(
+  fixture: Fixture,
+  token: string,
+  body: Record<string, unknown>,
+  options: { key?: string } = {},
+): Promise<Response> {
+  return fetch(`${fixture.url}/api/models/keys`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+      ...(options.key === undefined ? {} : { "Idempotency-Key": options.key }),
+      Cookie: cookieFor(token),
+      Origin: fixture.url,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 /** Read SSE frames until `predicate` matches one (or the budget expires). */
 async function nextFrame(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -573,12 +749,16 @@ test("both setup routes require a session, an origin, the headers and a key", as
   }
 });
 
-test("the wizard saves land in the care view and complete the checklist", async () => {
+test("the wizard saves land in the care view, and five steps complete the checklist", async () => {
   const fixture = await startSetupApp();
   try {
     const initial = await careView(fixture, fixture.alexCookie);
-    assert.deepEqual(initial.setup, { complete: false, missing: ["timezone", "puppy", "meals"] });
+    assert.deepEqual(initial.setup, {
+      complete: false,
+      missing: ["name", "timezone", "puppy", "meals", "key"],
+    });
     assert.equal(initial.household.timezoneConfirmedAt, null);
+    assert.equal(initial.household.nameConfirmedAt, null);
     assert.deepEqual(initial.meals.slots, []);
 
     const zone = await patch(
@@ -593,7 +773,7 @@ test("the wizard saves land in the care view and complete the checklist", async 
     assert.equal(afterZone.replayed, false);
     assert.equal(afterZone.profile.household.timezone, "Europe/Paris");
     assert.ok(afterZone.profile.household.timezoneConfirmedAt);
-    assert.deepEqual(afterZone.profile.setup.missing, ["puppy", "meals"]);
+    assert.deepEqual(afterZone.profile.setup.missing, ["name", "puppy", "meals", "key"]);
 
     const puppy = await patch(
       fixture,
@@ -615,15 +795,48 @@ test("the wizard saves land in the care view and complete the checklist", async 
     assert.equal(slots.status, 200);
     const final = (await slots.json()) as { profile: PuppyProfile };
     assert.deepEqual(final.profile.meals.slots, [BREAKFAST, DINNER]);
-    assert.deepEqual(final.profile.setup, { complete: true, missing: [] });
+    // The old three-step rule no longer completes setup (R9): the name and the
+    // key are still missing, so an old household re-runs it once.
+    assert.deepEqual(final.profile.setup, { complete: false, missing: ["name", "key"] });
 
-    // A retried export is the same action, not a second revision or a conflict.
+    // A key is presence only: saving one finishes the key step, and the value
+    // never rides any response.
+    const keyed = await putKey(
+      fixture,
+      fixture.alexCookie,
+      { provider: "opencode-go", key: "sk-test-secret-1" },
+      { key: "key-1" },
+    );
+    assert.equal(keyed.status, 200);
+    const afterKey = await careView(fixture, fixture.alexCookie);
+    assert.deepEqual(afterKey.setup.missing, ["name"]);
+    assert.equal(
+      JSON.stringify(afterKey).includes("sk-test-secret-1"),
+      false,
+      "no key value in the care view",
+    );
+
+    // The name confirm completes the five-step rule — a member may make it.
+    const named = await patch(
+      fixture,
+      "/api/household",
+      fixture.samCookie,
+      { rev: afterKey.household.rev, name: "Our household" },
+      { key: "name-1" },
+    );
+    assert.equal(named.status, 200);
+    const afterName = (await named.json()) as { profile: PuppyProfile; replayed: boolean };
+    assert.equal(afterName.replayed, false);
+    assert.ok(afterName.profile.household.nameConfirmedAt);
+    assert.deepEqual(afterName.profile.setup, { complete: true, missing: [] });
+
+    // A retried name confirm is the same action, not a second revision.
     const retry = await patch(
       fixture,
-      "/api/feeding/slots",
-      fixture.alexCookie,
-      { rev: afterPuppy.profile.meals.rev, slots: [BREAKFAST, DINNER] },
-      { key: "slots-1" },
+      "/api/household",
+      fixture.samCookie,
+      { rev: afterKey.household.rev, name: "Our household" },
+      { key: "name-1" },
     );
     assert.equal(retry.status, 200);
     assert.equal(((await retry.json()) as { replayed: boolean }).replayed, true);
@@ -715,7 +928,7 @@ test("a timezone save and a meal save each reach the other caregiver as a profil
     const zoneFrame = await nextFrame(reader, (event) => event === "profile");
     const zoneView = zoneFrame.data as PuppyProfile;
     assert.equal(zoneView.household.timezone, "Europe/Paris");
-    assert.deepEqual(zoneView.setup.missing, ["puppy", "meals"]);
+    assert.deepEqual(zoneView.setup.missing, ["name", "puppy", "meals", "key"]);
 
     const slots = await patch(
       fixture,
@@ -728,7 +941,171 @@ test("a timezone save and a meal save each reach the other caregiver as a profil
     const slotFrame = await nextFrame(reader, (event) => event === "profile");
     const slotView = slotFrame.data as PuppyProfile;
     assert.deepEqual(slotView.meals.slots, [BREAKFAST]);
-    assert.deepEqual(slotView.setup.missing, ["puppy"]);
+    assert.deepEqual(slotView.setup.missing, ["name", "puppy", "key"]);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("a blank-trimmed key value counts as absent for the care view and the profile frame alike", async () => {
+  // A hand-edited or externally restored secrets.json whose only key value is
+  // whitespace must not complete the key step anywhere: the derivation is one
+  // shared, trimmed-blank-aware helper, so the GET-based care view and the
+  // `profile` frame cannot disagree about it. Fail closed, never present.
+  const fixture = await startSetupApp();
+  try {
+    // A real key first: the step completes, proving the absence below is the
+    // blank value's doing and not the file's.
+    const saved = await putKey(
+      fixture,
+      fixture.alexCookie,
+      { provider: "opencode-go", key: "sk-test-secret-3" },
+      { key: "blank-key-put" },
+    );
+    assert.equal(saved.status, 200);
+    const keyed = await careView(fixture, fixture.alexCookie);
+    assert.ok(!keyed.setup.missing.includes("key"));
+
+    await writeFile(
+      join(fixture.dir, "secrets.json"),
+      `${JSON.stringify({ ...emptySecrets(), providerKeys: { "opencode-go": "   " } })}\n`,
+    );
+
+    // The care view: still a readable profile, with the key step missing.
+    const view = await careView(fixture, fixture.alexCookie);
+    assert.ok(view.setup.missing.includes("key"), "the care view counts a blank key as absent");
+
+    // The stream: the next profile frame agrees.
+    const response = await fetch(`${fixture.url}/api/agent/events`, {
+      headers: { Cookie: cookieFor(fixture.samCookie) },
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    await nextFrame(reader, (event) => event === "snapshot");
+    const initial = await careView(fixture, fixture.alexCookie);
+    const zone = await patch(
+      fixture,
+      "/api/household",
+      fixture.alexCookie,
+      { rev: initial.household.rev, timezone: "Europe/Paris" },
+      { key: "blank-key-frame" },
+    );
+    assert.equal(zone.status, 200);
+    const frame = await nextFrame(reader, (event) => event === "profile");
+    const frameView = frame.data as PuppyProfile;
+    assert.ok(frameView.setup.missing.includes("key"), "the profile frame counts a blank key as absent");
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("a bad household name is refused and writes nothing", async () => {
+  const fixture = await startSetupApp();
+  try {
+    const initial = await careView(fixture, fixture.alexCookie);
+    for (const [label, name] of [
+      ["empty", ""],
+      ["blank", "   "],
+      ["long", "x".repeat(61)],
+      ["newline", "Seaside\nCottage"],
+    ] as const) {
+      const refused = await patch(
+        fixture,
+        "/api/household",
+        fixture.alexCookie,
+        { rev: initial.household.rev, name },
+        { key: `bad-${label}` },
+      );
+      assert.equal(refused.status, 409, label);
+    }
+    const after = await careView(fixture, fixture.alexCookie);
+    assert.equal(after.household.rev, initial.household.rev, "no revision was burned");
+    assert.equal(after.household.nameConfirmedAt, null, "nothing was stamped");
+    const entries = (await fixture.app.app.snapshot(ActivityDoc, context))?.entries ?? [];
+    assert.equal(entries.length, 0, "no activity line was written");
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("a household PATCH may confirm the name and the zone in one guarded commit", async () => {
+  const fixture = await startSetupApp();
+  try {
+    const initial = await careView(fixture, fixture.alexCookie);
+    const both = await patch(
+      fixture,
+      "/api/household",
+      fixture.alexCookie,
+      { rev: initial.household.rev, timezone: "Europe/Paris", name: "Seaside Cottage" },
+      { key: "both-1" },
+    );
+    assert.equal(both.status, 200);
+    const view = ((await both.json()) as { profile: PuppyProfile }).profile;
+    assert.equal(view.household.rev, initial.household.rev + 1, "one save, one revision");
+    assert.equal(view.household.name, "Seaside Cottage");
+    assert.ok(view.household.nameConfirmedAt);
+    assert.ok(view.household.timezoneConfirmedAt);
+    const entries = (await fixture.app.app.snapshot(ActivityDoc, context))?.entries ?? [];
+    assert.equal(entries.length, 2, "one line per confirmed aspect");
+    assert.deepEqual(entries.map((entry) => entry.kind), ["household.name", "household.timezone"]);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("an old-rule-complete household reports incomplete, and a name confirm with a key completes it", async () => {
+  // R9's exact walk: a household that finished the old three-step wizard has
+  // no name stamp, so it reports incomplete; once a key is present (an
+  // already-saved one counts), the name confirm alone finishes setup.
+  const fixture = await startSetupApp();
+  try {
+    const initial = await careView(fixture, fixture.alexCookie);
+    const zone = await patch(
+      fixture,
+      "/api/household",
+      fixture.alexCookie,
+      { rev: initial.household.rev, timezone: "Europe/Paris" },
+      { key: "old-zone" },
+    );
+    assert.equal(zone.status, 200);
+    const afterZone = (await zone.json()) as { profile: PuppyProfile };
+    const puppy = await patch(
+      fixture,
+      "/api/puppy",
+      fixture.alexCookie,
+      { rev: afterZone.profile.rev, name: "Biscuit" },
+      { key: "old-puppy" },
+    );
+    assert.equal(puppy.status, 200);
+    const afterPuppy = (await puppy.json()) as { profile: PuppyProfile };
+    const slots = await patch(
+      fixture,
+      "/api/feeding/slots",
+      fixture.alexCookie,
+      { rev: afterPuppy.profile.meals.rev, slots: [BREAKFAST] },
+      { key: "old-slots" },
+    );
+    assert.equal(slots.status, 200);
+    const oldComplete = ((await slots.json()) as { profile: PuppyProfile }).profile;
+    assert.deepEqual(oldComplete.setup, { complete: false, missing: ["name", "key"] });
+
+    const keyed = await putKey(
+      fixture,
+      fixture.alexCookie,
+      { provider: "opencode-go", key: "sk-test-secret-2" },
+      { key: "old-key" },
+    );
+    assert.equal(keyed.status, 200);
+    const named = await patch(
+      fixture,
+      "/api/household",
+      fixture.alexCookie,
+      { rev: oldComplete.household.rev, name: "Our household" },
+      { key: "old-name" },
+    );
+    assert.equal(named.status, 200);
+    const final = ((await named.json()) as { profile: PuppyProfile }).profile;
+    assert.deepEqual(final.setup, { complete: true, missing: [] }, "the name confirm alone finished it");
   } finally {
     await stop(fixture);
   }
@@ -826,7 +1203,7 @@ test("a database from before P1-14 boots through the household migration and get
 
     // The migrated household is a document this build can write to.
     assert.equal(
-      await updateHouseholdTimezone(harness, context, {
+      await updateHouseholdProfile(harness, context, {
         actor,
         actionId: "http:upgraded-1",
         rev: household.rev,

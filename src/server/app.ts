@@ -59,7 +59,7 @@ import { reconcileFeedReminders } from "./reminders/feed-planner.ts";
 import { archiveOldFeeds } from "./domain/feeding.ts";
 import { archiveOldWalks } from "./domain/walks.ts";
 import { reconcileUsageMonth } from "./domain/usage.ts";
-import { createAppModels, providersWithKeys, type AppModels } from "./models/collection.ts";
+import { createAppModels, providerKeyPresent, providersWithKeys, type AppModels } from "./models/collection.ts";
 import { PROBE_FRESH_MS, probeAndCache } from "./models/probe-run.ts";
 import { ensureVapid } from "./push/vapid.ts";
 import { startNotificationOutbox, type NotificationOutboxWatch } from "./notifications/watch.ts";
@@ -739,6 +739,11 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       // clock; a frame built on the wall clock would disagree with every read
       // on a process with an injected clock (P3-03).
       now: options.now ? () => new Date(options.now!()) : undefined,
+      // The key setup step is derived from `secrets.json`'s key list, live: a
+      // key saved from Settings must end the setup gate without a restart.
+      // Presence only — a key's value never enters the frame (§14.1). The same
+      // shared derivation the care view uses, so the two can never disagree.
+      keyPresent: () => providerKeyPresent(stores.secrets),
     });
 
     // P4-06: the host phone's Termux:API transport. Only the owner's intents go

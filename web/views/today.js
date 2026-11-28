@@ -1,9 +1,10 @@
 // Today — the care surface the two caregivers live on (PLAN §13.1).
 //
-// This build owns the meals card (fed/pending/overdue, mark-fed, extra feeding),
-// the walk card (start, a live server-corrected timer, end, and a stale
-// discard) and the next-appointment line. The first-run setup gate already
-// lives here (P1-14).
+// This build owns the meals card (fed/pending/overdue, mark-fed, extra feeding)
+// and the walk card (start, a live server-corrected timer, end, and a stale
+// discard). The agent bar, weight and recent activity arrive with their phases.
+// The first-run setup gate lives in the shell (the mandatory `#/setup` route):
+// Today is only ever mounted for a household whose setup is complete.
 //
 // Three rules shape the screen:
 //   * **never optimistic.** Nothing is marked fed until the server's commit
@@ -29,7 +30,6 @@ import { getState, subscribe } from "../store.js";
 import { feedTimeText, localDate, mealClock, mealRows } from "../meals.js";
 import { correctedNow, startedText, timerText, walkMinutes, walkSeconds, walkStale, walkTimeText } from "../walks.js";
 import { nextAppointmentText } from "../calendar.js";
-import { Setup } from "./setup.js";
 
 const html = htm.bind(h);
 
@@ -83,11 +83,9 @@ export class Today extends Component {
     // These routes need no profile: read them on mount instead of waiting for
     // the first care frame (which may never come if `/api/puppy` keeps failing),
     // and because a route change remounts this view with no frame to wait for.
-    if (!this.gated()) {
-      void this.load();
-      void this.loadWalks();
-      void this.loadNextAppointment();
-    }
+    void this.load();
+    void this.loadWalks();
+    void this.loadNextAppointment();
     this.timer = setInterval(() => this.onTick(), TICK_MS);
     this.timer.unref?.();
   }
@@ -107,16 +105,9 @@ export class Today extends Component {
     const seq = state?.careSeq ?? 0;
     if (seq === this.state.seenCare) return;
     this.setState({ seenCare: seq });
-    if (!this.gated()) {
-      void this.load();
-      void this.loadWalks();
-      void this.loadNextAppointment();
-    }
-  }
-
-  /** P1-14: an unfinished household sees the wizard, not a meals card. */
-  gated() {
-    return getState().profile?.setup?.complete === false;
+    void this.load();
+    void this.loadWalks();
+    void this.loadNextAppointment();
   }
 
   /** The household zone, or `null` before the profile is read: times then say unknown rather than UTC. */
@@ -137,7 +128,6 @@ export class Today extends Component {
     const open = this.state.walk?.open ?? null;
     if (!open && this.ticks % 30 !== 0) return;
     this.setState({ tick: this.state.tick + 1 });
-    if (this.gated()) return;
     const day = this.state.day;
     if (!day) return;
     const today = localDate(new Date(), this.timezone());
@@ -794,11 +784,6 @@ export class Today extends Component {
   }
 
   render() {
-    const profile = getState().profile;
-    // No profile is "not read yet": show Today rather than flashing the wizard
-    // at a household that finished setup long ago (P1-14).
-    if (profile?.setup?.complete === false) return h(Setup, {});
-
     return html`
       <section class="view" aria-labelledby="today-heading">
         <h1 id="today-heading">Today</h1>

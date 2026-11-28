@@ -27,7 +27,7 @@ import { emptyConfig, type MemberRecord } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
 import { HouseholdDoc } from "../src/server/domain/docs.ts";
 import { updateMealSlots } from "../src/server/domain/feeding.ts";
-import { readHousehold, updateHouseholdTimezone } from "../src/server/domain/household.ts";
+import { readHousehold, updateHouseholdProfile } from "../src/server/domain/household.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import { createReminders } from "../src/server/reminders/feed-reminder.ts";
 import {
@@ -332,7 +332,7 @@ test("a timezone change re-arms today's reminders in the new zone in the same co
       assert.equal(breakfast.dueAt, BREAKFAST_DUE, "07:00 CET plus the 15-minute delay");
 
       assert.equal(
-        await updateHouseholdTimezone(opened.harness, context, {
+        await updateHouseholdProfile(opened.harness, context, {
           actor: alex,
           actionId: "http:zone-1",
           rev: before.rev,

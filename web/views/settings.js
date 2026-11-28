@@ -1,7 +1,7 @@
 // Settings — household, notifications, models and budget (PLAN §13.1).
 //
-// This build owns the household card (the household name and, since P4-09, the
-// one-time partner invite, plus the embedded wizard until setup is complete), the
+// This build owns the household card (the household section and, since P4-09,
+// the one-time partner invite), the
 // notification card (P4-06): this device's Web Push switch, the per-category
 // preferences, the ntfy topic for a phone without Web Push, and a test button,
 // and the model card (P4-08): the current model, this month's spend against the
@@ -40,7 +40,7 @@ import {
   spendText,
 } from "../models.js";
 import { disablePush, enablePush, pushSupported } from "../push.js";
-import { Setup } from "./setup.js";
+import { HouseholdSection } from "./household-section.js";
 import { MealTimes } from "./meal-times.js";
 import { Invite } from "./invite.js";
 import { MyName } from "./my-name.js";
@@ -686,6 +686,7 @@ export class Settings extends Component {
               </p>
             `
           : null}
+        <${HouseholdSection} request=${this.request} />
         <${Invite}
           request=${this.request}
           role=${this.state.role}
@@ -698,7 +699,7 @@ export class Settings extends Component {
         ${
           profile?.setup?.complete === true
             ? html`<p class="field__hint">Setup is complete. Edit your puppy on Pup and meal times in the card above.</p>`
-            : html`<${Setup} embedded=${true} />`
+            : null
         }
       </section>
     `;

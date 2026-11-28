@@ -1037,11 +1037,19 @@ test("app.js applies every state change in a frame and the last one wins", async
   const requestAnimationFrame = (callback: () => void) => frames.push(callback);
   const View = () => null;
 
+  // The gate's decisions live in the real store (tested there); this harness
+  // stands in for the two the shell calls, and records the URL half.
+  const reconciles: Array<{ route: string; profile: unknown }> = [];
+  const gatedRoute = (route: string) => ({ screen: route });
+  const reconcileHash = (route: string, profile: unknown) => reconciles.push({ route, profile });
+
   new Function(
     "h",
     "render",
     "htm",
     "hashRoute",
+    "gatedRoute",
+    "reconcileHash",
     "setState",
     "subscribe",
     "startLive",
@@ -1063,6 +1071,8 @@ test("app.js applies every state change in a frame and the last one wins", async
     render,
     htm,
     hashRoute,
+    gatedRoute,
+    reconcileHash,
     setState,
     subscribe,
     () => ({ close() {} }),
@@ -1094,6 +1104,11 @@ test("app.js applies every state change in a frame and the last one wins", async
   assert.equal(frames.length, 1, "both changes coalesce into the one queued frame");
   flush();
   assert.deepEqual(renders[0], { route: "calendar", online: false });
+  assert.deepEqual(
+    reconciles.map((entry) => entry.route),
+    ["calendar"],
+    "the gate's URL half runs with the paint, once per frame",
+  );
 
   // The frame reset `pending`: the next change paints again.
   navigator.onLine = true;

@@ -1,5 +1,6 @@
 // The household document: one reader, the one place that mirrors auth into it,
-// and (P1-14) the one human-editable write — the timezone (PLAN §7.1, §8.1).
+// and the one human-editable write — the name and the timezone (PLAN §7.1,
+// §8.1; the name is the mandatory first-run setup's confirm-if-unchanged step).
 //
 // `config.json` is the authority for auth identities and roles; `app.household`
 // holds the display profiles. Boot reconciles the two in full. A member created
@@ -26,7 +27,7 @@ import { reconcileMembers, type AppConfig } from "../config.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
 import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type WriteOutcome } from "./commands.ts";
-import { hasControlCharacter, isIanaZone } from "../../shared/profile.ts";
+import { hasControlCharacter, isIanaZone, HOUSEHOLD_NAME_LIMIT, parseHouseholdName } from "../../shared/profile.ts";
 import { AGENT_BUDGET_MAX_USD, isAgentBudget } from "../../shared/usage.ts";
 import {
   ActivityDoc,
@@ -118,7 +119,7 @@ export async function syncHouseholdMembers(
   return { created, removed };
 }
 
-// --- the household's one human-editable write (P1-14) -----------------------
+// --- the household's one human-editable write -------------------------------
 
 export type HouseholdWrite = {
   /** Resolved inside the commit, against the same household the write reads. */
@@ -127,46 +128,70 @@ export type HouseholdWrite = {
   readonly actionId: string;
   /** The household revision the caller read. */
   readonly rev: number;
-  /** IANA zone; `Europe/Paris`, not `+01:00`. */
-  readonly timezone: string;
+  /** IANA zone to set or re-confirm; absent leaves the zone and its stamp. */
+  readonly timezone?: string;
+  /**
+   * Household name to set or re-confirm; absent leaves the name and its stamp.
+   * Confirming an unchanged name (the default included) still stamps: the
+   * caregiver has checked the one word the household answers to.
+   */
+  readonly name?: string;
   readonly now?: Date;
 };
 
 /**
- * Set (or re-confirm) the household timezone. One commit: the zone, the
- * confirmation instant, the bumped revision, the activity entry and the
- * idempotency record land together or not at all.
+ * Set or re-confirm the household's name and/or timezone. One commit: every
+ * provided value, its confirmation instant, the bumped revision, the activity
+ * entries and the idempotency record land together or not at all.
  *
- * Confirming an unchanged zone still counts: the caregiver has checked the one
- * value every future `localDate` derives from, and first-run setup is not
- * complete until that has happened. Only the roster is exempt from `rev` —
- * boot and an invite mirror members without revising the household.
+ * Confirming an unchanged value still counts, for both fields: the caregiver
+ * has checked it, and first-run setup is not complete until each stamp exists.
+ * Only the roster is exempt from `rev` — boot and an invite mirror members
+ * without revising the household.
  */
-export async function updateHouseholdTimezone(
+export async function updateHouseholdProfile(
   store: DocStore,
   context: Context,
   input: HouseholdWrite,
 ): Promise<WriteOutcome> {
+  if (input.timezone === undefined && input.name === undefined) {
+    throw new Error("a household write confirms a name or a timezone");
+  }
   const now = input.now ?? new Date();
-  const request = { rev: input.rev, timezone: input.timezone } as JsonObject;
-  let outcome: CommandOutcome<{ rev: number; timezone: string }>;
+  // Only the provided fields are part of the request, so a replay of a
+  // name-only save hashes the same action it recorded.
+  const request = {
+    rev: input.rev,
+    ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
+    ...(input.name === undefined ? {} : { name: input.name }),
+  } as JsonObject;
+  let outcome: CommandOutcome<{ rev: number; timezone?: string; name?: string }>;
   try {
     outcome = await runIdempotent(
       { store, context },
       { key: input.actionId, requestHash: requestHashOf(request), now },
       async (tx) => {
         // Inside the callback and after the idempotency lookup: a replay must
-        // not be re-judged, and a bad zone must not reach the document.
-        if (!isIanaZone(input.timezone)) {
+        // not be re-judged, and a bad value must not reach the document.
+        if (input.timezone !== undefined && !isIanaZone(input.timezone)) {
           throw new DomainConflictError(`"${input.timezone}" is not an IANA timezone`);
+        }
+        // The name is normalized here, not just at the route: the domain owns
+        // the document's shape.
+        const name = input.name === undefined ? undefined : parseHouseholdName(input.name);
+        if (input.name !== undefined && name === undefined) {
+          throw new DomainConflictError(
+            `a household name is one line of at most ${HOUSEHOLD_NAME_LIMIT} characters`,
+          );
         }
         const draft = await tx.doc(HouseholdDoc);
         const actor = await input.actor(tx, draft);
         if (draft.rev !== input.rev) throw new StaleRevisionError("the household changed since it was read");
 
-        const before = draft.timezone;
-        const changed = before !== input.timezone;
-        if (changed) {
+        const zoneBefore = draft.timezone;
+        const zoneChanged = input.timezone !== undefined && input.timezone !== zoneBefore;
+        const nameChanged = name !== undefined && name !== draft.name;
+        if (zoneChanged) {
           // P4-04: the meal reminders are wall-clock instants in the household
           // zone, so a zone change makes today's arms stale. Re-arm for the new
           // zone **before** storing it — the arm reads task state, which must
@@ -175,22 +200,51 @@ export async function updateHouseholdTimezone(
           const feeding = await tx.doc(FeedingDoc);
           await armFeedReminders(tx, draft, feeding.slots, now, input.timezone);
         }
-        draft.timezone = input.timezone;
-        draft.timezoneConfirmedAt = now.toISOString();
+        if (name !== undefined) {
+          draft.name = name;
+          draft.nameConfirmedAt = now.toISOString();
+        }
+        if (input.timezone !== undefined) {
+          draft.timezone = input.timezone;
+          draft.timezoneConfirmedAt = now.toISOString();
+        }
         draft.rev = input.rev + 1;
-        appendActivity(
-          await tx.doc(ActivityDoc),
-          activityEntry({
-            kind: "household.timezone",
-            summary: changed
-              ? `${actor.label} changed the household timezone from ${before} to ${input.timezone}`
-              : `${actor.label} confirmed the household timezone (${input.timezone})`,
-            actorId: actor.id,
-            actorLabel: actor.label,
-            now,
-          }),
-        );
-        return { rev: draft.rev, timezone: input.timezone };
+        // One activity line per confirmed aspect, in the setup page's order.
+        if (name !== undefined) {
+          appendActivity(
+            await tx.doc(ActivityDoc),
+            activityEntry({
+              kind: "household.name",
+              // The document's names are free text; they are quoted in the feed
+              // so a name that reads like a sentence cannot pass itself off as one.
+              summary: nameChanged
+                ? `${actor.label} named the household "${name}"`
+                : `${actor.label} confirmed the household name ("${name}")`,
+              actorId: actor.id,
+              actorLabel: actor.label,
+              now,
+            }),
+          );
+        }
+        if (input.timezone !== undefined) {
+          appendActivity(
+            await tx.doc(ActivityDoc),
+            activityEntry({
+              kind: "household.timezone",
+              summary: zoneChanged
+                ? `${actor.label} changed the household timezone from ${zoneBefore} to ${input.timezone}`
+                : `${actor.label} confirmed the household timezone (${input.timezone})`,
+              actorId: actor.id,
+              actorLabel: actor.label,
+              now,
+            }),
+          );
+        }
+        return {
+          rev: draft.rev,
+          ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
+          ...(name === undefined ? {} : { name }),
+        };
       },
     );
   } catch (error) {

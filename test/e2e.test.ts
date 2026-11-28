@@ -31,6 +31,7 @@ import { REQUEST_HEADER, REQUEST_HEADER_VALUE } from "../src/server/http.ts";
 import { createLogger } from "../src/server/log.ts";
 import { PROBE_CACHE_VERSION } from "../src/server/models/cache.ts";
 import type { ThreadSnapshot, TranscriptEntry } from "../src/shared/chat.ts";
+import type { PuppyProfile } from "../src/shared/profile.ts";
 
 const DEFAULT_PROVIDER = "opencode-go";
 const DEFAULT_MODEL = "mimo-v2.6-flash";
@@ -38,6 +39,15 @@ const DEFAULT_MODEL = "mimo-v2.6-flash";
 // The same synthetic shapes `test/log.test.ts` exercises. They are not real
 // credentials; they are shaped like the ones the scrubber must catch.
 const PROVIDER_KEY = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";
+// The first-launch leg's dummy key: a fixture, never a real credential. It is
+// deliberately not one of the redaction shapes above — those stay reserved for
+// the log-scrubbing test's own assertions.
+const SETUP_DUMMY_KEY = "sk-test-first-launch-000000000000";
+
+// The meal schedule a realistic first launch would save (the shape `PATCH
+// /api/feeding/slots` accepts, as `test/setup.test.ts` pins it).
+const SETUP_BREAKFAST = { id: "slot-a", label: "Breakfast", timeLocal: "07:00", active: true };
+const SETUP_DINNER = { id: "slot-b", label: "Dinner", timeLocal: "18:00", active: true };
 const BEARER = "eyJhbGciOiJIUzI1NiJ9.payload.signature";
 const NTFY_TOPIC = "QUy9P9Hw4c2MH_NRGZFasFv8U34hBxHu";
 const VAPID_KEY = "f8s7d6f5g4h3j2k1l0q9w8e7r6t5y4u3i2o1p0a9s8d7f6g5h4j3k2l1";
@@ -218,6 +228,56 @@ async function patchProfile(
     },
     body: JSON.stringify(body),
   });
+}
+
+/** A PATCH care write: JSON, the fixed header, the same-origin Origin, an idempotency key. */
+async function patchCare(
+  fixture: Fixture,
+  path: string,
+  cookieToken: string,
+  body: Record<string, unknown>,
+  actionId: string,
+): Promise<Response> {
+  return fetch(`${fixture.url}${path}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+      "Idempotency-Key": actionId,
+      Cookie: cookieFor(cookieToken),
+      Origin: fixture.url,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+/** The owner-only provider-key write: JSON, the fixed header, the same-origin Origin, an idempotency key. */
+async function putProviderKey(
+  fixture: Fixture,
+  cookieToken: string,
+  body: Record<string, unknown>,
+  actionId: string,
+): Promise<Response> {
+  return fetch(`${fixture.url}/api/models/keys`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      [REQUEST_HEADER]: REQUEST_HEADER_VALUE,
+      "Idempotency-Key": actionId,
+      Cookie: cookieFor(cookieToken),
+      Origin: fixture.url,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+/** The care-state read every setup card and gate decision is derived from. */
+async function careProfile(fixture: Fixture, cookieToken: string): Promise<PuppyProfile> {
+  const response = await fetch(`${fixture.url}/api/puppy`, {
+    headers: { Cookie: cookieFor(cookieToken) },
+  });
+  assert.equal(response.status, 200);
+  return (await response.json()) as PuppyProfile;
 }
 
 async function postMessage(
@@ -510,6 +570,125 @@ test("the tunnel scheme is trusted only from loopback, and X-Forwarded-* never w
     assert.equal(read.status, 200, "a read is authenticated, not origin-checked");
     assert.equal(read.headers.get("access-control-allow-origin"), null, "there is no CORS surface");
     assert.match(read.headers.get("content-security-policy") ?? "", /default-src 'self'/);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+/**
+ * The first-launch walk over the real APIs (the mandatory first-run setup):
+ * the owner link signs in, the care profile reports all five steps missing in
+ * the setup page's order, and each step's own route completes exactly one
+ * derived step with one care commit. A partner invited after completion reads
+ * a complete profile on their very first read — the gate is household-wide,
+ * never per-member (R8/AC9).
+ *
+ * The seam is honest: this suite drives HTTP, not a browser. The visual lock —
+ * the forced `#/setup` route, the missing navigation, the loading state — is
+ * already pinned by `test/client.test.js`, `test/pwa.test.ts` and the
+ * real-browser `test/browser-render.test.ts`; what this leg pins is the
+ * first-launch API walk a locked client drives, and the never-gated partner.
+ */
+test("the first launch: five setup steps, then a partner who is never gated", async () => {
+  const fixture = await startSlice([]);
+  try {
+    // The owner link: the same sign-in the launcher's printed link drives.
+    const minted = await fixture.auth.mintOwner("http://127.0.0.1");
+    fixture.ownerToken = minted.token;
+    const login = await fetch(`${fixture.url}/login?token=${encodeURIComponent(minted.token)}`, {
+      redirect: "manual",
+    });
+    assert.equal(login.status, 303, "the owner link signs a browser in");
+    fixture.ownerCookie = firstCookie(login);
+
+    const initial = await careProfile(fixture, fixture.ownerCookie);
+    assert.deepEqual(initial.setup, {
+      complete: false,
+      missing: ["name", "timezone", "puppy", "meals", "key"],
+    }, "a fresh household reports all five steps missing, in setup order");
+
+    // Step 1 — the household name, confirmed even though it is unchanged (the
+    // confirm-if-unchanged semantics the name step exists for).
+    const named = await patchCare(fixture, "/api/household", fixture.ownerCookie, {
+      rev: initial.household.rev,
+      name: initial.household.name,
+    }, "e2e-setup-name");
+    assert.equal(named.status, 200, "confirming the default name is still a write");
+    const afterName = ((await named.json()) as { profile: PuppyProfile }).profile;
+    assert.ok(afterName.household.nameConfirmedAt);
+    assert.deepEqual(afterName.setup.missing, ["timezone", "puppy", "meals", "key"]);
+
+    // Step 2 — the timezone, confirmed with a real zone.
+    const zoned = await patchCare(fixture, "/api/household", fixture.ownerCookie, {
+      rev: afterName.household.rev,
+      timezone: "Europe/Paris",
+    }, "e2e-setup-zone");
+    assert.equal(zoned.status, 200);
+    const afterZone = ((await zoned.json()) as { profile: PuppyProfile }).profile;
+    assert.ok(afterZone.household.timezoneConfirmedAt);
+    assert.deepEqual(afterZone.setup.missing, ["puppy", "meals", "key"]);
+
+    // Step 3 — the puppy, named.
+    const pupped = await patchCare(fixture, "/api/puppy", fixture.ownerCookie, {
+      rev: afterZone.rev,
+      name: "Biscuit",
+      birthday: "2026-08-08",
+    }, "e2e-setup-puppy");
+    assert.equal(pupped.status, 200);
+    const afterPuppy = ((await pupped.json()) as { profile: PuppyProfile }).profile;
+    assert.equal(afterPuppy.puppy.name, "Biscuit");
+    assert.deepEqual(afterPuppy.setup.missing, ["meals", "key"]);
+
+    // Step 4 — at least one meal slot.
+    const fed = await patchCare(fixture, "/api/feeding/slots", fixture.ownerCookie, {
+      rev: afterPuppy.meals.rev,
+      slots: [SETUP_BREAKFAST, SETUP_DINNER],
+    }, "e2e-setup-meals");
+    assert.equal(fed.status, 200);
+    const afterMeals = ((await fed.json()) as { profile: PuppyProfile }).profile;
+    assert.equal(afterMeals.meals.slots.length, 2);
+    assert.deepEqual(afterMeals.setup.missing, ["key"]);
+
+    // Step 5 — the provider key, saved through the owner-only route. Presence
+    // completes the step; the value never rides any response (§14.1).
+    const keyed = await putProviderKey(fixture, fixture.ownerCookie, {
+      provider: DEFAULT_PROVIDER,
+      key: SETUP_DUMMY_KEY,
+    }, "e2e-setup-key");
+    assert.equal(keyed.status, 200);
+    const keyView = JSON.stringify(await keyed.json());
+    assert.equal(
+      keyView.includes(SETUP_DUMMY_KEY),
+      false,
+      "the key write's response never echoes the key",
+    );
+
+    const complete = await careProfile(fixture, fixture.ownerCookie);
+    assert.deepEqual(complete.setup, { complete: true, missing: [] });
+    assert.equal(
+      JSON.stringify(complete).includes(SETUP_DUMMY_KEY),
+      false,
+      "the care view carries presence, never the key's value",
+    );
+
+    // Only now, with setup complete, does the owner invite the partner.
+    const invite = await mutate(fixture, "/api/invites", fixture.ownerCookie, { displayName: "Sam" });
+    assert.equal(invite.status, 200, "only the owner creates invites");
+    const { code, link } = (await invite.json()) as { code: string; link: string };
+    fixture.inviteCode = code;
+    const accepted = await fetch(link, { redirect: "manual" });
+    assert.equal(accepted.status, 303, "the invite link signs the partner in");
+    fixture.memberCookie = firstCookie(accepted);
+
+    // The partner's very first profile read: the gate is household-wide, so a
+    // partner invited after completion is never gated (R8/AC9).
+    const firstRead = await careProfile(fixture, fixture.memberCookie);
+    assert.deepEqual(firstRead.setup, { complete: true, missing: [] });
+    assert.equal(firstRead.puppy.name, "Biscuit", "the partner sees the same care state");
+
+    // The same authz matrix holds on the partner's first session.
+    const refused = await mutate(fixture, "/api/invites", fixture.memberCookie, { displayName: "Imposter" });
+    assert.equal(refused.status, 403, "a member cannot mint invites");
   } finally {
     await stop(fixture);
   }

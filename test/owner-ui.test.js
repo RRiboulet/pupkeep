@@ -26,6 +26,8 @@ import { SESSION_COOKIE } from "../src/server/auth.ts";
 import { startTestApp } from "./support/app.ts";
 import { NetworkError, newIdempotencyKey, requestJson } from "../web/client.js";
 import { Agent } from "../web/views/agent.js";
+import { getState, setState, subscribe } from "../web/store.js";
+import { HouseholdSection } from "../web/views/household-section.js";
 import { Invite } from "../web/views/invite.js";
 import { MealTimes } from "../web/views/meal-times.js";
 import { Notifications } from "../web/views/notifications.js";
@@ -45,6 +47,7 @@ const realFetch = globalThis.fetch;
 async function ownerUi(options = {}) {
   const app = await startTestApp({
     prefix: "pupkeep-owner-ui-",
+    ...(options.partner === undefined ? {} : { partner: options.partner }),
     ...(options.responses === undefined ? {} : { responses: options.responses }),
   });
   const cookie =
@@ -604,6 +607,322 @@ test("the owner's Today card feeds a meal and walks the dog", async () => {
     await today.endWalk();
     assert.equal(today.state.walkError, null);
     assert.equal(today.state.walk?.open ?? null, null, "the walk is closed");
+  } finally {
+    await ui.close();
+  }
+});
+
+// --- Settings → Household (the name and the timezone, ticket 03) ------------
+// The card the Settings screen gains as the embedded wizard leaves (the
+// mandatory first-run setup, ticket 04): the post-completion home for the two
+// human-checked facts, editable at any time by either caregiver, with the
+// wizard's per-section guards.
+
+/** The household document as the server holds it right now. */
+async function householdNow() {
+  return (await requestJson("/api/puppy")).body.household;
+}
+
+test("confirming the unchanged household name and timezone from Settings still counts", async () => {
+  const ui = await ownerUi();
+  try {
+    // The shared store outlives one test's app; a fresh read keeps the
+    // revision-based `isNewer` checks in the card honest.
+    setState({ profile: null });
+    const card = mount(HouseholdSection);
+    await card.load();
+    assert.equal(card.state.error, null);
+    const before = await householdNow();
+
+    // No edit: the draft is what the card read. The confirm is still a real
+    // action — that is the whole signing-off semantics the wizard has.
+    await card.saveName({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.equal(card.state.nameError, null);
+    assert.match(String(card.state.nameMessage), /Saved/);
+
+    await card.saveZone({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.equal(card.state.timezoneError, null);
+    assert.match(String(card.state.timezoneMessage), /Saved/);
+
+    const after = await householdNow();
+    assert.equal(after.name, before.name);
+    assert.equal(after.timezone, before.timezone);
+    assert.notEqual(after.nameConfirmedAt, null, "the name confirm is stamped");
+    assert.notEqual(after.timezoneConfirmedAt, null, "the timezone confirm is stamped");
+    assert.equal(after.rev, before.rev + 2, "two confirms, two revisions — one commit each");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("the owner changes the household name and timezone from Settings, and the shared state follows", async () => {
+  const ui = await ownerUi();
+  try {
+    setState({ profile: null });
+    const card = mount(HouseholdSection);
+    await card.load();
+    const before = await householdNow();
+
+    card.onNameInput({ target: { value: "The Anchorage" } });
+    await card.saveName({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.equal(card.state.nameError, null);
+    assert.match(String(card.state.nameMessage), /Saved/);
+
+    card.onZoneInput({ target: { value: "Europe/Madrid" } });
+    await card.saveZone({ preventDefault() {} });
+    assert.equal(card.state.timezoneError, null);
+    assert.match(String(card.state.timezoneMessage), /Saved/);
+
+    const after = await householdNow();
+    assert.equal(after.name, "The Anchorage");
+    assert.equal(after.timezone, "Europe/Madrid");
+    assert.equal(after.rev, before.rev + 2);
+
+    // A successful save hands the returned profile to the shell, so Today and
+    // the other caregiver's screens move now rather than on the next frame.
+    assert.equal(getState().profile?.household?.name, "The Anchorage");
+    assert.equal(getState().profile?.household?.timezone, "Europe/Madrid");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("the partner changes the household name from Settings too", async () => {
+  const ui = await ownerUi({ partner: true, role: "partner" });
+  try {
+    const card = mount(HouseholdSection);
+    await card.load();
+    card.onNameInput({ target: { value: "Renamed by Sam" } });
+    await card.saveName({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.equal(card.state.nameError, null, "a member's write is not refused");
+    assert.equal((await householdNow()).name, "Renamed by Sam");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("a stale household save surfaces the conflict in its own section and keeps the draft", async () => {
+  const ui = await ownerUi();
+  try {
+    const card = mount(HouseholdSection);
+    await card.load();
+    card.onNameInput({ target: { value: "Renamed at home" } });
+
+    // The other caregiver saves a different name from another device.
+    const before = await householdNow();
+    const away = await requestJson("/api/household", {
+      method: "PATCH",
+      body: { rev: before.rev, name: "Renamed away" },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    assert.equal(away.status, 200);
+
+    // The card's save is stale: the draft is kept, the conflict is named in the
+    // name section only, and the current state is what the card now holds.
+    await card.saveName({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.match(String(card.state.nameConflict), /Someone else changed/);
+    assert.equal(card.state.name, "Renamed at home", "the draft is not replaced");
+    assert.equal(card.state.nameError, null);
+    assert.equal(card.state.timezoneConflict, null, "the timezone section is untouched");
+    assert.equal(card.state.timezoneError, null);
+    assert.equal((await householdNow()).name, "Renamed away");
+
+    // The revision moved with the conflict, so one more save is the knowing
+    // replacement — not a guaranteed second stale.
+    await card.saveName({ preventDefault() {} });
+    assert.equal(card.state.nameConflict, null);
+    assert.equal(card.state.nameError, null);
+    assert.equal((await householdNow()).name, "Renamed at home");
+  } finally {
+    await ui.close();
+  }
+});
+
+/**
+ * The household card with the subscription Preact's mount would give it: the
+ * harness renders nothing, so `componentDidMount` never runs, and the save
+ * path's own store hand-off reaches `onStore` only through this.
+ */
+function mountHouseholdCard() {
+  const card = mount(HouseholdSection);
+  card.unsubscribe = subscribe((state) => card.onStore(state));
+  return card;
+}
+
+test("a live frame from the other caregiver's household write blames a dirty draft", async () => {
+  const ui = await ownerUi();
+  const card = mountHouseholdCard();
+  try {
+    setState({ profile: null });
+    await card.load();
+    assert.equal(card.state.error, null);
+    card.onNameInput({ target: { value: "Renamed at home" } });
+
+    // The other caregiver saves a different name from another device. No save
+    // of this card's is outstanding, so the frame is genuinely theirs.
+    const before = await householdNow();
+    const away = await requestJson("/api/household", {
+      method: "PATCH",
+      body: { rev: before.rev, name: "Renamed away" },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    assert.equal(away.status, 200);
+
+    card.onStore({ profile: (await requestJson("/api/puppy")).body });
+    assert.match(String(card.state.nameConflict), /Someone else changed/);
+    assert.equal(card.state.name, "Renamed at home", "the draft is kept");
+    assert.equal(card.state.timezoneConflict, null, "the clean section is not blamed");
+  } finally {
+    card.unsubscribe?.();
+    await ui.close();
+  }
+});
+
+test("the card's own timezone save does not blame a dirty name draft", async () => {
+  const ui = await ownerUi();
+  const card = mountHouseholdCard();
+  try {
+    setState({ profile: null });
+    await card.load();
+    assert.equal(card.state.error, null);
+
+    // The caregiver holds a dirty name draft and saves the timezone. The
+    // save's success hands its profile to the shared store while the write is
+    // still this card's, and the stream repeats the frame afterwards.
+    card.onNameInput({ target: { value: "Renamed at home" } });
+    card.onZoneInput({ target: { value: "Europe/Madrid" } });
+    await card.saveZone({ preventDefault() {} });
+
+    assert.equal(card.state.busy, null);
+    assert.match(String(card.state.timezoneMessage), /Saved/);
+    assert.equal(card.state.nameConflict, null, "the card does not accuse its own save");
+    assert.equal(card.state.timezoneConflict, null);
+    assert.equal(card.state.name, "Renamed at home", "the name draft is kept");
+
+    // The save's own echo frame, after the save settled: the card already
+    // holds that revision, so the frame moves nothing and blames nobody.
+    card.onStore({ profile: (await requestJson("/api/puppy")).body });
+    assert.equal(card.state.nameConflict, null);
+    assert.equal(card.state.name, "Renamed at home");
+  } finally {
+    card.unsubscribe?.();
+    await ui.close();
+  }
+});
+
+test("a stale save blames the dirty sibling the other caregiver's write displaced", async () => {
+  const ui = await ownerUi();
+  const card = mountHouseholdCard();
+  try {
+    setState({ profile: null });
+    await card.load();
+    card.onNameInput({ target: { value: "Renamed at home" } });
+
+    // The other caregiver writes first; the frame for it may reach the card
+    // while this card's own save is on the wire, where the echo rule holds
+    // its tongue — the stale answer is what must name the conflict.
+    const before = await householdNow();
+    const away = await requestJson("/api/household", {
+      method: "PATCH",
+      body: { rev: before.rev, name: "Renamed away" },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    assert.equal(away.status, 200);
+
+    card.onZoneInput({ target: { value: "Europe/Madrid" } });
+    await card.saveZone({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.match(String(card.state.timezoneConflict), /Someone else changed/);
+    assert.match(String(card.state.nameConflict), /Someone else changed/, "the dirty sibling is blamed too");
+    assert.equal(card.state.name, "Renamed at home", "the name draft is kept");
+    assert.equal(card.state.zone, "Europe/Madrid", "the zone draft is kept");
+  } finally {
+    card.unsubscribe?.();
+    await ui.close();
+  }
+});
+
+test("a lost household save keeps its key, so the retry replays instead of committing twice", async () => {
+  const ui = await ownerUi();
+  try {
+    let patches = 0;
+    const flaky = async (path, options) => {
+      if (path === "/api/household") {
+        patches += 1;
+        const result = await requestJson(path, options);
+        // The commit lands; only the response is lost.
+        if (patches === 1) throw new NetworkError("the response was lost");
+        return result;
+      }
+      return requestJson(path, options);
+    };
+    const card = mount(HouseholdSection);
+    card.request = flaky;
+    await card.load();
+    const before = await householdNow();
+    card.onNameInput({ target: { value: "The Anchorage" } });
+
+    await card.saveName({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.match(String(card.state.nameError), /lost/);
+    assert.equal(patches, 1);
+
+    // The same draft is the same body, so the retry reuses the key.
+    await card.saveName({ preventDefault() {} });
+    assert.equal(card.state.nameError, null);
+    assert.equal(card.state.nameMessage, "Already saved.");
+    assert.equal(patches, 2);
+
+    const household = await householdNow();
+    assert.equal(household.name, "The Anchorage");
+    assert.equal(household.rev, before.rev + 1, "one commit, one revision — the replay committed nothing");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("a zone the server does not know is refused in the timezone section only", async () => {
+  const ui = await ownerUi();
+  try {
+    const card = mount(HouseholdSection);
+    await card.load();
+    const before = await householdNow();
+
+    card.onZoneInput({ target: { value: "Narnia/Time" } });
+    await card.saveZone({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.match(String(card.state.timezoneError), /IANA/);
+    assert.equal(card.state.nameError, null, "the name section is untouched");
+    assert.equal((await householdNow()).rev, before.rev, "nothing was committed");
+  } finally {
+    await ui.close();
+  }
+});
+
+test("the household section renders for the card's two roles and the embedded wizard is gone", async () => {
+  const ui = await ownerUi();
+  try {
+    // Render-level: the section's copy is role-free, and the wizard is nowhere
+    // on the page — first launch owns it, on its own `#/setup` route.
+    const settings = mount(Settings);
+    await settings.loadModels();
+    const vnode = settings.render();
+    const counts = { HouseholdSection: 0, Setup: 0 };
+    const walk = (node) => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (node && typeof node === "object") {
+        if (node.type?.name in counts) counts[node.type.name] += 1;
+        walk(node.props?.children);
+      }
+    };
+    walk(vnode);
+    assert.equal(counts.HouseholdSection, 1, "Settings mounts exactly one household section");
+    assert.equal(counts.Setup, 0, "the embedded wizard is gone; the setup page owns first launch");
   } finally {
     await ui.close();
   }

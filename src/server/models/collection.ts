@@ -45,6 +45,28 @@ export async function providersWithKeys(secrets: JsonFileStore<SecretsConfig>): 
   );
 }
 
+/**
+ * Whether any provider key exists, read live from `secrets.json`. The setup
+ * derivation (the care view's step list and the `profile` frame) sees this
+ * boolean and nothing else, so both derive it here and can never disagree: one
+ * derivation, trimmed-blank-aware. Fail closed — a secrets file this build
+ * cannot read (hand-edited, externally restored, truncated) is a missing key
+ * source, never a present one, and a caller that cannot know counts the key as
+ * absent. A key's value never enters a view, a response or a log (§14.1).
+ */
+export async function providerKeyPresent(
+  secrets: JsonFileStore<SecretsConfig> | undefined,
+  modelProviders?: () => Promise<ReadonlySet<string>>,
+): Promise<boolean> {
+  try {
+    if (secrets !== undefined) return (await providersWithKeys(secrets)).size > 0;
+    if (modelProviders !== undefined) return (await modelProviders()).size > 0;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 export interface AppModels {
   /** The catalog: model ids, prices, api shapes. */
   readonly models: Models;

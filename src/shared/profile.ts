@@ -42,8 +42,8 @@ export type PuppyAge = {
   label: string;
 };
 
-/** The three facts first-run setup must collect (P1-14, §13.1). */
-export type SetupStep = "timezone" | "puppy" | "meals";
+/** The five facts first-run setup must collect (mandatory first-run setup). */
+export type SetupStep = "name" | "timezone" | "puppy" | "meals" | "key";
 
 /**
  * What first-run setup still needs. Derived by the server from the committed
@@ -72,6 +72,8 @@ export type PuppyProfile = {
     timezone: string;
     /** null until a caregiver confirmed the zone boot captured (P1-14). */
     timezoneConfirmedAt: string | null;
+    /** null until a caregiver confirmed the household name (first-run setup). */
+    nameConfirmedAt: string | null;
     /** The `app.household` revision, echoed by a timezone save. */
     rev: number;
     members: MemberProfile[];
@@ -121,6 +123,22 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 /** True when `text` carries a control character (a newline, a NUL, a DEL). */
 export function hasControlCharacter(text: string): boolean {
   return CONTROL_CHARACTERS.test(text);
+}
+
+/** Longest household name a confirm accepts: the puppy-name rule, one line. */
+export const HOUSEHOLD_NAME_LIMIT = PROFILE_TEXT_LIMIT;
+
+/**
+ * A household name: one line of caregiver text, trimmed, never empty. The same
+ * control-character rule as a puppy name — a newline here would forge a line in
+ * the activity feed the other caregiver reads.
+ */
+export function parseHouseholdName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed === "" || trimmed.length > HOUSEHOLD_NAME_LIMIT) return undefined;
+  if (hasControlCharacter(trimmed)) return undefined;
+  return trimmed;
 }
 
 function textOrNull(value: unknown, limit: number): string | null | undefined {
