@@ -118,6 +118,9 @@ export async function refreshProfile() {
       return;
     }
     if (!result.ok) return;
+    // A successful read answers the 401 that may have set the flag: the shell
+    // must not keep accusing a signed-in browser of being signed out.
+    setState({ signedOut: false });
     applyCareView(result.body);
   } catch {
     // Offline: the next connect or a reload catches up.

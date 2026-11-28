@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Fixed:
+
+- **Saving the provider key did not lift the setup gate on the screen that
+  saved it.** A key write lands in `secrets.json`, not in a Pi document, so the
+  server answers presence booleans and publishes no `profile` frame; the setup
+  card re-read the care view into its own state but never told the shell's
+  store. With the key as the last step, `gatedRoute` kept the app locked on
+  `#/setup` and "Go to Today" bounced back until a reload. The re-read now
+  hands the profile to the store under the same revision guard a care write
+  uses, so a stale read that raced a newer frame cannot regress it.
+
 Added:
 
 - **A mandatory first-run setup page at `#/setup`.** The whole app is locked

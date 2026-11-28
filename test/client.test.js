@@ -20,7 +20,7 @@ const { Today } = await import("../web/views/today.js");
 const { Setup } = await import("../web/views/setup.js");
 const { MealTimes } = await import("../web/views/meal-times.js");
 const { slotDraftsOf, wireSlots } = await import("../web/views/meal-slots.js");
-const { applyCareView, startLive, subscribeThread } = await import("../web/live.js");
+const { applyCareView, refreshProfile, startLive, subscribeThread } = await import("../web/live.js");
 const { feedTimeText, localDate, localMinutes, mealClock, mealRows, mealStatus, minutesOf } = await import(
   "../web/meals.js"
 );
@@ -166,6 +166,34 @@ test("a reconnect re-reads the care state instead of trusting the thread snapsho
   assert.equal(refreshed, 2, "every reconnect asks again");
 
   live.close();
+});
+
+test("a 401 on the first read makes the loading screen say sign-in again, and a later read clears it", async () => {
+  const realFetch = globalThis.fetch;
+  setState({ profile: null, signedOut: false });
+  try {
+    // The real `refreshProfile`, through the real client, against a stubbed
+    // `fetch`: the seam the browser's own first read takes on every connect.
+    globalThis.fetch = async () => ({ status: 401, ok: false, text: async () => "" });
+    await refreshProfile();
+    assert.equal(getState().signedOut, true, "the shell is told the browser is signed out");
+    assert.equal(gatedRoute("today", getState().profile).screen, "loading", "no profile has arrived, so the gate stays on the loading screen");
+    // The Loading screen (web/app.js) renders its sign-in sentence from this
+    // flag while `gatedRoute` says "loading"; the sentence itself is the
+    // shell's render glue, not reachable from a Node test.
+
+    // A later read succeeds (the caregiver followed the sign-in link): the
+    // flag clears with the profile, so a future loading paint is not stuck on
+    // a stale accusation.
+    const view = profileOf({ rev: 2, name: "Back again" });
+    globalThis.fetch = async () => ({ status: 200, ok: true, text: async () => JSON.stringify(view) });
+    await refreshProfile();
+    assert.equal(getState().signedOut, false, "a successful read clears the sign-out flag");
+    assert.equal(getState().profile.puppy.name, "Back again", "the profile lands too");
+  } finally {
+    globalThis.fetch = realFetch;
+    setState({ profile: null, signedOut: false });
+  }
 });
 
 test("a profile frame replaces the store's view whole", () => {
@@ -589,6 +617,85 @@ test("saving a provider key flips the key step with no probe run and never echoe
   const masked = inputsOf(setup.render()).filter((input) => input.props.id?.startsWith("setup-key-"));
   assert.ok(masked.length > 0);
   for (const input of masked) assert.equal(input.props.type, "password");
+});
+
+test("saving the last setup step lifts the shell's gate on this screen, not only in the card", async () => {
+  const before = { ...profileOf(), setup: { complete: false, missing: ["key"] } };
+  const done = { ...profileOf(), setup: { complete: true, missing: [] } };
+  // The key save publishes no profile frame (secrets.json is not a Pi
+  // document): the PUT answers presence booleans only, and the card re-reads
+  // the care view itself.
+  const request = fakeRequest((path, options) => {
+    if (path === "/api/models/keys") {
+      assert.equal(options.method, "PUT");
+      return { status: 200, ok: true, body: { providers: { "opencode-go": true, openrouter: false } } };
+    }
+    if (path === "/api/models") {
+      return { status: 200, ok: true, body: { role: "owner", providers: { "opencode-go": true, openrouter: false }, current: null, probe: null } };
+    }
+    if (path === "/api/puppy") return { status: 200, ok: true, body: done };
+    return { status: 404, ok: false, body: { error: "not_found" } };
+  });
+  const setup = wizardOf(before, {
+    request,
+    overrides: {
+      role: "owner",
+      models: { role: "owner", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+      keyDrafts: { "opencode-go": "sk-test" },
+    },
+  });
+
+  // The mounted flow: the shell's store still says the household is locked,
+  // and every route is the setup page while only the key is missing.
+  setState({ profile: before });
+  assert.equal(gatedRoute("today", getState().profile).screen, "setup", "the gate is closed before the save");
+
+  await setup.saveKey("opencode-go", "sk-test");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(getState().profile.setup.complete, true, "the shared store's profile flips to complete");
+  assert.equal(gatedRoute("today", getState().profile).screen, "today", "Today's gate lifts on this screen, with no reload");
+  assert.equal(getState().profile.setup.missing.length, 0, "the step list is empty in the store too");
+
+  setState({ profile: null });
+});
+
+test("a stale re-read after the key save does not regress the shell's profile", async () => {
+  const before = { ...profileOf(), setup: { complete: false, missing: ["key"] } };
+  const done = { ...profileOf(), setup: { complete: true, missing: [] } };
+  const frame = profileOf({ rev: 2, name: "Newer frame" });
+  // The race the guard exists for: a frame from the stream lands while the
+  // save is in flight, and the card's own re-read (an older GET) answers
+  // after it. The store must keep the frame, not the re-read.
+  const request = fakeRequest((path) => {
+    if (path === "/api/models/keys") {
+      setState({ profile: frame });
+      return { status: 200, ok: true, body: { providers: { "opencode-go": true, openrouter: false } } };
+    }
+    if (path === "/api/models") {
+      return { status: 200, ok: true, body: { role: "owner", providers: { "opencode-go": true, openrouter: false }, current: null, probe: null } };
+    }
+    if (path === "/api/puppy") return { status: 200, ok: true, body: done };
+    return { status: 404, ok: false, body: { error: "not_found" } };
+  });
+  const setup = wizardOf(before, {
+    request,
+    overrides: {
+      role: "owner",
+      models: { role: "owner", providers: { "opencode-go": false, openrouter: false }, current: null, probe: null },
+      keyDrafts: { "opencode-go": "sk-test" },
+    },
+  });
+  setState({ profile: before });
+
+  await setup.saveKey("opencode-go", "sk-test");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(getState().profile.rev, 2, "the store keeps the newer frame");
+  assert.equal(getState().profile.puppy.name, "Newer frame");
+  assert.equal(getState().profile.setup.complete, true, "and the gate stays lifted");
+
+  setState({ profile: null });
 });
 
 test("a member sees the read-only key card and a refused write surfaces its 403", async () => {

@@ -175,6 +175,14 @@ export class Setup extends Component {
         this.setState({ error: "Could not load the household. Try again in a moment." });
         return;
       }
+      // Tell the shell too, like a care write does. The key save publishes no
+      // profile frame (a secrets.json write is not a commit), so this re-read
+      // is the only thing that can lift Today's gate when the key was the
+      // last step — without it the shell stays locked on #/setup until a
+      // reload or a reconnect. The same revision guard a care write uses
+      // keeps a re-read that raced a newer frame from moving the shell
+      // backwards.
+      if (isNewer(result.body, getState().profile)) setState({ profile: result.body });
       this.adopt(result.body);
     } catch (error) {
       this.setState({ error: error instanceof NetworkError ? error.message : "Could not load the household." });
