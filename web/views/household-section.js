@@ -157,10 +157,13 @@ export class HouseholdSection extends Component {
   /**
    * A frame from `live.js`: the other caregiver saved the name or the zone. A
    * section the caregiver is editing keeps its draft and says so — but only
-   * when its own save is not the one in flight: while a section's save is on
-   * the wire its frame is (almost always) that save, and warning about
-   * "someone else" would be wrong. A real concurrent edit still answers 409
-   * `stale`.
+   * when none of this card's own household writes is outstanding: a frame
+   * that arrives while one is — on the wire (`busy`), or committed with its
+   * response still lost (`pending`) — is almost always that write's own echo,
+   * and warning a dirty sibling section about "someone else" would be wrong,
+   * and would then persist, because the save settles only its own section's
+   * conflict. A real concurrent edit still answers 409 `stale`, whose handler
+   * blames every dirty section the other caregiver's write displaced.
    */
   onStore(state) {
     const incoming = state.profile;
@@ -175,10 +178,23 @@ export class HouseholdSection extends Component {
     if (!isNewer(incoming, current)) return;
     const next = { profile: incoming };
     if (incoming.household.rev !== current.household.rev) {
+      // A revision bump while one of this card's own household writes is
+      // outstanding is almost always that write's own echo: `send` hands the
+      // same profile to the store while the write is still busy, and the
+      // stream repeats the frame afterwards. Blaming a dirty section for it
+      // has the caregiver racing themselves. The frame that *is* a conflict —
+      // the other caregiver's write, with no write of ours outstanding —
+      // still blames a dirty section below, and a frame that really did
+      // displace one of our writes ends in a 409, whose handler blames the
+      // dirty sections it displaced.
+      const ownWriteOutstanding =
+        this.state.busy !== null ||
+        this.state.pending.name !== undefined ||
+        this.state.pending.timezone !== undefined;
       if (!this.state.nameDirty) next.name = incoming.household.name;
-      else if (this.state.pending.name === undefined) next.nameConflict = CONFLICT_MESSAGE;
+      else if (!ownWriteOutstanding) next.nameConflict = CONFLICT_MESSAGE;
       if (!this.state.zoneDirty) next.zone = incoming.household.timezone;
-      else if (this.state.pending.timezone === undefined) next.timezoneConflict = CONFLICT_MESSAGE;
+      else if (!ownWriteOutstanding) next.timezoneConflict = CONFLICT_MESSAGE;
     }
     this.setState(next);
   }
@@ -201,11 +217,20 @@ export class HouseholdSection extends Component {
       }
       if (result.status === 409 && result.body?.error === "stale") {
         // Keep the draft and show the current state; the next save is a knowing
-        // replacement, and a new body gets a new key.
+        // replacement, and a new body gets a new key. The stale answer proves
+        // the displaced revision was another household write, so a dirty
+        // sibling section with no save of its own is blamed here too: the live
+        // frame for that write may have arrived while this save was on the
+        // wire, where `onStore` rightly holds its tongue.
         const { [section]: _dropped, ...rest } = this.state.pending;
+        const sibling = section === "name" ? "timezone" : "name";
+        const siblingDirty = section === "name" ? this.state.zoneDirty : this.state.nameDirty;
         this.adopt(result.body.profile, {
           busy: null,
           [`${section}Conflict`]: CONFLICT_MESSAGE,
+          ...(siblingDirty && rest[sibling] === undefined
+            ? { [`${sibling}Conflict`]: CONFLICT_MESSAGE }
+            : {}),
           pending: rest,
         });
         return;

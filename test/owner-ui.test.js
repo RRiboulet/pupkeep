@@ -26,7 +26,7 @@ import { SESSION_COOKIE } from "../src/server/auth.ts";
 import { startTestApp } from "./support/app.ts";
 import { NetworkError, newIdempotencyKey, requestJson } from "../web/client.js";
 import { Agent } from "../web/views/agent.js";
-import { getState, setState } from "../web/store.js";
+import { getState, setState, subscribe } from "../web/store.js";
 import { HouseholdSection } from "../web/views/household-section.js";
 import { Invite } from "../web/views/invite.js";
 import { MealTimes } from "../web/views/meal-times.js";
@@ -738,6 +738,110 @@ test("a stale household save surfaces the conflict in its own section and keeps 
     assert.equal(card.state.nameError, null);
     assert.equal((await householdNow()).name, "Renamed at home");
   } finally {
+    await ui.close();
+  }
+});
+
+/**
+ * The household card with the subscription Preact's mount would give it: the
+ * harness renders nothing, so `componentDidMount` never runs, and the save
+ * path's own store hand-off reaches `onStore` only through this.
+ */
+function mountHouseholdCard() {
+  const card = mount(HouseholdSection);
+  card.unsubscribe = subscribe((state) => card.onStore(state));
+  return card;
+}
+
+test("a live frame from the other caregiver's household write blames a dirty draft", async () => {
+  const ui = await ownerUi();
+  const card = mountHouseholdCard();
+  try {
+    setState({ profile: null });
+    await card.load();
+    assert.equal(card.state.error, null);
+    card.onNameInput({ target: { value: "Renamed at home" } });
+
+    // The other caregiver saves a different name from another device. No save
+    // of this card's is outstanding, so the frame is genuinely theirs.
+    const before = await householdNow();
+    const away = await requestJson("/api/household", {
+      method: "PATCH",
+      body: { rev: before.rev, name: "Renamed away" },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    assert.equal(away.status, 200);
+
+    card.onStore({ profile: (await requestJson("/api/puppy")).body });
+    assert.match(String(card.state.nameConflict), /Someone else changed/);
+    assert.equal(card.state.name, "Renamed at home", "the draft is kept");
+    assert.equal(card.state.timezoneConflict, null, "the clean section is not blamed");
+  } finally {
+    card.unsubscribe?.();
+    await ui.close();
+  }
+});
+
+test("the card's own timezone save does not blame a dirty name draft", async () => {
+  const ui = await ownerUi();
+  const card = mountHouseholdCard();
+  try {
+    setState({ profile: null });
+    await card.load();
+    assert.equal(card.state.error, null);
+
+    // The caregiver holds a dirty name draft and saves the timezone. The
+    // save's success hands its profile to the shared store while the write is
+    // still this card's, and the stream repeats the frame afterwards.
+    card.onNameInput({ target: { value: "Renamed at home" } });
+    card.onZoneInput({ target: { value: "Europe/Madrid" } });
+    await card.saveZone({ preventDefault() {} });
+
+    assert.equal(card.state.busy, null);
+    assert.match(String(card.state.timezoneMessage), /Saved/);
+    assert.equal(card.state.nameConflict, null, "the card does not accuse its own save");
+    assert.equal(card.state.timezoneConflict, null);
+    assert.equal(card.state.name, "Renamed at home", "the name draft is kept");
+
+    // The save's own echo frame, after the save settled: the card already
+    // holds that revision, so the frame moves nothing and blames nobody.
+    card.onStore({ profile: (await requestJson("/api/puppy")).body });
+    assert.equal(card.state.nameConflict, null);
+    assert.equal(card.state.name, "Renamed at home");
+  } finally {
+    card.unsubscribe?.();
+    await ui.close();
+  }
+});
+
+test("a stale save blames the dirty sibling the other caregiver's write displaced", async () => {
+  const ui = await ownerUi();
+  const card = mountHouseholdCard();
+  try {
+    setState({ profile: null });
+    await card.load();
+    card.onNameInput({ target: { value: "Renamed at home" } });
+
+    // The other caregiver writes first; the frame for it may reach the card
+    // while this card's own save is on the wire, where the echo rule holds
+    // its tongue — the stale answer is what must name the conflict.
+    const before = await householdNow();
+    const away = await requestJson("/api/household", {
+      method: "PATCH",
+      body: { rev: before.rev, name: "Renamed away" },
+      idempotencyKey: newIdempotencyKey(),
+    });
+    assert.equal(away.status, 200);
+
+    card.onZoneInput({ target: { value: "Europe/Madrid" } });
+    await card.saveZone({ preventDefault() {} });
+    assert.equal(card.state.busy, null);
+    assert.match(String(card.state.timezoneConflict), /Someone else changed/);
+    assert.match(String(card.state.nameConflict), /Someone else changed/, "the dirty sibling is blamed too");
+    assert.equal(card.state.name, "Renamed at home", "the name draft is kept");
+    assert.equal(card.state.zone, "Europe/Madrid", "the zone draft is kept");
+  } finally {
+    card.unsubscribe?.();
     await ui.close();
   }
 });
