@@ -48,17 +48,22 @@ export function gatedRoute(route, profile) {
 /**
  * The gate's URL half (R1/R2): the browser's address must agree with the
  * gated screen, so a reload, a bookmark or back/forward all land where the
- * gate says. A no-op when they already agree — assigning the same hash fires
- * no `hashchange` and adds no history entry.
+ * gate says. The rewrite is `history.replaceState`, never a hash assignment:
+ * assigning pushes a history entry, and on a gated app the back button then
+ * fights this function forever — `history.back()` landed on the user's
+ * original entry, the `hashchange` → draw → reconcile cycle pushed the gated
+ * hash right back on top, and neither ever gave ground. Replacing corrects
+ * the address in place, so the user's real history stays intact. A no-op
+ * when they already agree, and `replaceState` fires no `hashchange`.
  */
 export function reconcileHash(route, profile) {
-  const location = globalThis.location;
-  if (!location || profile === null || profile === undefined) return;
+  if (!globalThis.location || profile === null || profile === undefined) return;
+  const rewrite = (hash) => globalThis.history?.replaceState(null, "", hash);
   if (profile.setup?.complete === false) {
-    if (hashRoute() !== "setup") location.hash = "#/setup";
+    if (hashRoute() !== "setup") rewrite("#/setup");
     return;
   }
-  if (route === "setup" && hashRoute() !== "today") location.hash = "#/today";
+  if (route === "setup" && hashRoute() !== "today") rewrite("#/today");
 }
 
 const state = {

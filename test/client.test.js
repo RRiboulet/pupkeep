@@ -227,35 +227,58 @@ test("the shell's gate: an unfinished household lands on the setup route from an
   assert.equal(gatedRoute("setup", ready).screen, "today", "#/setup is Today's address once setup is complete");
 });
 
-test("the gate rewrites the browser address in both directions", () => {
+test("the gate rewrites the browser address in place, never as a history push", () => {
   const unfinished = { ...profileOf(), setup: { complete: false, missing: ["meals"] } };
   const ready = profileOf();
   const original = globalThis.location;
-  const location = { hash: "#/calendar" };
+  const originalHistory = globalThis.history;
+  let current = "#/calendar";
+  let assigned = 0;
+  const location = {
+    get hash() {
+      return current;
+    },
+    // A real browser pushes a history entry here; the gate must never take
+    // that path, or `history.back()` ping-pongs against the next reconcile.
+    set hash(value) {
+      assigned += 1;
+      current = value;
+    },
+  };
+  const replaced = [];
+  globalThis.history = {
+    replaceState: (state, title, url) => {
+      replaced.push(url);
+      current = url;
+    },
+  };
   globalThis.location = location;
   try {
     reconcileHash("calendar", unfinished);
-    assert.equal(location.hash, "#/setup", "an unfinished household's address is the setup page's, whatever was linked");
+    assert.deepEqual(replaced, ["#/setup"], "an unfinished household's address is the setup page's, whatever was linked");
+    assert.equal(assigned, 0, "the rewrite is replaceState, so no history entry is pushed");
 
-    location.hash = "#/today";
+    current = "#/today";
     reconcileHash("today", unfinished);
-    assert.equal(location.hash, "#/setup");
+    assert.deepEqual(replaced, ["#/setup", "#/setup"]);
 
-    // Already right: a no-op, so no `hashchange` and no history entry.
-    location.hash = "#/setup";
+    // Already right: a no-op, so nothing is replaced and no `hashchange` fires.
+    current = "#/setup";
     reconcileHash("setup", unfinished);
-    assert.equal(location.hash, "#/setup");
+    assert.deepEqual(replaced, ["#/setup", "#/setup"]);
 
     reconcileHash("setup", ready);
-    assert.equal(location.hash, "#/today", "a completed setup's page redirects to Today in the URL too");
+    assert.deepEqual(replaced, ["#/setup", "#/setup", "#/today"], "a completed setup's page redirects to Today in the URL too");
 
     reconcileHash("today", ready);
-    assert.equal(location.hash, "#/today", "an ordinary route's address is left alone");
+    assert.deepEqual(replaced, ["#/setup", "#/setup", "#/today"], "an ordinary route's address is left alone");
 
     reconcileHash("today", null);
-    assert.equal(location.hash, "#/today", "nothing is decided before the first profile read");
+    assert.deepEqual(replaced, ["#/setup", "#/setup", "#/today"], "nothing is decided before the first profile read");
   } finally {
     globalThis.location = original;
+    if (originalHistory === undefined) delete globalThis.history;
+    else globalThis.history = originalHistory;
   }
 });
 
