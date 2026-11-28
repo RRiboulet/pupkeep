@@ -39,6 +39,7 @@ import {
   spendText,
 } from "../models.js";
 import { disablePush, enablePush, pushSupported } from "../push.js";
+import { HouseholdSection } from "./household-section.js";
 import { Setup } from "./setup.js";
 import { MealTimes } from "./meal-times.js";
 import { Invite } from "./invite.js";
@@ -683,6 +684,7 @@ export class Settings extends Component {
               </p>
             `
           : null}
+        <${HouseholdSection} request=${this.request} />
         <${Invite}
           request=${this.request}
           role=${this.state.role}
