@@ -1949,6 +1949,43 @@ test("settings renders the notification card and saves prefs and an empty topic"
   assert.deepEqual(calls[1].options.body, { topic: null });
 });
 
+test("settings copy names the household origin and drops the retired paths", () => {
+  setState({ profile: profileOf() });
+  const settings = new Settings({});
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({
+    supported: false,
+    prefs: { enabled: true, categories: [] },
+    ntfy: null,
+    ntfyDraft: "",
+  });
+
+  const insecure = settings.render();
+  assert.ok(vnodeText(insecure, "cannot receive Web Push"), "the insecure-context copy still says why");
+  assert.ok(vnodeText(insecure, "household's address"), "the plain-HTTP branch names the household origin");
+  assert.ok(vnodeText(insecure, "this screen makes no delivery claim"), "the P0-10 hedge stays");
+  assert.ok(!vnodeText(insecure, "Backup is on its way"), "the orphan backup claim is gone");
+
+  settings.setState({ supported: true });
+  const secure = settings.render();
+  assert.ok(vnodeText(secure, "household's address"), "the HTTPS hint names the household origin");
+  assert.ok(vnodeText(secure, "on localhost"), "localhost stays a valid HTTPS origin for development");
+
+  for (const stale of ["Tailscale", "quick tunnel", "host phone prints", "arrive with their phases", "Backup is on its way"]) {
+    assert.ok(!vnodeText(insecure, stale), `Settings still says ${stale}`);
+    assert.ok(!vnodeText(secure, stale), `Settings still says ${stale}`);
+  }
+});
+
+test("Today's placeholder describes what Today shows, not a build phase", () => {
+  setState({ profile: profileOf() });
+  const vnode = new Today({}).render();
+  assert.ok(vnodeText(vnode, "Meals, the walk and the next appointment"), "the line names the cards that are live");
+  assert.ok(vnodeText(vnode, "shared between both caregivers live"));
+  assert.ok(!vnodeText(vnode, "arrive with their phases"), "no build-phase language");
+  assert.ok(!vnodeText(vnode, "agent bar"), "no promise of a control that is not on this screen");
+});
+
 test("Settings shows the meal-times card only once setup is complete", () => {
   const settings = new Settings({});
   settings.setState = (patch) => Object.assign(settings.state, patch);
@@ -1972,6 +2009,42 @@ test("Settings shows the meal-times card only once setup is complete", () => {
     0,
     "a first-run household edits meals in the wizard, not a second card",
   );
+});
+
+test("Settings drops the completed first-run wizard but keeps a short summary", () => {
+  setState({ profile: profileOf() });
+  const settings = new Settings({});
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({
+    supported: false,
+    prefs: { enabled: true, categories: [] },
+    ntfy: null,
+    ntfyDraft: "",
+  });
+
+  const vnode = settings.render();
+  assert.equal(findVnode(vnode, "Setup"), undefined, "a finished household does not embed the wizard");
+  assert.ok(vnodeText(vnode, "Setup is complete"), "one short line says where editing now lives");
+  assert.equal(countVnode(vnode, "MealTimes"), 1, "the meal-times card is still the editing surface");
+});
+
+test("Settings still embeds the wizard while setup is incomplete", () => {
+  setState({ profile: { ...profileOf(), setup: { complete: false, missing: ["meals"] } } });
+  const settings = new Settings({});
+  settings.setState = (patch) => Object.assign(settings.state, patch);
+  settings.setState({
+    supported: false,
+    prefs: { enabled: true, categories: [] },
+    ntfy: null,
+    ntfyDraft: "",
+  });
+
+  const vnode = settings.render();
+  const wizard = findVnode(vnode, "Setup");
+  assert.ok(wizard, "an unfinished household still gets the wizard on Settings");
+  assert.equal(wizard.props.embedded, true, "it is still the embedded wizard");
+  assert.equal(new Today({}).render().type, Setup, "the first-run path on Today is unchanged");
+  assert.equal(countVnode(vnode, "MealTimes"), 0, "meal times are still edited in the wizard");
 });
 
 test("the notifications route is a real hash route, not a fallback to Today", async () => {
@@ -2156,6 +2229,8 @@ test("the invite card is owner-only, shows the link once and explains its lifeti
   const full = new Invite({ role: "owner", full: true });
   assert.ok(vnodeText(full.render(), "Your partner has joined"));
   assert.ok(!vnodeText(full.render(), "Create a one-time invite"));
+  assert.ok(vnodeText(full.render(), "household's address"), "the joined card names the household origin");
+  assert.ok(!vnodeText(full.render(), "host phone prints"), "the retired host-phone claim is gone");
 });
 
 test("the invite lifetime in the client copy matches the server's constant", async () => {
@@ -2448,4 +2523,84 @@ test("an opened stream re-reads the thread, approvals and status; a reconnect is
   agent.onThreadEvent({ type: "reconnect" });
   assert.equal(agent.state.connection, "reconnecting");
   assert.ok(vnodeText(agent.render(), "Reconnecting to the shared thread"), "the caregiver is told");
+});
+
+// --- the your-name card (R12: a caregiver renames themselves) ---------------
+
+const { MyName } = await import("../web/views/my-name.js");
+
+test("the your-name card sends one rev-guarded rename and shows the result", async () => {
+  setState({ profile: profileOf() });
+  const calls = [];
+  const card = new MyName({});
+  card.setState = (patch) => Object.assign(card.state, patch);
+  card.state.me = { memberId: "owner", role: "owner", label: "Alex" };
+  card.state.draft = "  Alexandra  ";
+  card.request = async (path, options) => {
+    calls.push({ path, options });
+    // The server's answer carries the whole care view, with the new name in it.
+    const renamed = profileOf({ members: [{ id: "owner", name: "Alexandra" }] });
+    return { status: 200, ok: true, body: { profile: renamed, replayed: false } };
+  };
+
+  await card.save();
+
+  assert.equal(calls.length, 1, "one request, not a retry");
+  assert.equal(calls[0].path, "/api/me");
+  assert.equal(calls[0].options.method, "PATCH");
+  assert.deepEqual(calls[0].options.body, { rev: 0, name: "Alexandra" }, "the name is trimmed on the wire");
+  assert.match(String(card.state.message), /Alexandra/, "the card says what the name now is");
+  assert.equal(card.state.error, null, "a saved rename is not an error");
+});
+
+test("the your-name card refuses an empty name without touching the wire", async () => {
+  setState({ profile: profileOf() });
+  const calls = [];
+  const card = new MyName({});
+  card.setState = (patch) => Object.assign(card.state, patch);
+  card.state.me = { memberId: "owner", role: "owner", label: "Alex" };
+  card.state.draft = "   ";
+  card.request = async (path, options) => {
+    calls.push({ path, options });
+    return { status: 200, ok: true, body: {} };
+  };
+
+  await card.save();
+
+  assert.equal(calls.length, 0, "an empty name never reaches the server");
+  assert.match(String(card.state.error), /empty/i);
+});
+
+test("the your-name card shows the server's refusal, never a silent failure", async () => {
+  setState({ profile: profileOf() });
+  const calls = [];
+  const card = new MyName({});
+  card.setState = (patch) => Object.assign(card.state, patch);
+  card.state.me = { memberId: "owner", role: "owner", label: "Alex" };
+  card.state.draft = "Sam";
+  card.request = async (path, options) => {
+    calls.push({ path, options });
+    return { status: 409, ok: false, body: { error: "someone in the household is already called Sam" } };
+  };
+
+  await card.save();
+
+  assert.equal(calls.length, 1, "the attempt was made");
+  assert.match(String(card.state.error), /already called Sam/);
+  assert.equal(card.state.message, null, "no success message sits beside the refusal");
+});
+
+test("the card renders the signed-in member's own name and nobody else's", () => {
+  setState({ profile: profileOf({ members: [{ id: "owner", name: "Alex" }, { id: "partner", name: "Sam" }] }) });
+  const card = new MyName({});
+  card.state.me = { memberId: "owner", role: "owner", label: "Alex" };
+  card.state.draft = "Alex";
+
+  const vnode = card.render();
+  assert.ok(vnodeText(vnode, "Your name"), "the card names itself");
+  assert.ok(vnodeText(vnode, "Your display name"), "the field is labelled");
+  assert.ok(vnodeText(vnode, "Save name"), "the save action is on the card");
+  // Only the owner's own row is in the draft; the partner's name is never
+  // offered for editing here.
+  assert.ok(vnodeText(vnode, "You can change only your own"), "the card says whose name it edits");
 });

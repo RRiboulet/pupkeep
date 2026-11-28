@@ -7,9 +7,9 @@
 // machinery, and it keeps all browser globals behind injectable seams so a Node
 // test can drive it without a DOM.
 //
-// Only HTTPS origins support push; the daily Tailscale path is plain HTTP, so
-// `pushSupported` is false there and P4-06 falls back to in-app + ntfy. That is
-// a documented property of the deployment (PLAN §2.1), not a bug.
+// Only HTTPS origins support push; a household served over plain HTTP is not
+// one, so `pushSupported` is false there and P4-06 falls back to in-app + ntfy.
+// That is a property of the deployment, not a bug.
 
 import { NetworkError, newIdempotencyKey, requestJson } from "./client.js";
 

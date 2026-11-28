@@ -1,7 +1,7 @@
 // Settings — household, notifications, models and budget (PLAN §13.1).
 //
-// This build owns the household card (the embedded wizard and, since P4-09, the
-// one-time partner invite), the
+// This build owns the household card (the household name and, since P4-09, the
+// one-time partner invite, plus the embedded wizard until setup is complete), the
 // notification card (P4-06): this device's Web Push switch, the per-category
 // preferences, the ntfy topic for a phone without Web Push, and a test button,
 // and the model card (P4-08): the current model, this month's spend against the
@@ -9,8 +9,8 @@
 //
 // The model card reads one route (`GET /api/models`) and the session role: the
 // server refuses a partner's writes (§14.1), and the card hides what that role
-// cannot do rather than offering a button that always fails. Backup arrives with
-// its phase.
+// cannot do rather than offering a button that always fails. The backup archive
+// is the operator's job and has no card on this screen.
 //
 // The partner-delivery copy is deliberately unproven: ntfy is the recommended
 // daily path for the iPhone, but whether it actually reaches the partner is
@@ -24,6 +24,7 @@ import htm from "../vendor/htm.mjs";
 import { NetworkError, newIdempotencyKey, requestJson } from "../client.js";
 import { getState } from "../store.js";
 import { categoryOptions, ntfyBody, prefsBody } from "../notifications.js";
+import { householdLeadMetaText } from "../household.js";
 import {
   allowlistLines,
   budgetBody,
@@ -42,6 +43,7 @@ import { disablePush, enablePush, pushSupported } from "../push.js";
 import { Setup } from "./setup.js";
 import { MealTimes } from "./meal-times.js";
 import { Invite } from "./invite.js";
+import { MyName } from "./my-name.js";
 
 const html = htm.bind(h);
 
@@ -534,12 +536,12 @@ export class Settings extends Component {
   renderPush() {
     if (!this.state.supported) {
       return html`<p class="field__hint">
-        This page cannot receive Web Push. That is expected on plain HTTP (the daily Tailscale path); use the
-        in-app centre, the host's local notification, or the ntfy topic below.
+        This page cannot receive Web Push. It works only over HTTPS, at the household's address or on localhost; use
+        the in-app centre, the host's local notification, or the ntfy topic below.
       </p>`;
     }
     return html`
-      <p class="field__hint">Web Push reaches this device only over HTTPS (the quick tunnel or localhost).</p>
+      <p class="field__hint">Web Push reaches this device only over HTTPS, at the household's address or on localhost.</p>
       <div class="form__actions">
         <button type="button" class="button" disabled=${this.state.pushBusy} onClick=${() => void this.togglePush()}>
           ${this.state.pushBusy ? "Working…" : "Enable notifications on this device"}
@@ -597,9 +599,10 @@ export class Settings extends Component {
     return html`
       <h3 class="notification-subhead">ntfy (a phone without Web Push)</h3>
       <p class="field__hint">
-        Recommended for the partner's iPhone on the daily Tailscale path, where Web Push is unavailable. Install the
-        ntfy app, subscribe to this topic, and keep it private — anyone with the topic can read it. Delivery to the
-        partner's device is verified separately (P0-10); this screen makes no delivery claim.
+        Recommended for a phone that does not receive Web Push, such as the partner's iPhone. Install the ntfy app,
+        subscribe to this topic, and keep it private — anyone with the topic can read it. The household's address
+        serves the app itself; ntfy is a separate delivery path. Delivery to the partner's device is verified
+        separately (P0-10); this screen makes no delivery claim.
       </p>
       <div class="field">
         <label for="ntfy-topic">Topic</label>
@@ -676,10 +679,10 @@ export class Settings extends Component {
           ? html`
               <p class="lead">
                 ${household.name}
-                <span class="lead__meta">
-                  · ${household.timezone} ·
-                  ${household.members.map((member) => member.name).join(" and ")}
-                </span>
+                <span class="lead__meta">${householdLeadMetaText(
+                  household.timezone,
+                  household.members.map((member) => member.name),
+                )}</span>
               </p>
             `
           : null}
@@ -688,11 +691,15 @@ export class Settings extends Component {
           role=${this.state.role}
           full=${(household?.members.length ?? 0) >= 2}
         />
+        <${MyName} request=${this.request} />
         ${this.renderNotifications()}
         ${profile?.setup?.complete ? html`<${MealTimes} request=${this.request} />` : null}
         ${this.renderModels()}
-        <p class="field__hint">Backup is on its way.</p>
-        <${Setup} embedded=${true} />
+        ${
+          profile?.setup?.complete === true
+            ? html`<p class="field__hint">Setup is complete. Edit your puppy on Pup and meal times in the card above.</p>`
+            : html`<${Setup} embedded=${true} />`
+        }
       </section>
     `;
   }

@@ -26,7 +26,7 @@ import { reconcileMembers, type AppConfig } from "../config.ts";
 import { activityEntry, appendActivity } from "./activity.ts";
 import type { ActorResolver } from "./actor.ts";
 import { outcomeOf, requestHashOf, runIdempotent, type CommandOutcome, type WriteOutcome } from "./commands.ts";
-import { isIanaZone } from "../../shared/profile.ts";
+import { hasControlCharacter, isIanaZone } from "../../shared/profile.ts";
 import { AGENT_BUDGET_MAX_USD, isAgentBudget } from "../../shared/usage.ts";
 import {
   ActivityDoc,
@@ -270,4 +270,94 @@ export async function updateAgentBudget(
   }
 
   return outcomeOf(outcome);
+}
+
+// --- a member's own display name --------------------------------------------
+
+export type MemberRename = {
+  /** Resolved inside the commit, against the household the write reads. */
+  readonly actor: ActorResolver;
+  /** The config member id of the member renaming themselves. */
+  readonly memberId: string;
+  /** The new display name, as written; trimmed and validated here. */
+  readonly name: string;
+  /** The household revision the caller read. */
+  readonly rev: number;
+  /** The stored idempotency key, namespaced by the caller (§7.4's shape). */
+  readonly actionId: string;
+  readonly now?: Date;
+};
+
+/** Longest display name, matching the invite form's own limit. */
+const NAME_MAX_CHARS = 64;
+
+/**
+ * One member renames themselves. The household document is the display
+ * authority: the write lands here and nowhere else, and `config.json`'s
+ * `displayName` stays the seed it was — boot reconciliation reports the drift
+ * in `nameDrift` instead of overwriting the chosen name.
+ */
+export async function renameHouseholdMember(
+  store: DocStore,
+  context: Context,
+  input: MemberRename,
+): Promise<WriteOutcome> {
+  const name = input.name.trim();
+  if (name === "") throw new DomainConflictError("a display name cannot be empty");
+  if (name.length > NAME_MAX_CHARS) {
+    throw new DomainConflictError(`a display name is at most ${NAME_MAX_CHARS} characters`);
+  }
+  if (hasControlCharacter(name)) {
+    throw new DomainConflictError("a display name cannot contain control characters");
+  }
+
+  try {
+    const outcome = await runIdempotent(
+      { store, context },
+      {
+        key: input.actionId,
+        requestHash: requestHashOf({ memberId: input.memberId, name, rev: input.rev } as JsonObject),
+        now: input.now ?? new Date(),
+      },
+      async (tx) => {
+        const household = await tx.doc(HouseholdDoc);
+        // §7.4: the write carries the revision it read; a stale one is refused
+        // so a caregiver never overwrites a change they have not seen.
+        if (household.rev !== input.rev) throw new StaleRevisionError("the household changed since it was read");
+        const member = household.members.find((member) => member.id === input.memberId);
+        if (!member) {
+          throw new DomainConflictError("you are not on this household's roster");
+        }
+        // Resolved inside the commit (§7.1, §9.2): the label is the name the
+        // household document knew when this write landed, never the caller's.
+        const actor = await input.actor(tx, household);
+        // The one name a member may not take is the other caregiver's.
+        const taken = household.members.some(
+          (other) => other.id !== input.memberId && other.name.trim().toLowerCase() === name.toLowerCase(),
+        );
+        if (taken) {
+          throw new DomainConflictError(`someone in the household is already called ${name}`);
+        }
+        if (member.name === name) return name;
+        member.name = name;
+        household.rev = input.rev + 1;
+        const now = input.now ?? new Date();
+        appendActivity(
+          await tx.doc(ActivityDoc),
+          activityEntry({
+            kind: "household.member-renamed",
+            summary: `${actor.label} is now called ${name}`,
+            actorId: input.memberId,
+            actorLabel: actor.label,
+            now,
+          }),
+        );
+        return name;
+      },
+    );
+    return outcomeOf(outcome);
+  } catch (error) {
+    if (error instanceof StaleRevisionError) return "stale";
+    throw error;
+  }
 }
