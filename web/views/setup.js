@@ -508,14 +508,10 @@ export class Setup extends Component {
   render() {
     const { profile, name, zone, puppy, slots, busy, error, message, conflict } = this.state;
 
-    // Embedded in Settings the wizard sits under the page's own heading; on
-    // Today it *is* the page.
-    const heading = this.props.embedded ? "h2" : "h1";
-
     if (profile === null) {
       return html`
-        <section class=${this.props.embedded ? "setup" : "view"} aria-labelledby="setup-heading">
-          <${heading} id="setup-heading">First-run setup</${heading}>
+        <section class="view" aria-labelledby="setup-heading">
+          <h1 id="setup-heading">First-run setup</h1>
           ${error
             ? html`<p class="notice notice--error" role="alert">${error}</p>`
             : html`<p class="placeholder">Loading the household…</p>`}
@@ -532,8 +528,8 @@ export class Setup extends Component {
     const zoneChanged = zone.trim() !== profile.household.timezone;
 
     return html`
-      <section class=${this.props.embedded ? "setup" : "view"} aria-labelledby="setup-heading">
-        <${heading} id="setup-heading">First-run setup</${heading}>
+      <section class="view" aria-labelledby="setup-heading">
+        <h1 id="setup-heading">First-run setup</h1>
         <p class="lead">
           ${setup.complete
             ? "Everything is set up."

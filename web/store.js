@@ -12,6 +12,10 @@ export const ROUTES = [
   { id: "agent", label: "Agent", view: "Shared thread" },
   { id: "notifications", label: "Notifications", view: "Notification centre" },
   { id: "settings", label: "Settings", view: "Settings" },
+  // The mandatory first-launch page is a real route, but it is not a tab: the
+  // shell forces every address here while setup is incomplete, and forces
+  // `#/setup` back to Today once it is complete (the P1-14 reversal).
+  { id: "setup", label: "First-run setup", view: "First-run setup" },
 ];
 
 const ROUTE_IDS = new Set(ROUTES.map((route) => route.id));
@@ -21,6 +25,40 @@ export function hashRoute(hash) {
   // plain Node test; a browser always has it.
   const raw = String(hash ?? globalThis.location?.hash ?? "").replace(/^#\/?/, "");
   return ROUTE_IDS.has(raw) ? raw : "today";
+}
+
+/**
+ * The shell's gate (the mandatory first-run setup, R1/R2). Given the route in
+ * state and the latest profile, which screen does the shell paint?
+ *
+ *   - `"loading"`: no profile has been read yet, so no decision can be made
+ *     and no view may flash — a household that finished setup months ago must
+ *     not see Today (or the nav) flicker before the first read lands;
+ *   - `"setup"`: setup is incomplete, so the whole app is the setup page and
+ *     no navigation renders, whatever the route said;
+ *   - otherwise the route itself, with `#/setup` answered by Today.
+ */
+export function gatedRoute(route, profile) {
+  if (profile === null || profile === undefined) return { screen: "loading" };
+  if (profile.setup?.complete === false) return { screen: "setup" };
+  if (route === "setup") return { screen: "today" };
+  return { screen: route };
+}
+
+/**
+ * The gate's URL half (R1/R2): the browser's address must agree with the
+ * gated screen, so a reload, a bookmark or back/forward all land where the
+ * gate says. A no-op when they already agree — assigning the same hash fires
+ * no `hashchange` and adds no history entry.
+ */
+export function reconcileHash(route, profile) {
+  const location = globalThis.location;
+  if (!location || profile === null || profile === undefined) return;
+  if (profile.setup?.complete === false) {
+    if (hashRoute() !== "setup") location.hash = "#/setup";
+    return;
+  }
+  if (route === "setup" && hashRoute() !== "today") location.hash = "#/today";
 }
 
 const state = {
@@ -44,6 +82,12 @@ const state = {
    * count-only route; 0 until the first read.
    */
   unreadNotifications: 0,
+  /**
+   * `/api/puppy` answered 401, so the shell's loading screen says so instead
+   * of spinning forever: before the gate, every view fetched its own 401 and
+   * the shell painted a screen to put the sentence in.
+   */
+  signedOut: false,
 };
 
 const listeners = new Set();

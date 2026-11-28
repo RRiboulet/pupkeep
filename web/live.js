@@ -110,7 +110,14 @@ export function applyCareView(view) {
 export async function refreshProfile() {
   try {
     const result = await requestJson("/api/puppy");
-    if (!result.ok || result.status === 401) return;
+    if (result.status === 401) {
+      // The shell's loading screen is the only thing painted while no profile
+      // has arrived, so a signed-out browser must be told there instead of
+      // spinning forever (before the gate every view fetched its own 401).
+      setState({ signedOut: true });
+      return;
+    }
+    if (!result.ok) return;
     applyCareView(result.body);
   } catch {
     // Offline: the next connect or a reload catches up.
