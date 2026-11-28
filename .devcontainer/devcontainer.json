@@ -3,6 +3,7 @@
   "dockerComposeFile": "docker-compose.yml",
   "service": "devcontainer",
   "workspaceFolder": "/workspace",
+  "initializeCommand": "sh .devcontainer/setup-shared-pi-state.sh && sh .devcontainer/resolve-pi-agent-setup.sh",
   "postCreateCommand": "bash .devcontainer/postCreate.sh",
   "forwardPorts": [
     8787

@@ -1,7 +1,7 @@
 // Static guards for the devcontainer. Building a container in CI is a separate
 // concern; these tests catch the mistakes that are cheap to make and expensive
 // to notice later — a base tag that moved off Node 24, a pi version that drifted
-// from 1.4.0, a tool missing from the apt layer, a postCreate that re-declares
+// from 1.7.0, a tool missing from the apt layer, a postCreate that re-declares
 // the shared package in the repo, or a dev database pointed at the 9p mount.
 
 import assert from "node:assert/strict";
@@ -17,6 +17,7 @@ interface Devcontainer {
   service?: unknown;
   workspaceFolder?: unknown;
   postCreateCommand?: unknown;
+  initializeCommand?: unknown;
   forwardPorts?: unknown;
   containerEnv?: Record<string, unknown>;
   features?: Record<string, unknown>;
@@ -30,6 +31,7 @@ test("devcontainer.json targets the repo mount, forwards 8787 and runs postCreat
   assert.equal(config.workspaceFolder, "/workspace");
   assert.equal(config.remoteUser, "vscode");
   assert.equal(config.postCreateCommand, "bash .devcontainer/postCreate.sh");
+  assert.equal(config.initializeCommand, "sh .devcontainer/setup-shared-pi-state.sh && sh .devcontainer/resolve-pi-agent-setup.sh");
   assert.deepEqual(config.forwardPorts, [8787]);
   assert.equal(config.containerEnv?.PUPKEEP_DATA_DIR, "/tmp/pupkeep-dev");
   assert.equal(config.containerEnv?.PUPKEEP_PORT, "8787");
@@ -61,6 +63,7 @@ test("compose mounts the repo and a persistent, explicitly named pi-config volum
   assert.match(compose, /dockerfile: \.devcontainer\/Dockerfile/);
   assert.match(compose, /\.\.:\/workspace:cached/);
   assert.match(compose, /pupkeep-pi-config:\/home\/vscode\/\.pi/);
+  assert.match(compose, /\$\{HOME\}\/\.pi\/shared-agent-state:\/shared-pi-state:rw/);
   assert.match(compose, /name: pupkeep-pi-config/);
   assert.match(compose, /user: vscode/);
 
@@ -76,21 +79,20 @@ test("the image is the Node 24 base with the pinned pi and host tools", async ()
   assert.match(dockerfile, /^FROM mcr\.microsoft\.com\/devcontainers\/javascript-node:24-bookworm$/m);
   assert.match(dockerfile, /test "\$\(node --version \| cut -d\. -f1\)" = "v24"/);
 
-  assert.match(dockerfile, /@earendil-works\/pi-coding-agent@1\.5\.0/);
-  assert.match(dockerfile, /test "\$\(pi --version\)" = "1\.5\.0"/);
-  assert.match(dockerfile, /COPY \.devcontainer\/pi-agent-setup\.version \/tmp\/pi-agent-setup\.version/);
-  // The tag is read from the pin file instead of being repeated here. A third
-  // hard-coded copy turned every bump into a test edit that failed for a reason
-  // unrelated to the change, while the drift it was meant to catch is already
-  // caught twice: `check-pi-agent-setup.sh` (also run by CI) requires the
-  // Dockerfile ARG to equal the version file, and `postCreate` requires the tag
-  // baked into the running image to equal it as well. What is left to guard here
-  // is that the ARG exists and names a tag at all.
+  assert.match(dockerfile, /@earendil-works\/pi-coding-agent@1\.7\.0/);
+  assert.match(dockerfile, /test "\$\(pi --version\)" = "1\.7\.0"/);
+  assert.match(dockerfile, /COPY \.devcontainer\/pi-agent-setup\.\* \/tmp\//);
+  // The policy is read from the pin file instead of being repeated here. The
+  // host initialize step resolves it to an exact release before the build; the
+  // generated stamp invalidates Docker's cached clone layer when a new release
+  // appears. The ARG, resolver wiring and postCreate comparison are guarded by
+  // check-pi-agent-setup.sh (also run by CI).
   const pinnedTag = (await read(".devcontainer/pi-agent-setup.version")).trim();
   assert.match(
     dockerfile,
     new RegExp(`^ARG PI_AGENT_SETUP_TAG=${pinnedTag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"),
   );
+  assert.match(dockerfile, /git clone --depth 1 --branch "\$\{setup_tag\}"/);
   assert.match(dockerfile, /^ENV PI_AGENT_SETUP_TAG=\$\{PI_AGENT_SETUP_TAG\}$/m);
   assert.match(dockerfile, /^LABEL org\.rriboulet\.pi-package="\$\{PI_AGENT_SETUP_TAG\}"$/m);
 
@@ -194,7 +196,7 @@ test("postCreate seeds .env, runs the suite, checks versions and declares the ba
   assert.match(script, /node_major/);
   assert.match(script, /v24/);
   assert.match(script, /pi_version/);
-  assert.match(script, /1\.5\.0/);
+  assert.match(script, /1\.7\.0/);
   assert.match(script, /gh 2\.103\.2 is required/);
   assert.match(script, /cloudflared 2026\.10\.5/);
   assert.match(script, /git config --global user\.email/);
@@ -207,6 +209,8 @@ test("postCreate seeds .env, runs the suite, checks versions and declares the ba
   // same extensions twice (the P1-05 guard pins that from the other side).
   assert.match(script, /PI_PACKAGE=\/opt\/pi-packages\/my-agent-setup/);
   assert.match(script, /pi-agent-setup\.version/);
+  assert.match(script, /pi-agent-setup\.resolved/);
+  assert.match(script, /link-shared-pi-state\.sh/);
   assert.match(script, /EXPECTED_TAG=/);
   assert.match(script, /ACTUAL_TAG=/);
   assert.match(script, /jq --arg pkg "\$PI_PACKAGE"/);

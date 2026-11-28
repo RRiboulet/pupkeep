@@ -29,8 +29,8 @@ Durable is explicitly experimental; every dependency is pinned.
 | Cloudflare Tunnel | public pricing/docs, 2026-10-28 | Free tunnel; named tunnel needs a hostname on Cloudflare DNS; quick tunnels are ephemeral. No domain: quick tunnel for testing, named deferred |
 | Tailscale | free personal plan, 2026-10-28 | Stable private tailnet access; HTTP. No Serve/Funnel control **found** in the Android app 1.104.2 (P0-03: feature-label scan of the installed APK plus an exit-node/`ExitNodeOption` cross-check, not a protocol-level test), so Tailscale stays HTTP. |
 | Termux | current F-Droid packages | Node 24/26, `cloudflared`, `termux-api`, `termux-wake-lock`, Termux:Boot, `termux-services` |
-| `my-agent-setup` | tag `v1.11.0` | Shared pi coding-agent extensions and skills for development |
-| pi coding agent | `1.5.0` | Development environment only |
+| `my-agent-setup` | latest stable release, resolved at build | Shared pi coding-agent extensions and skills for development |
+| pi coding agent | `1.7.0` | Development environment only |
 | `RRiboulet/pidabl` | — | **Not used.** The embedded-rootfs Android route was rejected. |
 
 Sources that conflict or need confirmation are called out as **spike** or
@@ -466,15 +466,19 @@ No `android/`, no `bootstrap/`, no `rootfs`, no Gradle, no APK.
   copy for HTTPS testing, deliberately left when `P6-08` deleted the
   `cloudflare` mode and the phone's installer fetch; it has to build on a laptop
   and on an arm64 host alike.
-- **pi coding agent `1.5.0`**, pin exact. The Dockerfile installs it globally
+- **pi coding agent `1.7.0`**, pin exact. The Dockerfile installs it globally
   and asserts `pi --version` at build time.
 - The shared package (`my-agent-setup`) is **not** declared in this repo's
   `.pi/settings.json`: when pupkeep sits inside a workspace that already loads
   those extensions, a second declaration loads every extension twice and
-  subagents fail at startup on a duplicate flag. The P1-02 devcontainer installs
-  it at **`v1.11.0`** into the *personal* pi settings in the `pupkeep-pi-config`
-  volume (`pi install` without `--local`), and skips it when the project already
-  declares it. Bump pi and that package together when either moves.
+  subagents fail at startup on a duplicate flag. The P1-02 devcontainer tracks
+  the latest stable `my-agent-setup` release under
+  `/opt/pi-packages/my-agent-setup`: `initializeCommand` resolves it before each
+  build and writes an ignored stamp, so a normal rebuild picks up a new release
+  without `--no-cache`. `postCreate.sh` declares that absolute path in the
+  container's *personal* pi settings in the `pupkeep-pi-config` volume. An exact
+  stable tag remains supported by setting both the version file and Dockerfile
+  ARG. Bump pi independently when it moves.
 - Persistent `pi-config` volume at `/home/vscode/.pi`.
 - Optional Docker-in-Docker only for testing the VPS fallback. Not required for
   the phone host.
@@ -489,7 +493,7 @@ No Android SDK, JDK, Gradle or NDK.
 - `npm ci`.
 - `tsc --noEmit`.
 - `node --test` (empty or smoke at first).
-- Check Node major 24, pi `1.5.0`, cloudflared `2026.10.5`, and
+- Check Node major 24, pi `1.7.0`, cloudflared `2026.10.5`, and
   `sqlite3`/`rclone`/`tmux`/`gh`/`jq`/`openssl`/`age`/`expect`/`tar`.
 - Print: `npm start -- --access local --data /tmp/pupkeep-dev`.
 - Do not clobber pi settings, `.env`, `~/.pupkeep`.
@@ -2299,7 +2303,7 @@ that the partner is reached out-of-app is gated on P0-10.
 
 - [ ] **P1-01** Repo scaffold: directories, `README`, `AGENTS`, `LICENSE`,
       `NOTICE`, `.gitignore`, `.env.example`.
-- [x] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.5.0`, shared package pin (installed **locally** in the image or `postCreate` — never declared in this repo's `.pi/settings.json`, which duplicates the enclosing workspace's extensions and breaks subagent startup), persistent
+- [x] **P1-02** Devcontainer: Node 24 (the phone runs 26 — see P1-03's decision), pi `1.7.0`, shared package pin (installed **locally** in the image or `postCreate` — never declared in this repo's `.pi/settings.json`, which duplicates the enclosing workspace's extensions and breaks subagent startup), persistent
       pi volume, `cloudflared`, `sqlite3`, `tmux`, `gh`, `jq`, `rclone`, port
       8787, `postCreate`, `tsc --noEmit`. Verify the
       `javascript-node:24-bookworm` tag and the shared package/pi compatibility
@@ -2309,13 +2313,13 @@ that the partner is reached out-of-app is gated on P0-10.
       features and apt `age expect ca-certificates curl git jq openssl ripgrep
       rclone sqlite3 tar tmux unzip`; cloudflared `2026.10.5` is installed
       from Cloudflare's per-architecture `.deb` (amd64 and arm64) with a pinned
-      SHA-256 for each; pi `1.5.0` is installed
+      SHA-256 for each; pi `1.7.0` is installed
       globally and asserted. Compose mounts the repo at `/workspace` and the
       named `pupkeep-pi-config` volume at `/home/vscode/.pi`; `postCreate.sh`
       seeds `.env` only when absent, runs `npm ci`, `npm run typecheck` and
-      `npm test`, checks the pinned versions/tools, installs the shared
-      `my-agent-setup` at `v1.11.0` into the **personal** pi settings (never this
-      repo's `.pi/settings.json`, and skipped when the project declares it),
+      `npm test`, checks the pinned versions/tools, and declares the image's
+      baked `my-agent-setup` release in the **personal** pi settings (never this
+      repo's `.pi/settings.json`),
       pins gh to `2.103.2`, sets the owner's public noreply git identity, and
       prints the start command. Port 8787 is forwarded; the dev database is
       `/tmp/pupkeep-dev`, never the workspace mount. Six static guards live in
@@ -2325,7 +2329,9 @@ that the partner is reached out-of-app is gated on P0-10.
       `ubuntu-latest` with `devcontainers/ci`, runs `postCreate.sh`, and
       reported Node `24.22.1`, pi `1.5.0`, gh `2.103.2`, cloudflared
       `2026.10.5`, sqlite3 `3.40.1`, rclone `1.60.1`, the shared package
-      `v1.9.0`, and **201/201 tests** (run `40947860932`). **Follow-up:** the
+      `v1.9.0`, and **201/201 tests** (run `40947860932`). Those two package
+      versions are that run's record; the current policy is pi `1.7.0` and
+      `my-agent-setup` **latest stable**. **Follow-up:** the
       `~/.vscode-server` fix (§5.1) renames the base image's uid-1000 `node`
       user to `vscode`, adds a seventh guard, and makes this job reproduce VS
       Code's first `mkdir` as `vscode` *before* `postCreate`, with the CLI's uid

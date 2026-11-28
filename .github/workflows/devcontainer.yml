@@ -91,13 +91,13 @@ jobs:
             test -d node_modules
             test -d /tmp/pupkeep-dev
             test "$(node --version | cut -d. -f1)" = "v24"
-            test "$(pi --version)" = "1.5.0"
+            test "$(pi --version)" = "1.7.0"
             gh --version | grep '2.103.2' >/dev/null
             cloudflared --version | grep '2026.10.5' >/dev/null
             for tool in age expect jq openssl rclone rg sqlite3 tar tmux; do
               command -v "$tool" >/dev/null
             done
-            test "$(cat /opt/pi-packages/my-agent-setup/.pi-agent-setup-tag)" = "$(tr -d '[:space:]' < .devcontainer/pi-agent-setup.version)"
+            test "$(cat /opt/pi-packages/my-agent-setup/.pi-agent-setup-tag)" = "$(tr -d '[:space:]' < .devcontainer/pi-agent-setup.resolved)"
             pi list 2>/dev/null | grep 'my-agent-setup' >/dev/null
             sh .devcontainer/check-pi-agent-setup.sh
             npm test

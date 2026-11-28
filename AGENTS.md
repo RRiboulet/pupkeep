@@ -90,13 +90,13 @@ is the spend ledger: a paid model's message is refused at the monthly cap while 
 free one still runs.
 The partner-delivery claim is gated on P0-10 and is unproven. G1's host-side criteria are covered by
 `test/e2e.test.ts` and `test/setup.test.ts`.
-The devcontainer is `.devcontainer/` (Node 24, pi `1.5.0`,
+The devcontainer is `.devcontainer/` (Node 24, pi `1.7.0`,
 sqlite3/cloudflared/rclone/tmux/gh, plus the host tools); `postCreate.sh` runs
 `npm ci`, typecheck and the tests. Its `cloudflared` is the dev container's own
 HTTPS-testing tool (`P6-08` left it there deliberately), never part of the phone
-runtime. The image bakes `my-agent-setup` at the tag
-in `.devcontainer/pi-agent-setup.version`, and `postCreate.sh` declares that
-baked path in the container's personal settings — never in this repo's
+runtime. The image bakes `my-agent-setup` at the release selected by
+`.devcontainer/pi-agent-setup.version`, and `postCreate.sh` declares that baked
+path in the container's personal settings — never in this repo's
 `.pi/settings.json`.
 Phase 0 is closed by the go/no-go in PLAN §2.3, except three device-gated checks
 on the partner's iPhone — P0-03's access ones, P0-08's notification ones — which
@@ -108,11 +108,13 @@ and records it in the container's own agent settings; declaring it here as well
 would load every extension twice — the first attempt did exactly that and
 subagents launched in this directory died with a duplicate-flag error at startup.
 
-To bump the package: change `.devcontainer/pi-agent-setup.version`, change the
-`ARG PI_AGENT_SETUP_TAG=` line in the Dockerfile, run
-`sh .devcontainer/check-pi-agent-setup.sh`, then `devc rebuild pupkeep`. The
-build and `postCreate` fail if the two disagree, and `postCreate` also fails if
-the running image carries a different tag than the checkout pins.
+The policy is `latest`: `initializeCommand` resolves the newest stable release
+before each build and writes an ignored stamp, so `devc rebuild pupkeep` picks
+up a new release without `--no-cache`. To pin an exact release, change both
+`.devcontainer/pi-agent-setup.version` and the Dockerfile's `ARG
+PI_AGENT_SETUP_TAG=`, run `sh .devcontainer/check-pi-agent-setup.sh`, then
+rebuild. The build and `postCreate` fail if the policy, resolution and running
+image disagree.
 
 ## Shape
 

@@ -29,6 +29,10 @@ if [ ! -w "$REPO" ]; then
   sudo chown -R vscode:vscode "$REPO"
 fi
 
+# Auth and model catalogs are shared with the host and every devcontainer;
+# sessions, settings and trust remain in this container's private volume.
+sh "$REPO/.devcontainer/link-shared-pi-state.sh"
+
 # --- git identity and gh credential helper --------------------------------
 # A fresh container has no git identity, and this repo's workflow is commit ->
 # push -> PR. This is the owner's public GitHub noreply address, not a secret;
@@ -141,8 +145,8 @@ if [ "$node_major" != "v24" ]; then
 fi
 
 pi_version="$(pi --version)"
-if [ "$pi_version" != "1.5.0" ]; then
-  echo "pi 1.5.0 is required; found ${pi_version}" >&2
+if [ "$pi_version" != "1.7.0" ]; then
+  echo "pi 1.7.0 is required; found ${pi_version}" >&2
   exit 1
 fi
 
@@ -168,22 +172,29 @@ esac
 echo "node $(node --version) · pi ${pi_version} · ${gh_version} · ${cloudflared_version}"
 echo "sqlite3 $(sqlite3 --version | cut -d' ' -f1) · $(rclone version | sed -n '1p')"
 
-# --- pi package from the image (pinned) ------------------------------------
-# The image clones RRiboulet/my-agent-setup at the tag in
-# .devcontainer/pi-agent-setup.version and labels it. This container only
-# declares that baked copy in its own agent settings; it never fetches the
-# package. A stale image (repo pin bumped, image not rebuilt) fails here rather
-# than silently loading the previous release.
+# --- pi package from the image --------------------------------------------
+# The image clones the release resolved from pi-agent-setup.version. An exact
+# tag is deterministic; "latest" is resolved by the host initialize step before
+# the build, and the generated stamp must match the image's actual release.
+# This container only declares that baked copy; it never fetches the package.
 PI_PACKAGE=/opt/pi-packages/my-agent-setup
 PI_PACKAGE_TAG_FILE="$PI_PACKAGE/.pi-agent-setup-tag"
 EXPECTED_TAG="$(tr -d '[:space:]' < "$REPO/.devcontainer/pi-agent-setup.version")"
+if [ "$EXPECTED_TAG" = latest ]; then
+  RESOLVED_FILE="$REPO/.devcontainer/pi-agent-setup.resolved"
+  if [ ! -f "$RESOLVED_FILE" ]; then
+    echo "postCreate: missing $RESOLVED_FILE; rebuild through devcontainer so initializeCommand resolves latest" >&2
+    exit 1
+  fi
+  EXPECTED_TAG="$(tr -d '[:space:]' < "$RESOLVED_FILE")"
+fi
 if [ ! -d "$PI_PACKAGE" ] || [ ! -f "$PI_PACKAGE_TAG_FILE" ]; then
   echo "postCreate: missing baked pi package at $PI_PACKAGE; rebuild the image" >&2
   exit 1
 fi
 ACTUAL_TAG="$(tr -d '[:space:]' < "$PI_PACKAGE_TAG_FILE")"
 if [ "$ACTUAL_TAG" != "$EXPECTED_TAG" ]; then
-  echo "postCreate: image carries $ACTUAL_TAG but this checkout pins $EXPECTED_TAG; rebuild the image (devc rebuild pupkeep)" >&2
+  echo "postCreate: image carries $ACTUAL_TAG but this checkout resolves $EXPECTED_TAG; rebuild the image (devc rebuild pupkeep)" >&2
   exit 1
 fi
 

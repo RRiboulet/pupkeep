@@ -1,6 +1,7 @@
-# The image bakes RRiboulet/my-agent-setup at a tag. This is the cheap,
-# offline check that the recorded pin, the Dockerfile and postCreate agree;
-# building the image is `devc rebuild analytics-agent`'s job on the VM.
+# The image bakes RRiboulet/my-agent-setup at the release selected by the
+# checkout's policy (an exact tag or latest). This is the cheap, offline check
+# that the resolver, Dockerfile and postCreate agree; building the image is
+# `devc rebuild <project>`'s job on the VM.
 name: pi-agent-setup pin
 
 on:
@@ -22,3 +23,6 @@ jobs:
 
       - name: Check pin
         run: sh .devcontainer/check-pi-agent-setup.sh
+
+      - name: Check shared pi state scripts
+        run: sh .devcontainer/shared-pi-state.test.sh

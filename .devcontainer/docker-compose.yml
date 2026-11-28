@@ -5,6 +5,8 @@ services:
       dockerfile: .devcontainer/Dockerfile
     volumes:
       - ..:/workspace:cached
+      # Shared auth/model source of truth; sessions/settings remain private.
+      - "${HOME}/.pi/shared-agent-state:/shared-pi-state:rw"
       # Explicit name: without it Compose derives the volume from the project
       # directory, so renaming or moving the repo would silently point pi at an
       # empty volume and look like every session and login had been lost.

@@ -35,6 +35,20 @@ Fixed:
   the scrub, and that file marks which of their observations no longer reproduce;
   a full drill of a scrubbed archive is still open.
 
+- **The devcontainer pins pi 1.7.0, resolves my-agent-setup at build time, and
+  shares the agent's auth/model state with the host (P1-02).** The image
+  installs `@earendil-works/pi-coding-agent@1.7.0` and asserts it, and
+  `postCreate`, CI and the docs all state the same pin. my-agent-setup is no
+  longer pin-bumped with every release: the policy stays `latest`, the host's
+  `initializeCommand` resolves the newest stable release before each build and
+  writes the ignored `.pi-agent-setup.resolved` stamp, and
+  `check-pi-agent-setup.sh` (plus CI) verifies offline that policy, resolution
+  and running image agree — pinning an exact release is now a two-file change,
+  not a rebuild surprise. The agent's auth and model catalogs (`auth.json`,
+  `models-store.json`, `models.json`) live in a `~/.pi/shared-agent-state` mount
+  shared with the host and sibling devcontainers, while sessions, settings and
+  trust stay in the container's own private volume.
+
 ## v0.1.1 — 2026-11-18
 
 Fixed:

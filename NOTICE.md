@@ -30,7 +30,7 @@ code is copied.
 
 ## Pi coding agent
 
-- Package: `@earendil-works/pi-coding-agent@1.4.0`
+- Package: `@earendil-works/pi-coding-agent@1.7.0`
 - Licence: MIT
 - Use: development environment only. The phone runtime does not need the coding
   agent; it uses Pi Durable and Pi AI directly.

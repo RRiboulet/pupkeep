@@ -83,27 +83,40 @@ RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     && cloudflared --version
 
 # The pi coding agent, exact. The enclosing workspace tracks @latest, but this
-# repo pins 1.5.0 (PLAN §5.1) and the devcontainer is the enforcement point.
-RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.5.0 \
-    && test "$(pi --version)" = "1.5.0"
+# repo pins 1.7.0 (PLAN §5.1) and the devcontainer is the enforcement point.
+RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.7.0 \
+    && test "$(pi --version)" = "1.7.0"
 
-# The shared pi package (extensions + skills), baked at a pinned tag. The tag is
-# recorded once in .devcontainer/pi-agent-setup.version; the build fails if this
-# ARG and that file disagree, so a half-done bump cannot produce an image. The
-# clone lives outside $AGENT_DIR on purpose: a named volume mounted at ~/.pi
-# copies the image's content only when the volume is empty, so a package baked
-# there would freeze at the first container's copy.
-COPY .devcontainer/pi-agent-setup.version /tmp/pi-agent-setup.version
-ARG PI_AGENT_SETUP_TAG=v1.14.0
+# The shared pi package (extensions + skills). pi-agent-setup.version is
+# either an exact stable tag or "latest"; devcontainer.json's initializeCommand
+# resolves it before the build and writes pi-agent-setup.resolved. Copying that
+# generated file makes a new release invalidate this cached clone layer. A
+# direct `docker build` without the initialize step resolves "latest" here as a
+# fallback. The clone lives outside $AGENT_DIR so a named volume cannot freeze
+# the package at the first container's copy.
+COPY .devcontainer/pi-agent-setup.* /tmp/
+ARG PI_AGENT_SETUP_TAG=latest
 RUN test "${PI_AGENT_SETUP_TAG}" = "$(tr -d '\r\n' < /tmp/pi-agent-setup.version)" \
+    && if [ ! -f /tmp/pi-agent-setup.resolved ]; then \
+         if [ "${PI_AGENT_SETUP_TAG}" = latest ]; then \
+           git ls-remote --tags --refs --sort=-v:refname \
+             https://github.com/RRiboulet/my-agent-setup.git \
+             | awk -F 'refs/tags/' '$2 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $2; exit }' \
+             > /tmp/pi-agent-setup.resolved; \
+         else \
+           printf '%s\n' "${PI_AGENT_SETUP_TAG}" > /tmp/pi-agent-setup.resolved; \
+         fi; \
+       fi \
+    && setup_tag="$(tr -d '\r\n' < /tmp/pi-agent-setup.resolved)" \
+    && printf '%s\n' "${setup_tag}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
     && mkdir -p /opt/pi-packages \
-    && git clone --depth 1 --branch "${PI_AGENT_SETUP_TAG}" \
+    && git clone --depth 1 --branch "${setup_tag}" \
          https://github.com/RRiboulet/my-agent-setup.git \
-         "/opt/pi-packages/my-agent-setup-${PI_AGENT_SETUP_TAG}" \
-    && ln -sfn "my-agent-setup-${PI_AGENT_SETUP_TAG}" /opt/pi-packages/my-agent-setup \
+         "/opt/pi-packages/my-agent-setup-${setup_tag}" \
+    && ln -sfn "my-agent-setup-${setup_tag}" /opt/pi-packages/my-agent-setup \
     && test -f /opt/pi-packages/my-agent-setup/package.json \
-    && printf '%s\n' "${PI_AGENT_SETUP_TAG}" > "/opt/pi-packages/my-agent-setup-${PI_AGENT_SETUP_TAG}/.pi-agent-setup-tag" \
-    && rm -f /tmp/pi-agent-setup.version
+    && printf '%s\n' "${setup_tag}" > "/opt/pi-packages/my-agent-setup-${setup_tag}/.pi-agent-setup-tag" \
+    && rm -f /tmp/pi-agent-setup.version /tmp/pi-agent-setup.resolved
 ENV PI_AGENT_SETUP_TAG=${PI_AGENT_SETUP_TAG}
 LABEL org.rriboulet.pi-package="${PI_AGENT_SETUP_TAG}"
 

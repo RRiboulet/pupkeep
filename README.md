@@ -120,13 +120,14 @@ scripts; `test/` for `node --test`; `deploy/` and `Dockerfile` for the box, with
 ## Development tooling
 
 **No pi package is declared in this repo on purpose.** The devcontainer image
-bakes `my-agent-setup` at the tag in `.devcontainer/pi-agent-setup.version`
+bakes `my-agent-setup` at the release selected by
+`.devcontainer/pi-agent-setup.version`
 under `/opt/pi-packages/my-agent-setup`, and `postCreate.sh` declares that baked
 path in the container's own agent settings. Declaring it in `.pi/settings.json`
 as well would make every extension load twice — the first version of this repo
 did, and subagents launched in this directory failed at startup with
 `Flag "--attach-subagent" conflicts with …`. The pi runtime the plan pins is
-`1.5.0`, enforced by the devcontainer (P1-02) rather than by a file here.
+`1.7.0`, enforced by the devcontainer (P1-02) rather than by a file here.
 
 **The development agent is not the product agent, and they must never be
 confused.** The pi coding agent used to build this repo has shell, file and web
@@ -145,7 +146,7 @@ single major that would make one of the two environments non-conforming.
 
 `.devcontainer/` builds from
 `mcr.microsoft.com/devcontainers/javascript-node:24-bookworm` and installs Node
-24, pi coding agent `1.5.0`, sqlite3, cloudflared, rclone, tmux, gh, jq, age,
+24, pi coding agent `1.7.0`, sqlite3, cloudflared, rclone, tmux, gh, jq, age,
 expect and the rest of the host tooling. Open the repo with the Dev Containers
 extension; `postCreate.sh` runs `npm ci`, installs the Chromium the render checks
 drive, then `npm run typecheck` and `npm test`, and seeds `.env` only when it is
@@ -165,10 +166,13 @@ devc doctor pupkeep     # docker, CLI, disk, uid and arch preflight
 It publishes 8787 on the host's loopback, so `ssh -L 8787:127.0.0.1:8787 <host>`
 from a phone reaches the dev server without opening a port to the internet.
 
-- pi settings, sessions, model/provider auth and the gh token persist in the
-  `pupkeep-pi-config` volume at `/home/vscode/.pi`. Provider keys and `GH_TOKEN`
-  come from the host environment through `${localEnv:...}` (`devc` sources
-  `~/.config/devc/env`); no other container shares this volume. gh is pinned to
+- pi settings, sessions, trust and gh config persist in the project's private
+  `pupkeep-pi-config` volume at `/home/vscode/.pi`. Saved `auth.json`,
+  `models-store.json` and `models.json` instead symlink to the host's
+  `~/.pi/shared-agent-state` mount at `/shared-pi-state`, shared with every
+  devcontainer; Pi locks the resolved files across containers. Provider keys and
+  `GH_TOKEN` also arrive from the host environment through `${localEnv:...}`
+  (`devc` sources `~/.config/devc/env`); no other container shares this volume. gh is pinned to
   `2.103.2`.
 - `npm start` reads `.env` with `--env-file-if-exists`; a real environment
   variable wins over the file. The container installs the cloudflared build for
@@ -176,11 +180,13 @@ from a phone reaches the dev server without opening a port to the internet.
   the **devcontainer's** HTTPS testing only — `P6-08` deleted the phone's
   `cloudflared` and the `cloudflare` mode, so it is not part of the product path.
 - The development database is `/tmp/pupkeep-dev`, never the workspace mount.
-- The `my-agent-setup` package is baked into the image at `v1.14.0` and
-  declared in the container's personal pi settings; it is deliberately not
-  declared in `.pi/settings.json`, which would load every extension twice.
+- The `my-agent-setup` package tracks the latest stable release and is baked
+  into the image before `postCreate` declares it in the container's personal pi
+  settings; it is deliberately not declared in `.pi/settings.json`, which would
+  load every extension twice. The host initialize step resolves the release and
+  writes an ignored stamp, so a normal rebuild refreshes it without `--no-cache`.
   `sh .devcontainer/check-pi-agent-setup.sh` (also run by CI) fails when the
-  recorded pin, the Dockerfile and `postCreate` disagree.
+  policy, resolver, Dockerfile, resolution stamp and running image disagree.
 - Port 8787 is published on the host's loopback (`127.0.0.1:8787:8787`), which is
   what makes the dev server reachable from outside the container; `forwardPorts`
   alone does nothing headless. Reach it from a phone with `ssh -L
