@@ -1296,10 +1296,11 @@ export class RotationError extends Error {
 
 /**
  * Re-encrypt every retained local archive under a new passphrase and upload the
- * result. The old passphrase remains necessary for any archive not rotated, so
- * this refuses to start when the remote holds archives the local set does not:
- * a "successful" rotation that silently leaves an old-key copy off-device is the
- * failure mode this check exists to prevent.
+ * result, verifying each off-device re-upload by size and sha256. The old
+ * passphrase remains necessary for any archive not rotated, so this refuses to
+ * start when the remote holds archives the local set does not: a "successful"
+ * rotation that silently leaves an old-key copy off-device is the failure mode
+ * this check exists to prevent.
  */
 export async function rotatePassphrases(
   options: RotateOptions,
@@ -1390,6 +1391,15 @@ export async function rotatePassphrases(
         throw new RotationError(
           `rclone could not upload the rotated ${name} (exit ${result.code}); the local archive is rotated, the remote copy is not; ` +
             "re-run --rotate with both passphrases to finish",
+          [...alreadyRotated, ...rotated],
+        );
+      }
+      try {
+        await verifyRemoteArchive(run, backupDir, remote, name, join(backupDir, name));
+      } catch (error) {
+        throw new RotationError(
+          `the rotated ${name} could not be verified off-device: ${(error as Error).message}; ` +
+            "the local archive is under the new passphrase; re-run --rotate with both passphrases to finish",
           [...alreadyRotated, ...rotated],
         );
       }

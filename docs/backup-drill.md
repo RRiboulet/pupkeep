@@ -261,8 +261,10 @@ is the failure that would otherwise leave an old-key copy off-device unnoticed.
   until the module has a filesystem seam, §7.5's "the drill checks the interrupted
   case" stays unproven rather than passed.
 - **Rotation with a remote configured.** The rotation ran local-only; the remote
-  half is covered by `test/backup.test.ts` ("refuses a remote-only archive") and by
-  the upload leg in §2, not by a drill that rotated and re-uploaded.
+  half was not drilled. Current `test/backup.test.ts` coverage refuses a
+  remote-only archive and pins size-and-digest verification of a rotated
+  re-upload, including a retry after corruption, but that is an injected
+  `CommandRunner`, not a real rclone remote.
 
 ## Cleanup, and what was left on the phone
 

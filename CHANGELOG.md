@@ -4,6 +4,18 @@
 
 Fixed:
 
+- **`--rotate` now proves the off-device copy instead of trusting an upload's
+  exit code (P6-11 follow-up).** Normal backups already compare the remote
+  object's size and sha256 with the verified local archive, but passphrase
+  rotation treated `rclone copyto` success as proof. A same-size corrupt object
+  could therefore replace the only off-device copy while rotation reported
+  success. Every rotated or already-rotated archive uploaded by `--rotate` now
+  goes through the same read-back check. A mismatch fails the rotation after the
+  local archive has been verified under the new key; re-running finds that local
+  archive, uploads it again and verifies the replacement. The regression test
+  covers both the corrupt first upload and the successful retry. A real rclone
+  remote remains P6-09's host proof.
+
 - **The encrypted archive no longer carries a live credential, and a restore now
   needs a fresh owner mint.** `config.json` inside a bundle is the household's
   identities and nothing that authenticates: `ownerTokenHash` is null, every

@@ -21,19 +21,25 @@ the **test level** (`access`, `options`, `outbox`, `runbook`, `termux-scripts` a
 `security` tests, 940 green); no phone walk has re-run them. The box-dependent
 rows below are still the operator's legs and are untouched by this revision.
 
+Revision 5 (2026-11-24): **`--rotate` verifies its re-uploads too.** Every
+archive uploaded after passphrase rotation, including one already rotated by an
+interrupted earlier run, now goes through the same size-and-sha256 read-back as
+a normal backup. A same-size corrupt object fails the rotation; the verified
+local archive stays under the new key and a retry re-uploads and verifies it.
+This is pinned with a fake `CommandRunner`, not a real rclone remote.
+
 **The design was built in two slices.** The first added `public` mode and made
 every other mode refuse to start once an origin was configured; `P6-08` then
 deleted the old path. What the design says about `tailscale`/`cloudflare` as
 future deletions is therefore implemented history; the rest of the narrative is
 kept as revision 2/3 wrote it.
 
-Two limits stated where they are load-bearing rather than discovered later:
+One limit stated where it is load-bearing rather than discovered later:
 **the off-box copy is proved by a size gate and then a sha256 of the object read
-back into the job's staging directory** (a corrupted upload of the right length
-is refused — the remaining gap is `--rotate`'s re-upload, which still trusts
-`rclone copyto`'s exit code), and no step in this repository has been executed
-against a Docker daemon or a public name, so R0/R1/R9 are the operator's legs on
-the box.
+back into the job's staging directory**, for normal backups and `--rotate`
+re-uploads alike (a corrupted upload of the right length is refused), and no
+step in this repository has been executed against a Docker daemon or a public
+name, so R0/R1/R9 are the operator's legs on the box.
 
 ## Objective
 
@@ -221,8 +227,9 @@ R7. **Backups run unattended, off-box, and cannot leak auth.** The image carries
    the job's private staging directory and both files are hashed with sha256, so
    corruption that keeps the length is found too; a mismatch fails the run and
    names which copy is intact and where the other one is, and the read-back copy
-   is removed on both paths. A re-upload after `--rotate` still trusts
-   `rclone copyto`'s exit code, which is the remaining gap.
+   is removed on both paths. A re-upload after `--rotate` uses the same check,
+   including when a retry finds an archive already rotated locally; a mismatch
+   fails the rotation without discarding that verified local archive.
 
 R8. **The box reports on itself, and the report is measurable.** A daily host
    timer pushes one line to a deployment-level ntfy topic named in

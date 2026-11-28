@@ -774,7 +774,10 @@ The **data** is durable. The **service** is a server's now, not a phone's.
   same-size corruption fails the run and the failure names which copy is intact
   and where the other one is. The read-back copy is removed on both paths. The
   cost is stated rather than hidden: every run now pulls the whole archive back
-  (`P6-11`), and `--rotate`'s re-upload still trusts `copyto`'s exit code.
+  (`P6-11`). `--rotate` applies the same size-and-digest check to every re-upload,
+  including archives an interrupted earlier run already rotated locally. A
+  corrupt re-upload fails the rotation after the local archive has been verified
+  under the new key; re-running uploads and verifies it again.
 
 **The daily report.** 08:00, after the 03:30 backup, posts one line to a
 deployment-level ntfy topic named in `/etc/pupkeep/report.env`: certificate days
@@ -5505,22 +5508,25 @@ current text.
       measurements (~3 MiB launcher, ~95 MiB server child, 62.7 ms median commit,
       8 ms cold read) are one host's numbers, not a week's. **Open.**
 - [x] **P6-11** Hash verification for the off-box upload.
-      **Landed (2026-11-21):** the size gate stays as the cheap first check — one
-      `lsjson --stat`, and a wrong length never pays for the download — then
-      `verifyRemoteArchive` copies the object back with `rclone copyto` into a
-      `mkdtemp` `.staging-` directory under the backup directory (0700 inside a
-      0700 parent, swept like any other staging leftover) and streams a sha256 of
-      both files. A same-size corruption fails with the remote and local digests
-      and which copy is intact and where the other one is; a failed `copyto`
-      says the off-device copy is unverified rather than uploaded; the read-back
-      copy is removed on the failure path too. Pinned by `test/backup.test.ts`:
-      the truncated upload never reaches the read-back, the same-size corrupt
-      object is refused by its digest, and no `.staging-` directory is left
-      behind. **Costs, stated:** every run downloads the whole archive back (a
-      1 MB archive costs 1 MB of bandwidth per run), and `--rotate`'s re-upload
-      still trusts `copyto`'s exit code — the same gap, still open. **Not
-      verified:** the read-back runs through the injected `CommandRunner`, not
-      against a real rclone remote.
+      **Landed (2026-11-21; rotation follow-up 2026-11-24):** the size gate stays
+      as the cheap first check — one `lsjson --stat`, and a wrong length never
+      pays for the download — then `verifyRemoteArchive` copies the object back
+      with `rclone copyto` into a `mkdtemp` `.staging-` directory under the backup
+      directory (0700 inside a 0700 parent, swept like any other staging leftover)
+      and streams a sha256 of both files. A same-size corruption fails with the
+      remote and local digests and which copy is intact and where the other one
+      is; a failed `copyto` says the off-device copy is unverified rather than
+      uploaded; the read-back copy is removed on the failure path too. Normal
+      backups and every `--rotate` re-upload use this check, including archives
+      already rotated locally by an interrupted run. Pinned by
+      `test/backup.test.ts`: the truncated upload never reaches the read-back, the
+      same-size corrupt object is refused by its digest, rotation refuses a
+      same-size corrupt re-upload while its verified local archive remains usable,
+      and a retry uploads and verifies that already-rotated archive. **Costs,
+      stated:** every verified upload downloads the whole archive back (a 1 MB
+      archive costs 1 MB of bandwidth per run). **Not verified:** the read-back
+      runs through the injected `CommandRunner`, not against a real rclone
+      remote.
 
 **Gate G5** stands as re-cut in §15.6: restore on the box, TLS/HSTS/`__Host-` on
 the public origin, two-client E2E, security review, release. Nothing in this

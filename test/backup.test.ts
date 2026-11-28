@@ -822,6 +822,74 @@ test("rotation re-encrypts every retained archive and refuses a remote-only arch
   }
 });
 
+test("rotation refuses a same-size corrupt off-device re-upload and a retry verifies it", async () => {
+  const source = await seedDataDir("rotate-corrupt-upload");
+  try {
+    const first = await backupDataDir(
+      { dataDir: source.dir, passphrase: PASSPHRASE, now: new Date("2026-10-29T12:11:00Z") },
+      { cipher: keyedCipher },
+    );
+    const name = first.archive.split("/").at(-1)!;
+    const target = remotePath("test:pupkeep", name);
+    const remoteObjects = new Map<string, Buffer>([[target, Buffer.alloc(1)]]);
+    let corruptUploads = true;
+    const remoteRun: CommandRunner = async (command, args, options) => {
+      if (command === "rclone") {
+        if (args[0] === "lsf") return { code: 0, stdout: `${name}\n`, stderr: "" };
+        if (args[0] === "copyto" && args[2]!.startsWith("test:")) {
+          const local = await readFile(args[1]!);
+          // The upload reports success but lands different bytes of the same
+          // length: exactly the corruption a copyto exit code cannot see.
+          remoteObjects.set(args[2]!, corruptUploads ? Buffer.alloc(local.length, 0x41) : local);
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "copyto") {
+          await writeFile(args[2]!, remoteObjects.get(args[1]!)!);
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "lsjson") {
+          return { code: 0, stdout: JSON.stringify({ Size: remoteObjects.get(args[2]!)?.length }), stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return runCommand(command, args, options);
+    };
+    const options = {
+      backupDir: join(source.dir, "backups"),
+      remote: "test:pupkeep",
+      oldPassphrase: PASSPHRASE,
+      newPassphrase: "another-correct-horse-battery",
+    };
+
+    await assert.rejects(
+      rotatePassphrases(options, { cipher: keyedCipher, run: remoteRun }),
+      (error: unknown) =>
+        error instanceof RotationError &&
+        error.rotated.length === 1 &&
+        /matches the local archive's \d+ bytes but not its sha256/.test(error.message),
+    );
+
+    // The local replacement was verified before upload and remains usable even
+    // though the off-device copy is now known to be corrupt.
+    await assert.rejects(stageArchive(first.archive, PASSPHRASE, { cipher: keyedCipher }), /wrong passphrase/);
+    const staged = await stageArchive(first.archive, options.newPassphrase, { cipher: keyedCipher });
+    await staged.cleanup();
+
+    // A retry finds the local archive already under the new key, uploads it
+    // again, and must verify that re-upload too before reporting success.
+    corruptUploads = false;
+    const retried = await rotatePassphrases(options, { cipher: keyedCipher, run: remoteRun });
+    assert.deepEqual(retried.rotated, []);
+    assert.deepEqual(retried.alreadyRotated, [name]);
+    assert.deepEqual(remoteObjects.get(target), await readFile(first.archive));
+    const leftover = (await readdir(join(source.dir, "backups"))).filter((entry) => entry.startsWith(".staging-"));
+    assert.deepEqual(leftover, []);
+  } finally {
+    await source.close();
+    await rm(source.dir, { recursive: true, force: true });
+  }
+});
+
 test("age + expect really round-trip a file under a passphrase", { skip: !ageAvailable }, async () => {
   const dir = await tempDir("pupkeep-age-");
   try {
