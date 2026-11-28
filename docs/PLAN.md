@@ -1640,6 +1640,16 @@ displayed but not pushed in v1.
 
 ### 13.1 Screens
 
+0. **First-run setup** (`#/setup` — the mandatory first-launch page; the P1-14
+   "the wizard is not a route" decision is reversed by
+   `docs/specs/2026-11-28-mandatory-first-run-setup.md`). While the five setup
+   steps are open the whole app is this page: every hash route redirects to
+   `#/setup`, the browser's address is rewritten to match (a reload, a bookmark
+   or back/forward all land here), the bottom navigation does not render, and
+   no other screen is reachable. Five numbered cards with an "N of 5 ready"
+   lead — household name, timezone, puppy, meal times, provider key — and no
+   skip control. Once the steps are complete the page redirects to Today and is
+   unreachable for as long as setup stays complete.
 1. **Today**
    - Puppy name/age, both caregivers, live/offline indicator.
    - Next appointment + countdown.
@@ -1687,8 +1697,9 @@ displayed but not pushed in v1.
    - Meal schedule.
    - Models (live availability), provider keys, budget, usage.
    - Data export, backup status, restore.
-   - First-run wizard: puppy profile + meal slots.
    - Owner reissue/rotate; logout / remove member.
+   - (The embedded first-run wizard is gone: the household section owns name
+     and timezone at any time, the setup page owns first launch.)
 
 ### 13.2 Shape
 
@@ -1697,6 +1708,11 @@ displayed but not pushed in v1.
   not fit a 320 px screen at full size, so the notification tab's visible label
   is the shorthand "Alerts" while its accessible name still says
   "Alerts, notifications, N unread" (P5-10).
+- While first-run setup is incomplete the shell paints only the `#/setup` page:
+  no bottom navigation, and the address is rewritten to match (the P1-14
+  reversal); before the first profile read the shell paints a neutral loading
+  screen with no navigation, so neither Today nor the tabs flash at a household
+  whose state nobody knows yet.
 - Desktop: sidebar + wider layout.
 - PWA manifest + home-screen icons on the host/localhost and the HTTPS test
   origin; the partner’s daily Tailscale origin is a browser app.
@@ -2720,10 +2736,18 @@ that the partner is reached out-of-app is gated on P0-10.
       save is the human tap, so it may set the schedule directly, while the
       agent's schedule change stays the approval-gated
       `request_feeding_schedule_change` (P4-07) — no tool was added here;
-      (7) the wizard is not a route: Today gates on the derived checklist and
-      Settings embeds the same component, so a partner who joins mid-wizard sees
-      the same three steps and no `#setup` URL can be deep-linked into half a
-      setup; (8) changing the zone does not rewrite historical `localDate`
+      (7) **the wizard is not a route — reversed by the mandatory first-run
+      setup** (`docs/specs/2026-11-28-mandatory-first-run-setup.md`):
+      `#/setup` is a real route and the app locks behind it. While the derived
+      checklist is incomplete, every hash route redirects to `#/setup` (the
+      browser's address included, so a reload or back/forward lands there), the
+      bottom navigation does not render, and Today's old gate and Settings'
+      embedded wizard are both gone — the household section (name + timezone)
+      is Settings' post-completion home for what it used to embed. Once the
+      five steps are complete, `#/setup` redirects to Today and the page is
+      unreachable. A partner who joins mid-setup still sees exactly the steps
+      that are open, and no half-completed screen can be deep-linked; (8)
+      changing the zone does not rewrite historical `localDate`
       values — there are none before Phase 2, and §8.5 derives each event's
       `localDate` from its instant, which is P2-01/P2-02's rule to keep.
       **Verified:** 25 new tests — 18 in `test/setup.test.ts` and 7 in

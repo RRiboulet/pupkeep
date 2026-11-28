@@ -7,9 +7,10 @@
 //     may touch the draft, a household change may not;
 //   * a stream that reconnects re-reads the care state, because the thread's SSE
 //     snapshot carries none;
-//   * the setup gate: an unfinished household never lands on Today (P1-14), and
-//     the idempotency key stays with the body it belongs to (P1-11's rule, now
-//     shared with the wizard's form).
+//   * the setup gate: while setup is incomplete every route is the mandatory
+//     `#/setup` page with no navigation, and once it is complete `#/setup`
+//     redirects to Today; and the idempotency key stays with the body it
+//     belongs to (P1-11's rule, now shared with the setup page's form).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -24,7 +25,7 @@ const { feedTimeText, localDate, localMinutes, mealClock, mealRows, mealStatus, 
   "../web/meals.js"
 );
 const { correctedNow, timerText, walkSeconds, walkStale, walkTimeText } = await import("../web/walks.js");
-const { getState, setState } = await import("../web/store.js");
+const { getState, setState, gatedRoute, hashRoute, reconcileHash } = await import("../web/store.js");
 const { changedFields, draftOf, emptyDraft, isNewer, pendingSave, wireOf } = await import("../web/profile-form.js");
 const { CHART_SIZE, chartGeometry, daysBetweenLocalDates, formatKg, measurementRows, windowLabel } =
   await import("../web/growth-chart.js");
@@ -209,25 +210,53 @@ test("the one stream forwards the thread's snapshot, batch and connection frames
   live.close();
 });
 
-test("the setup gate sends an unfinished household to the wizard, and a finished one to Today", () => {
+test("the shell's gate: an unfinished household lands on the setup route from anywhere", () => {
   const unfinished = { ...profileOf(), meals: { rev: 0, slots: [] }, setup: { complete: false, missing: ["meals"] } };
-  setState({ profile: unfinished });
-  const gated = new Today({}).render();
-  assert.equal(gated.type, Setup, "an unfinished household never lands on Today");
+  for (const route of ["today", "calendar", "pup", "agent", "notifications", "settings", "setup"]) {
+    assert.equal(gatedRoute(route, unfinished).screen, "setup", `${route} is the setup page while setup is incomplete`);
+  }
 
-  const ready = {
-    ...profileOf(),
-    meals: { rev: 1, slots: [{ id: "slot-a", label: "Breakfast", timeLocal: "07:00", active: true }] },
-    setup: { complete: true, missing: [] },
-  };
-  setState({ profile: ready });
-  const today = new Today({}).render();
-  assert.notEqual(today.type, Setup, "a finished household sees Today");
+  // No profile read yet: a neutral loading screen and no navigation — never a
+  // flash of Today (or the nav) at a household whose state nobody knows.
+  assert.equal(gatedRoute("today", null).screen, "loading");
+  assert.equal(gatedRoute("setup", null).screen, "loading");
 
-  // No profile read yet: Today shows itself rather than flashing the wizard at
-  // a household that set up months ago.
-  setState({ profile: null });
-  assert.notEqual(new Today({}).render().type, Setup, "an unread profile is not an unfinished one");
+  const ready = profileOf();
+  assert.equal(gatedRoute("today", ready).screen, "today", "a finished household sees Today");
+  assert.equal(gatedRoute("calendar", ready).screen, "calendar", "the other screens keep their routes");
+  assert.equal(gatedRoute("setup", ready).screen, "today", "#/setup is Today's address once setup is complete");
+});
+
+test("the gate rewrites the browser address in both directions", () => {
+  const unfinished = { ...profileOf(), setup: { complete: false, missing: ["meals"] } };
+  const ready = profileOf();
+  const original = globalThis.location;
+  const location = { hash: "#/calendar" };
+  globalThis.location = location;
+  try {
+    reconcileHash("calendar", unfinished);
+    assert.equal(location.hash, "#/setup", "an unfinished household's address is the setup page's, whatever was linked");
+
+    location.hash = "#/today";
+    reconcileHash("today", unfinished);
+    assert.equal(location.hash, "#/setup");
+
+    // Already right: a no-op, so no `hashchange` and no history entry.
+    location.hash = "#/setup";
+    reconcileHash("setup", unfinished);
+    assert.equal(location.hash, "#/setup");
+
+    reconcileHash("setup", ready);
+    assert.equal(location.hash, "#/today", "a completed setup's page redirects to Today in the URL too");
+
+    reconcileHash("today", ready);
+    assert.equal(location.hash, "#/today", "an ordinary route's address is left alone");
+
+    reconcileHash("today", null);
+    assert.equal(location.hash, "#/today", "nothing is decided before the first profile read");
+  } finally {
+    globalThis.location = original;
+  }
 });
 
 test("the idempotency key is held with the body it belongs to", () => {

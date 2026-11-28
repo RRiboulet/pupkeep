@@ -613,9 +613,10 @@ test("the owner's Today card feeds a meal and walks the dog", async () => {
 });
 
 // --- Settings → Household (the name and the timezone, ticket 03) ------------
-// The card the Settings screen gains while the embedded wizard still stands:
-// the post-completion home for the two human-checked facts, editable at any
-// time by either caregiver, with the wizard's per-section guards.
+// The card the Settings screen gains as the embedded wizard leaves (the
+// mandatory first-run setup, ticket 04): the post-completion home for the two
+// human-checked facts, editable at any time by either caregiver, with the
+// wizard's per-section guards.
 
 /** The household document as the server holds it right now. */
 async function householdNow() {
@@ -799,11 +800,11 @@ test("a zone the server does not know is refused in the timezone section only", 
   }
 });
 
-test("the household section renders for the card's two roles and keeps the wizard on the page", async () => {
+test("the household section renders for the card's two roles and the embedded wizard is gone", async () => {
   const ui = await ownerUi();
   try {
-    // Render-level: the section's copy is role-free, and the embedded wizard is
-    // still mounted under it (a later ticket removes it, not this one).
+    // Render-level: the section's copy is role-free, and the wizard is nowhere
+    // on the page — first launch owns it, on its own `#/setup` route.
     const settings = mount(Settings);
     await settings.loadModels();
     const vnode = settings.render();
@@ -817,7 +818,7 @@ test("the household section renders for the card's two roles and keeps the wizar
     };
     walk(vnode);
     assert.equal(counts.HouseholdSection, 1, "Settings mounts exactly one household section");
-    assert.equal(counts.Setup, 1, "the embedded wizard is still present");
+    assert.equal(counts.Setup, 0, "the embedded wizard is gone; the setup page owns first launch");
   } finally {
     await ui.close();
   }

@@ -14,8 +14,9 @@
 
 import { h, render } from "./vendor/preact.mjs";
 import htm from "./vendor/htm.mjs";
-import { getState, hashRoute, setState, subscribe } from "./store.js";
+import { gatedRoute, getState, hashRoute, reconcileHash, setState, subscribe } from "./store.js";
 import { startLive } from "./live.js";
+import { Setup } from "./views/setup.js";
 import { Today } from "./views/today.js";
 import { Calendar } from "./views/calendar.js";
 import { Pup } from "./views/pup.js";
@@ -93,14 +94,51 @@ function Status({ online }) {
   `;
 }
 
-function App({ route, online }) {
-  const View = VIEWS.get(route) ?? Today;
+/**
+ * The neutral first paint, before the first profile read (R1). No navigation
+ * and no view: an unconfigured household must not see Today flash, and a
+ * configured one must not see the nav flash. If the read answers 401 the
+ * screen says so instead of spinning forever — before the gate every view
+ * fetched its own 401 and had a screen to put the sentence in.
+ */
+function Loading({ online }) {
+  const signedOut = getState().signedOut === true;
   return html`
     <${Status} online=${online} />
-    <main class="content" aria-label=${route}>
+    <main class="content" aria-label="loading">
+      <section class="view" aria-labelledby="boot-heading">
+        <h1 id="boot-heading">Pupkeep</h1>
+        ${signedOut
+          ? html`<p class="notice notice--error" role="alert">
+              Please sign in again. <a href="/login">Open your sign-in link</a>.
+            </p>`
+          : html`<p class="placeholder">Loading the household…</p>`}
+      </section>
+    </main>
+  `;
+}
+
+function App({ route, online }) {
+  const gated = gatedRoute(route, getState().profile);
+  if (gated.screen === "loading") return html`<${Loading} online=${online} />`;
+  // The whole app is the setup page: no navigation, and no other view, however
+  // the URL or the history said (R1). `reconcileHash` has already aimed the
+  // address here.
+  if (gated.screen === "setup") {
+    return html`
+      <${Status} online=${online} />
+      <main class="content" aria-label="setup">
+        <${Setup} />
+      </main>
+    `;
+  }
+  const View = VIEWS.get(gated.screen) ?? Today;
+  return html`
+    <${Status} online=${online} />
+    <main class="content" aria-label=${gated.screen}>
       <${View} />
     </main>
-    <${Nav} route=${route} />
+    <${Nav} route=${gated.screen} />
   `;
 }
 
@@ -115,6 +153,9 @@ if (root) {
 
   const draw = () => {
     pending = false;
+    // The gate's URL half runs with the paint, so a deep link into a gated app
+    // lands on the address the gate wants before anything else reads it.
+    reconcileHash(latest.route, getState().profile);
     render(html`<${App} route=${latest.route} online=${latest.online} />`, root);
   };
   const schedule = (route, online) => {
