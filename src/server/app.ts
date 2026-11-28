@@ -739,6 +739,10 @@ export async function startApp(options: AppOptions, deps: AppDeps = {}): Promise
       // clock; a frame built on the wall clock would disagree with every read
       // on a process with an injected clock (P3-03).
       now: options.now ? () => new Date(options.now!()) : undefined,
+      // The key setup step is derived from `secrets.json`'s key list, live: a
+      // key saved from Settings must end the setup gate without a restart.
+      // Presence only — a key's value never enters the frame (§14.1).
+      keyPresent: async () => (await providersWithKeys(stores.secrets)).size > 0,
     });
 
     // P4-06: the host phone's Termux:API transport. Only the owner's intents go

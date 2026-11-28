@@ -85,7 +85,7 @@ import {
   type FeedConflictView,
   type FeedWriteView,
 } from "../shared/feeding.ts";
-import { parsePuppyPatch, type PuppyProfile } from "../shared/profile.ts";
+import { parsePuppyPatch, parseHouseholdName, HOUSEHOLD_NAME_LIMIT, type PuppyProfile } from "../shared/profile.ts";
 import {
   Auth,
   AuthError,
@@ -126,7 +126,7 @@ import {
   updateMealSlots,
   type FeedOutcome,
 } from "./domain/feeding.ts";
-import { updateAgentBudget, updateHouseholdTimezone } from "./domain/household.ts";
+import { updateAgentBudget, updateHouseholdProfile } from "./domain/household.ts";
 import { readBudget } from "./domain/usage.ts";
 import { modelIsPaid } from "./agent/model.ts";
 import { isProviderId, PROVIDERS } from "./models/collection.ts";
@@ -1032,7 +1032,12 @@ async function respondToCareWrite(
     sendKeyConflict(res);
     return;
   }
-  const profile = await readProfile(deps.thread.harness, deps.thread.context, new Date(deps.now?.() ?? Date.now()));
+  const profile = await readProfile(
+    deps.thread.harness,
+    deps.thread.context,
+    new Date(deps.now?.() ?? Date.now()),
+    await providerKeyPresent(deps),
+  );
   if (outcome === "stale") {
     sendJson(res, 409, {
       error: "stale",
@@ -1088,7 +1093,21 @@ async function handleProfileRead(deps: HttpDeps, res: ServerResponse): Promise<v
   // The process clock, not the wall clock: the care view's `today` and the
   // growth summary's staleness derive from it, and an injected clock must move
   // them together (P3-03).
-  sendJson(res, 200, await readProfile(deps.thread.harness, deps.thread.context, new Date(deps.now?.() ?? Date.now())));
+  const now = new Date(deps.now?.() ?? Date.now());
+  sendJson(res, 200, await readProfile(deps.thread.harness, deps.thread.context, now, await providerKeyPresent(deps)));
+}
+
+/**
+ * Whether any provider key exists, read live from `secrets.json`. The setup
+ * derivation sees this boolean and nothing else: a key's value never enters a
+ * view, a response or a log (§14.1).
+ */
+async function providerKeyPresent(deps: HttpDeps): Promise<boolean> {
+  if (deps.secrets !== undefined) {
+    return Object.keys((await deps.secrets.read()).providerKeys).length > 0;
+  }
+  if (deps.modelProviders !== undefined) return (await deps.modelProviders()).size > 0;
+  return false;
 }
 
 /**
@@ -1122,6 +1141,8 @@ async function handleProfileUpdate(
     actionId: `http:${key}`,
     rev,
     patch,
+    // The setup steps of the returned view read the live key presence.
+    keyPresent: await providerKeyPresent(deps),
     // The process clock: the birthday check and the view this answer returns
     // must agree with the reads (P3-03's clock fix).
     now: new Date(deps.now?.() ?? Date.now()),
@@ -1146,10 +1167,11 @@ async function handleProfileUpdate(
 // --- first-run setup (P1-14) -------------------------------------------------
 
 /**
- * Set or re-confirm the household timezone. Confirming an unchanged zone is a
- * real action: it is how the caregiver signs off on the one value every future
- * `localDate` derives from, so it still bumps the revision and records who did
- * it. The zone itself is validated in the domain, inside the commit.
+ * Set or re-confirm the household's name and/or timezone — the two human-checked
+ * facts the five-step setup asks for. Confirming an unchanged value is a real
+ * action: it is how the caregiver signs off, so it still bumps the revision and
+ * records who did it. The values themselves are validated in the domain, inside
+ * the commit.
  */
 async function handleHouseholdUpdate(
   deps: HttpDeps,
@@ -1163,21 +1185,31 @@ async function handleHouseholdUpdate(
     throw new ConflictError("a household change is a JSON object");
   }
   const record = body as Record<string, unknown>;
-  requireOnlyKeys(record, ["rev", "timezone"]);
+  requireOnlyKeys(record, ["rev", "timezone", "name"]);
   const rev = revisionOf(record);
-  if (typeof record.timezone !== "string") {
+  if (record.timezone === undefined && record.name === undefined) {
+    throw new ConflictError("a household change needs a timezone or a name");
+  }
+  if (record.timezone !== undefined && typeof record.timezone !== "string") {
     throw new ConflictError("a household change needs a timezone");
   }
+  // Trimmed and bounded here, so a bad name is refused before anything is
+  // read; the domain re-checks inside the commit.
+  const name = record.name === undefined ? undefined : parseHouseholdName(record.name);
+  if (record.name !== undefined && name === undefined) {
+    throw new ConflictError(`a household name is one line of at most ${HOUSEHOLD_NAME_LIMIT} characters`);
+  }
 
-  const outcome = await updateHouseholdTimezone(deps.thread.harness, deps.thread.context, {
+  const outcome = await updateHouseholdProfile(deps.thread.harness, deps.thread.context, {
     actor: careActor(session),
     actionId: `http:${key}`,
     rev,
-    timezone: record.timezone,
-    // `timezoneConfirmedAt` is a stamped instant; a test's clock must move it.
+    ...(record.timezone === undefined ? {} : { timezone: record.timezone as string }),
+    ...(name === undefined ? {} : { name }),
+    // The stamps are confirmed instants; a test's clock must move them.
     now: new Date(deps.now?.() ?? Date.now()),
   });
-  await respondToCareWrite(deps, res, outcome, "timezone");
+  await respondToCareWrite(deps, res, outcome, "household");
 }
 
 /**
@@ -1236,7 +1268,7 @@ async function handleBudgetUpdate(
     sendJson(res, 409, {
       error: "stale",
       message: "the household changed since it was read",
-      profile: await readProfile(deps.thread.harness, deps.thread.context, now),
+      profile: await readProfile(deps.thread.harness, deps.thread.context, now, await providerKeyPresent(deps)),
     });
     return;
   }

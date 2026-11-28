@@ -20,10 +20,12 @@ import type { AppointmentFields } from "./calendar.ts";
  * Version 2 adds `rev` and `timezoneConfirmedAt` (P1-14); version 3 adds
  * `feedReminders`, the persisted ids of the feeding reminders the schedule
  * armed (P2-09); version 4 adds `feedPlannerTaskId`, the one daily feed planner
- * (P4-04). Older documents migrate on read, so a phone that ran P1-08, P1-14 or
- * P2-09 keeps its household, members and settings.
+ * (P4-04); version 5 adds `nameConfirmedAt`, the household-name stamp the
+ * five-step setup derivation reads (mandatory first-run setup). Older documents
+ * migrate on read, so a phone that ran P1-08, P1-14, P2-09 or P4-04 keeps its
+ * household, members and settings.
  */
-export const HOUSEHOLD_SCHEMA_VERSION = 4 as const;
+export const HOUSEHOLD_SCHEMA_VERSION = 5 as const;
 /** Version 2 adds `rev` (P1-11); a version-1 document migrates on read. */
 export const PUPPY_SCHEMA_VERSION = 2 as const;
 /** `app.usage` (P4-08): the derived monthly baseline; never a second ledger. */
@@ -97,6 +99,12 @@ export type Household = {
    * depends on the zone, so first-run setup is not complete until it is set.
    */
   timezoneConfirmedAt: string | null;
+  /**
+   * When a caregiver confirmed the household name (mandatory first-run setup);
+   * `null` means the bootstrap default is the name nobody has checked yet.
+   * Confirming an unchanged default still stamps, exactly like the zone.
+   */
+  nameConfirmedAt: string | null;
   members: MemberProfile[];
   /** One human-facing Pi Durable conversation; numeric id. */
   conversationId: number;

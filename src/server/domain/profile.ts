@@ -50,6 +50,11 @@ export interface ProfileUpdate {
   /** The revision the caller read; must equal the document's current one. */
   readonly rev: number;
   readonly patch: PuppyPatch;
+  /**
+   * Provider-key presence, for the setup steps of the views this write returns
+   * (§14.1: a boolean; the key's value never enters a view).
+   */
+  readonly keyPresent?: boolean;
   readonly now?: Date;
 }
 
@@ -88,19 +93,30 @@ export function puppyFields(puppy: Puppy): PuppyFields {
 }
 
 /**
- * What first-run setup still needs (P1-14). Derived from the documents, in the
- * wizard's order: the zone every `localDate` depends on, the puppy itself, and
- * a meal schedule that shows at least one meal. A partner who joins mid-wizard
- * sees the same list, so either caregiver can finish it.
+ * What first-run setup still needs (P1-14's three steps, extended to five by
+ * the mandatory first-run setup). Derived from the documents plus one boolean —
+ * the provider-key presence, never a key's value — in the setup page's order:
+ * the household's name, the zone every `localDate` depends on, the puppy
+ * itself, a meal schedule that shows at least one meal, and a key for the agent.
+ * A partner who joins mid-setup sees the same list, so either caregiver can
+ * finish it.
  */
-export function setupState(household: Household, puppy: Puppy, feeding: Feeding): {
+export function setupState(
+  household: Household,
+  puppy: Puppy,
+  feeding: Feeding,
+  keyPresent: boolean,
+): {
   complete: boolean;
   missing: SetupStep[];
 } {
   const missing: SetupStep[] = [];
+  if (household.nameConfirmedAt === null) missing.push("name");
   if (household.timezoneConfirmedAt === null) missing.push("timezone");
   if (puppy.name.trim() === "") missing.push("puppy");
   if (feeding.slots.length === 0) missing.push("meals");
+  // Presence only: the derivation never sees a key's value (§14.1).
+  if (!keyPresent) missing.push("key");
   return { complete: missing.length === 0, missing };
 }
 
@@ -110,7 +126,13 @@ export function setupState(household: Household, puppy: Puppy, feeding: Feeding)
  * data, so a measurement moves `careSeq` and the Pup screen re-reads
  * `/api/growth` (P3-03).
  */
-export function profileView(household: Household, puppy: Puppy, feeding: Feeding, now: Date): PuppyProfile {
+export function profileView(
+  household: Household,
+  puppy: Puppy,
+  feeding: Feeding,
+  now: Date,
+  keyPresent: boolean,
+): PuppyProfile {
   const today = localDateAt(now, household.timezone);
   return {
     rev: puppy.rev,
@@ -120,11 +142,12 @@ export function profileView(household: Household, puppy: Puppy, feeding: Feeding
       name: household.name,
       timezone: household.timezone,
       timezoneConfirmedAt: household.timezoneConfirmedAt,
+      nameConfirmedAt: household.nameConfirmedAt,
       rev: household.rev,
       members: household.members.map((member) => ({ ...member })),
     },
     meals: { rev: feeding.rev, slots: feeding.slots.map((slot) => ({ ...slot })) },
-    setup: setupState(household, puppy, feeding),
+    setup: setupState(household, puppy, feeding, keyPresent),
     today,
   };
 }
@@ -132,15 +155,22 @@ export function profileView(household: Household, puppy: Puppy, feeding: Feeding
 /**
  * Read the three committed documents and build the current view. One reader for
  * HTTP, the `profile` frame and the tools, so all three can never disagree
- * about the household's state.
+ * about the household's state. `keyPresent` is the live provider-key presence
+ * from `secrets.json` (a boolean; a caller that cannot know counts the key as
+ * absent, so a view never claims setup is complete when it may not be).
  */
-export async function readProfile(store: DocStore, context: Context, now: Date): Promise<PuppyProfile> {
+export async function readProfile(
+  store: DocStore,
+  context: Context,
+  now: Date,
+  keyPresent = false,
+): Promise<PuppyProfile> {
   const [household, puppy, feeding] = await Promise.all([
     readHousehold(store, context),
     readPuppy(store, context),
     readFeeding(store, context),
   ]);
-  return profileView(household, puppy, feeding, now);
+  return profileView(household, puppy, feeding, now, keyPresent);
 }
 
 function applyPatch(draft: Puppy, patch: PuppyPatch): void {
@@ -214,12 +244,12 @@ export async function updatePuppyProfile(
     );
   } catch (error) {
     if (error instanceof StaleRevisionError) {
-      return { kind: "stale", profile: await readProfile(store, context, now) };
+      return { kind: "stale", profile: await readProfile(store, context, now, input.keyPresent ?? false) };
     }
     throw error;
   }
 
   if (outcome.kind === "conflict") return { kind: "key-conflict" };
-  const profile = await readProfile(store, context, now);
+  const profile = await readProfile(store, context, now, input.keyPresent ?? false);
   return outcome.kind === "replayed" ? { kind: "replayed", profile } : { kind: "updated", profile };
 }

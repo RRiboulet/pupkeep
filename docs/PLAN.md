@@ -2708,7 +2708,11 @@ that the partner is reached out-of-app is gated on P0-10.
       joining cannot invalidate the other caregiver's draft; (3) setup completion
       is **derived** (a confirmed zone, a named puppy, at least one active slot)
       rather than a stored flag, so the checklist cannot claim a state the
-      documents do not have; (4) confirming the captured zone unchanged is still
+      documents do not have (amended by the mandatory first-run setup,
+      `docs/specs/2026-11-28-mandatory-first-run-setup.md`: the derivation is
+      five steps — `name`, `timezone`, `puppy`, `meals`, `key` — via
+      `HOUSEHOLD_SCHEMA_VERSION` 5's `nameConfirmedAt` and a provider-key
+      **presence** boolean from `secrets.json`, never a key's value); (4) confirming the captured zone unchanged is still
       one real save — revision, confirmation instant and activity entry — because
       signing off on the zone is the point; (5) `app.feeding` starts at version 1
       with slots only, and P2-01 adds feed events as version 2 with a `migrate`

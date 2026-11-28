@@ -56,6 +56,12 @@ export interface ProfileStateOptions {
   readonly now?: () => Date;
   /** Test seam: hold a read to prove a commit during one still gets a frame. */
   readonly read?: () => Promise<PuppyProfile>;
+  /**
+   * Live provider-key presence, for the setup steps the frame carries. The
+   * frame must not lie about the key step (the client's setup gate reads it);
+   * a caller that cannot know counts the key as absent.
+   */
+  readonly keyPresent?: () => Promise<boolean>;
 }
 
 export interface ProfileStateWatch {
@@ -84,7 +90,15 @@ export function watchProfileState(options: ProfileStateOptions): ProfileStateWat
     // Coalesced by the loop in `run`: the read takes the latest documents, so a
     // commit that lands while it is in flight is picked up by the next pass
     // instead of being published out of order.
-    const profile = await (options.read ?? (() => readProfile(options.harness, options.context, now())))();
+    const profile = await
+      (options.read ??
+        (async () =>
+          readProfile(
+            options.harness,
+            options.context,
+            now(),
+            options.keyPresent === undefined ? false : await options.keyPresent(),
+          )))();
     if (stopped) return;
     options.bus.publishState(profile);
   };

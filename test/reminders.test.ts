@@ -33,7 +33,7 @@ import {
   parseFeedReminderRefs,
 } from "../src/server/domain/docs.ts";
 import { logFeed, updateMealSlots } from "../src/server/domain/feeding.ts";
-import { readHousehold, updateHouseholdTimezone } from "../src/server/domain/household.ts";
+import { readHousehold, updateHouseholdProfile } from "../src/server/domain/household.ts";
 import { instantAtLocalWallClock, localDateAt } from "../src/server/domain/time.ts";
 import { openHarness, type OpenedHarness } from "../src/server/harness.ts";
 import {
@@ -102,11 +102,12 @@ test("a slot's wall-clock time becomes one instant in the household zone, DST in
 
 function household(overrides: Partial<Household> = {}): Household {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     rev: 0,
     name: "Our household",
     timezone: "Europe/Paris",
     timezoneConfirmedAt: "2026-10-29T04:00:00.000Z",
+    nameConfirmedAt: "2026-10-29T04:00:00.000Z",
     members: [{ id: "owner", name: "Alex" }],
     conversationId: 1,
     systemConversationId: 2,
@@ -247,16 +248,17 @@ test("the reminder list parses strictly and a version-2 household migrates to an
     settings: household().settings,
   };
   const migrated = migrate(versionTwo as never, 2);
-  assert.equal(migrated.schemaVersion, 4);
+  assert.equal(migrated.schemaVersion, 5);
   assert.equal(migrated.rev, 4, "a version-2 household keeps its revision");
   assert.deepEqual(migrated.feedReminders, []);
   assert.equal(migrated.feedPlannerTaskId, null, "P4-04 arms the planner at the next boot");
   assert.deepEqual(migrated.members, [{ id: "owner", name: "Alex" }]);
+  assert.equal(migrated.nameConfirmedAt, null, "the name stamp is the five-step setup's new question");
 
   // A version-3 document only lacks the planner id; its refs are kept.
   const versionThree = { ...versionTwo, schemaVersion: 3, feedReminders: [ref] };
   const fromThree = migrate(versionThree as never, 3);
-  assert.equal(fromThree.schemaVersion, 4);
+  assert.equal(fromThree.schemaVersion, 5);
   assert.deepEqual(fromThree.feedReminders, [ref], "the version-3 refs survive");
   assert.equal(fromThree.feedPlannerTaskId, null);
 });
@@ -513,7 +515,7 @@ test("a timezone change leaves today's arm stale until the next save re-arms it"
     // Paris → Lisbon (no summer time by late October): 07:00 local is now an
     // hour later in UTC, so the armed instant no longer matches the schedule.
     assert.equal(
-      await updateHouseholdTimezone(opened.harness, context, {
+      await updateHouseholdProfile(opened.harness, context, {
         actor: alex,
         actionId: "http:zone-1",
         rev: 0,

@@ -25,6 +25,10 @@
 //     never armed a task.
 //   * `app.household` moved to version 4 when P4-04 added `feedPlannerTaskId`;
 //     `migrate` starts it null and the next boot reconciliation arms the planner.
+//   * `app.household` moved to version 5 when the mandatory first-run setup
+//     added `nameConfirmedAt`; `migrate` starts it null, so a household that
+//     was complete under the three-step rule re-runs setup once (R9), never
+//     resets.
 //   * `app.notifications` moved to version 2 when P4-05 added the outbox
 //     delivery state; a version-1 item migrates as pending.
 // A phone that ran an older build therefore keeps its household and profile
@@ -130,6 +134,8 @@ export function emptyHousehold(): Household {
     timezone: "UTC",
     // Nobody has confirmed the zone yet; first-run setup (P1-14) does.
     timezoneConfirmedAt: null,
+    // Nobody has confirmed the name yet either; the five-step setup does.
+    nameConfirmedAt: null,
     members: [],
     // Replaced by the bootstrap in the same commit that creates the document.
     conversationId: 0,
@@ -268,20 +274,23 @@ export function emptyWalks(): Walks {
 
 export const HouseholdDoc = defineDoc<Household>({
   kind: "app.household",
-  version: 4,
+  version: 5,
   scope: "session",
   initial: emptyHousehold,
   // A version-1 document (P1-08) predates `rev` and the timezone confirmation:
   // the captured zone is kept but stays unconfirmed, because nobody has checked
-  // it. A version-2 document (P1-14) only lacks the reminder ids. In both cases
-  // boot must not invent a confirmation, and the roster is not revised.
+  // it. A version-2 document (P1-14) only lacks the reminder ids; version 3
+  // predates the planner. Every version predates the name confirmation, so the
+  // stamp starts null for all of them: an old household answers the name
+  // question once instead of being reset, and the roster is not revised.
   migrate(value, fromVersion) {
-    if (fromVersion !== 1 && fromVersion !== 2 && fromVersion !== 3) {
+    if (fromVersion !== 1 && fromVersion !== 2 && fromVersion !== 3 && fromVersion !== 4) {
       throw new Error(`app.household has no migration from version ${fromVersion}`);
     }
     const migrated = {
       ...(value as unknown as Record<string, unknown>),
       schemaVersion: HOUSEHOLD_SCHEMA_VERSION,
+      nameConfirmedAt: null,
       ...(fromVersion === 1 ? { rev: 0, timezoneConfirmedAt: null } : {}),
       // Versions 1 and 2 predate the slot-reminder refs; version 3 predates the
       // planner. Neither older build ever armed a planner, so the id starts null
@@ -291,7 +300,7 @@ export const HouseholdDoc = defineDoc<Household>({
     };
     const parsed = parseHousehold(migrated);
     if (!parsed) {
-      throw new Error(`app.household version ${fromVersion} does not migrate to a valid version 4`);
+      throw new Error(`app.household version ${fromVersion} does not migrate to a valid version 5`);
     }
     return parsed;
   },
@@ -585,6 +594,7 @@ export function parseHousehold(value: unknown): Household | undefined {
   if (!isNonEmptyString(record.name)) return undefined;
   if (!isIanaZone(record.timezone)) return undefined;
   if (record.timezoneConfirmedAt !== null && !isIsoInstant(record.timezoneConfirmedAt)) return undefined;
+  if (record.nameConfirmedAt !== null && !isIsoInstant(record.nameConfirmedAt)) return undefined;
   const members = parseMemberProfiles(record.members);
   if (!members) return undefined;
   if (!isPositiveInteger(record.conversationId) || !isPositiveInteger(record.systemConversationId)) return undefined;
@@ -602,6 +612,7 @@ export function parseHousehold(value: unknown): Household | undefined {
     name: record.name,
     timezone: record.timezone,
     timezoneConfirmedAt: record.timezoneConfirmedAt,
+    nameConfirmedAt: record.nameConfirmedAt,
     members,
     conversationId: record.conversationId,
     systemConversationId: record.systemConversationId,
