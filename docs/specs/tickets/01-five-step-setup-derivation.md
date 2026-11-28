@@ -1,12 +1,12 @@
 ---
-status: ready
+status: done
 blocked-by: []
 ---
 
 # 01: Five-step setup derivation on the server
 
 **Blocked by:** None (can start immediately)
-**Status:** ready
+**Status:** done
 
 ## What to build
 The server's setup contract becomes five derived steps. A household document migration adds a name-confirmed stamp (the same pattern the timezone stamp used). The existing household update route accepts a name field: one care commit, revision- and idempotency-guarded, with an activity line; confirming the unchanged default name counts and stamps. The setup derivation reports the steps `name`, `timezone`, `puppy`, `meals`, `key` — the key step is satisfied when at least one provider key exists for the household, and the derivation sees only a presence boolean, never key values. A household complete under the old three-step rule reports incomplete under the new rule; with a key already saved, a name confirm completes it.
