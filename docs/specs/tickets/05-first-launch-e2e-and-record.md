@@ -1,12 +1,12 @@
 ---
-status: ready
+status: done
 blocked-by: ["04"]
 ---
 
 # 05: First-launch e2e leg and the record
 
 **Blocked by:** 04
-**Status:** ready
+**Status:** done
 
 ## What to build
 The e2e suite gains the first-launch leg: the owner opens the owner link and sees only the setup page; completing the five steps lands on Today; a partner invited after completion goes straight into the app and never sees the setup page. A changelog entry is added under `## Unreleased`, and the whole feature passes the full quality gate.
