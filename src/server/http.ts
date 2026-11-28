@@ -129,7 +129,7 @@ import {
 import { updateAgentBudget, updateHouseholdProfile } from "./domain/household.ts";
 import { readBudget } from "./domain/usage.ts";
 import { modelIsPaid } from "./agent/model.ts";
-import { isProviderId, PROVIDERS } from "./models/collection.ts";
+import { isProviderId, PROVIDERS, providerKeyPresent } from "./models/collection.ts";
 import { allowlistOf, probeAndCache, PROBE_CANDIDATES } from "./models/probe-run.ts";
 import type { ModelProbeCache } from "./models/cache.ts";
 import type { Allowlist } from "./models/allowlist.ts";
@@ -1036,7 +1036,7 @@ async function respondToCareWrite(
     deps.thread.harness,
     deps.thread.context,
     new Date(deps.now?.() ?? Date.now()),
-    await providerKeyPresent(deps),
+    await keyPresent(deps),
   );
   if (outcome === "stale") {
     sendJson(res, 409, {
@@ -1094,20 +1094,18 @@ async function handleProfileRead(deps: HttpDeps, res: ServerResponse): Promise<v
   // growth summary's staleness derive from it, and an injected clock must move
   // them together (P3-03).
   const now = new Date(deps.now?.() ?? Date.now());
-  sendJson(res, 200, await readProfile(deps.thread.harness, deps.thread.context, now, await providerKeyPresent(deps)));
+  sendJson(res, 200, await readProfile(deps.thread.harness, deps.thread.context, now, await keyPresent(deps)));
 }
 
 /**
  * Whether any provider key exists, read live from `secrets.json`. The setup
  * derivation sees this boolean and nothing else: a key's value never enters a
- * view, a response or a log (§14.1).
+ * view, a response or a log (§14.1). One shared derivation with the `profile`
+ * frame (`providerKeyPresent` in the collection module), so this view and the
+ * frame can never disagree about the key step.
  */
-async function providerKeyPresent(deps: HttpDeps): Promise<boolean> {
-  if (deps.secrets !== undefined) {
-    return Object.keys((await deps.secrets.read()).providerKeys).length > 0;
-  }
-  if (deps.modelProviders !== undefined) return (await deps.modelProviders()).size > 0;
-  return false;
+function keyPresent(deps: HttpDeps): Promise<boolean> {
+  return providerKeyPresent(deps.secrets, deps.modelProviders);
 }
 
 /**
@@ -1142,7 +1140,7 @@ async function handleProfileUpdate(
     rev,
     patch,
     // The setup steps of the returned view read the live key presence.
-    keyPresent: await providerKeyPresent(deps),
+    keyPresent: await keyPresent(deps),
     // The process clock: the birthday check and the view this answer returns
     // must agree with the reads (P3-03's clock fix).
     now: new Date(deps.now?.() ?? Date.now()),
@@ -1268,7 +1266,7 @@ async function handleBudgetUpdate(
     sendJson(res, 409, {
       error: "stale",
       message: "the household changed since it was read",
-      profile: await readProfile(deps.thread.harness, deps.thread.context, now, await providerKeyPresent(deps)),
+      profile: await readProfile(deps.thread.harness, deps.thread.context, now, await keyPresent(deps)),
     });
     return;
   }

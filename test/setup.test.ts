@@ -12,7 +12,7 @@
 //     confirmed-once household rather than a reset or a 503.
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,7 +21,7 @@ import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc } from "@earendil-works/pi-durable";
 import { SESSION_COOKIE, Auth, hashToken, newToken } from "../src/server/auth.ts";
 import { startApp, type AppHandle } from "../src/server/app.ts";
-import { dataStores, emptyConfig, type AppConfig, type MemberRecord } from "../src/server/config.ts";
+import { dataStores, emptyConfig, emptySecrets, type AppConfig, type MemberRecord } from "../src/server/config.ts";
 import { bootstrapSession } from "../src/server/domain/bootstrap.ts";
 import {
   ActivityDoc,
@@ -942,6 +942,58 @@ test("a timezone save and a meal save each reach the other caregiver as a profil
     const slotView = slotFrame.data as PuppyProfile;
     assert.deepEqual(slotView.meals.slots, [BREAKFAST]);
     assert.deepEqual(slotView.setup.missing, ["name", "puppy", "key"]);
+  } finally {
+    await stop(fixture);
+  }
+});
+
+test("a blank-trimmed key value counts as absent for the care view and the profile frame alike", async () => {
+  // A hand-edited or externally restored secrets.json whose only key value is
+  // whitespace must not complete the key step anywhere: the derivation is one
+  // shared, trimmed-blank-aware helper, so the GET-based care view and the
+  // `profile` frame cannot disagree about it. Fail closed, never present.
+  const fixture = await startSetupApp();
+  try {
+    // A real key first: the step completes, proving the absence below is the
+    // blank value's doing and not the file's.
+    const saved = await putKey(
+      fixture,
+      fixture.alexCookie,
+      { provider: "opencode-go", key: "sk-test-secret-3" },
+      { key: "blank-key-put" },
+    );
+    assert.equal(saved.status, 200);
+    const keyed = await careView(fixture, fixture.alexCookie);
+    assert.ok(!keyed.setup.missing.includes("key"));
+
+    await writeFile(
+      join(fixture.dir, "secrets.json"),
+      `${JSON.stringify({ ...emptySecrets(), providerKeys: { "opencode-go": "   " } })}\n`,
+    );
+
+    // The care view: still a readable profile, with the key step missing.
+    const view = await careView(fixture, fixture.alexCookie);
+    assert.ok(view.setup.missing.includes("key"), "the care view counts a blank key as absent");
+
+    // The stream: the next profile frame agrees.
+    const response = await fetch(`${fixture.url}/api/agent/events`, {
+      headers: { Cookie: cookieFor(fixture.samCookie) },
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    await nextFrame(reader, (event) => event === "snapshot");
+    const initial = await careView(fixture, fixture.alexCookie);
+    const zone = await patch(
+      fixture,
+      "/api/household",
+      fixture.alexCookie,
+      { rev: initial.household.rev, timezone: "Europe/Paris" },
+      { key: "blank-key-frame" },
+    );
+    assert.equal(zone.status, 200);
+    const frame = await nextFrame(reader, (event) => event === "profile");
+    const frameView = frame.data as PuppyProfile;
+    assert.ok(frameView.setup.missing.includes("key"), "the profile frame counts a blank key as absent");
   } finally {
     await stop(fixture);
   }
