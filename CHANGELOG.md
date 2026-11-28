@@ -15,6 +15,26 @@ Fixed:
 
 Added:
 
+- **A caregiver can now use their own name, and both caregivers see the change
+  live.** The first boot seeds the owner as "Owner" and nothing could change it,
+  so every care line read "Fed by Owner" in a two-person household. The new write
+  is rev-guarded and idempotency-keyed (`PATCH /api/me` on the household
+  document), refuses renaming to the other caregiver's name, and boot
+  reconciliation reports name drift instead of overwriting a chosen name; the
+  household document stays the display authority. The change rides the existing
+  SSE profile frame, so the second caregiver's client shows the new name
+  everywhere without a reload, and a "My name" card in Settings is the
+  affordance. (ticket 05, R12-R13, #85)
+- **Dark mode now follows the system scheme.** A phone app used on dark evening
+  walks had no dark palette and 56 hardcoded colour literals that made one
+  impossible. The stylesheet is now fully tokenised (values byte-identical,
+  verified against the previous file) and one `prefers-color-scheme` block swaps
+  the palette; all 22 dark text and UI pairs were verified at WCAG AA, the
+  document carries a dark-scheme `theme-color`, and the browser suite gained the
+  repo's first CSS seam — computed light and dark colours asserted at the four
+  phone widths with zero console errors. The light scheme is unchanged.
+  (tickets 03-04, R8-R11, #85)
+
 - **A mandatory first-run setup page at `#/setup`.** The whole app is locked
   until the household is configured: the shell forces the setup route, the
   bottom navigation disappears and no other view is reachable until the five
@@ -27,6 +47,28 @@ Added:
   and a partner invited after completion lands straight in the app, never gated.
   Households complete under the old three-step rule are re-gated once under the
   five-step rule — an honest visit, no grandfather flag.
+
+Fixed:
+
+- **The UI's copy now tells the truth about the household's hosting.** Since
+  P6-08 the daily host is the server behind one public HTTPS origin, but Settings
+  still recommended the partner's "daily Tailscale path", Web Push hinted at the
+  deleted "quick tunnel", Today carried "arrive with their phases" build language
+  and Settings promised "Backup is on its way." Every stale sentence now names
+  the household origin generically (no hostname baked into the client), the
+  P0-10 no-delivery-claim hedges are intact, and the vnode seam pins the new
+  sentences. (ticket 01, R1-R5, #85)
+- **Two sentences no longer render with their words glued.** htm drops whitespace
+  across a newline between a text run and an expression, so the wizard read
+  "Boot capturedEurope/Paris" and the Settings lead read "· Europe/Paris ·Owner";
+  both — plus a third boundary a review escalation caught ("Our household·") —
+  now compose in pure helpers pinned by copy tests, the repo's established fix for
+  the same defect in the walk and calendar cards. (ticket 02, R6-R7, #85)
+- **Settings no longer embeds the completed first-run wizard.** With setup
+  complete, Settings rendered a full second copy of the puppy profile form
+  inside the wizard; it now shows one summary line, the Pup profile and Meal
+  times cards remain the editing surface (the mandatory `#/setup` gate above is
+  what an incomplete household meets instead). (ticket 06, R14, #85)
 
 ## v0.1.1 — 2026-11-18
 

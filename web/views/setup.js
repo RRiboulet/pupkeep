@@ -21,6 +21,7 @@ import { Component, h } from "../vendor/preact.mjs";
 import htm from "../vendor/htm.mjs";
 import { NetworkError, newIdempotencyKey, requestJson } from "../client.js";
 import { changedFields, CONFLICT_MESSAGE, draftOf, emptyDraft, isNewer, pendingSave } from "../profile-form.js";
+import { bootZoneHint } from "../household.js";
 import { currentModelText, probeResultLines, probeText, providerKeyBody } from "../models.js";
 import { getState, setState, subscribe } from "../store.js";
 import {
@@ -583,10 +584,7 @@ export class Setup extends Component {
 
         <form class="card form" onSubmit=${this.saveZone}>
           <h2 class="card__title">2. Household timezone (${stepState("timezone")})</h2>
-          <p class="field__hint">
-            Every date in Pupkeep — meals, walks, growth — is worked out in this zone. Boot captured
-            ${profile.household.timezone}; please check it.
-          </p>
+          <p class="field__hint">${bootZoneHint(profile.household.timezone)}</p>
           <div class="field">
             <label for="setup-zone">Timezone</label>
             <input

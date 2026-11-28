@@ -820,10 +820,7 @@ export class Today extends Component {
         ${this.renderNextAppointment()}
         ${this.renderWalk()}
         ${this.renderMeals()}
-        <p class="placeholder">
-          Weight and the agent bar arrive with their phases; meals and the walk are already shared
-          between both caregivers live.
-        </p>
+        <p class="placeholder">Meals, the walk and the next appointment are shared between both caregivers live.</p>
       </section>
     `;
   }

@@ -12,7 +12,7 @@
 //     chat with a third party, or a screenshot the household would not want read.
 //
 // The link points at the origin the owner is browsing (the route builds it from
-// the request), so an invite made on the daily Tailscale origin opens there.
+// the request), so an invite opens on the household's address.
 //
 // The card takes its `role` and `full` from Settings rather than reading the
 // session itself: the settings screen already has one authoritative role read
@@ -29,7 +29,7 @@ const html = htm.bind(h);
 
 /**
  * Long-press/copy is the only route to the clipboard: `navigator.clipboard`
- * needs a secure context, and the daily origin is plain HTTP on the tailnet. A
+ * needs a secure context, and a household served over plain HTTP is not one. A
  * readonly input is therefore the copy surface, not a "copy" button that would
  * quietly fail there.
  */
@@ -109,7 +109,7 @@ export class Invite extends Component {
         <section class="card" aria-labelledby="invite-settings">
           <h2 id="invite-settings" class="card__title">Your partner has joined</h2>
           <p class="field__hint">
-            The household has two caregivers. The daily address is the one the host phone prints; keep each phone's
+            The household has two caregivers. Both phones open the app at the household's address; keep each phone's
             sign-in secure.
           </p>
         </section>

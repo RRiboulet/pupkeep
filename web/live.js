@@ -18,10 +18,10 @@ import { getState, setState } from "./store.js";
 
 const RECONNECT_DELAY_MS = 1000;
 
-// A stream can connect and then deliver nothing at all. Cloudflare's quick
-// tunnel buffers a streaming GET response: the client sees the `200` and the
-// headers, then no body bytes — not the snapshot frame, not the heartbeat
-// (cloudflared#1449). A healthy stream is chatty, so silence is diagnosable:
+// A stream can connect and then deliver nothing at all. A buffering reverse
+// proxy does this: the client sees the `200` and the headers, then no body
+// bytes — not the snapshot frame, not the heartbeat (cloudflared#1449). A
+// healthy stream is chatty, so silence is diagnosable:
 //
 //   * `handleEvents` writes its headers, a `retry:` comment and then the
 //     snapshot in one synchronous block, so an open stream has a frame within
@@ -31,9 +31,9 @@ const RECONNECT_DELAY_MS = 1000;
 //     buffering, not merely idle.
 //
 // The fallback polls the care state every 4 s (cheap document reads) and probes
-// the stream again once a minute: a quick tunnel is fixed by a restart or by
-// switching to the daily Tailscale path, and a probe that receives its snapshot
-// switches the page back to live frames without a reload.
+// the stream again once a minute: a buffering proxy is fixed by restarting it
+// or by reconnecting directly, and a probe that receives its snapshot switches
+// the page back to live frames without a reload.
 const FIRST_FRAME_MS = 5_000;
 const SILENCE_MS = 20_000;
 const POLL_MS = 4_000;

@@ -64,8 +64,8 @@ export async function requestJson(path, options = {}) {
 /**
  * A key for one intended save, so a double-tap or a retried request is the same
  * action rather than two revisions. `crypto.randomUUID` exists only in a secure
- * context, and the partner's daily Tailscale origin is plain HTTP, so the
- * fallback is the normal path there.
+ * context, and an ordinary HTTP origin is not one, so the fallback is the
+ * normal path there.
  */
 export function newIdempotencyKey() {
   const crypto = globalThis.crypto;

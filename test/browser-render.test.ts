@@ -181,6 +181,38 @@ const NAV_GEOMETRY = () => {
   };
 };
 
+/**
+ * The colours the app is actually painting, with the token values it claims to
+ * use. `color-scheme: light dark` alone changes nothing visible; only the media
+ * block's token overrides do, so the assertions compare computed colours to the
+ * tokens that are live in that scheme.
+ */
+const SCHEME_COLORS = () => {
+  const root = getComputedStyle(document.documentElement);
+  const toRgb = (value: string): string => {
+    if (!value.startsWith("#")) return value;
+    const digits = value.slice(1);
+    const full = digits.length === 3 ? digits.split("").map((digit) => digit + digit).join("") : digits;
+    const number = Number.parseInt(full, 16);
+    return `rgb(${(number >> 16) & 255}, ${(number >> 8) & 255}, ${number & 255})`;
+  };
+  const painted = (selector: string, property: "backgroundColor" | "color"): string => {
+    const element = document.querySelector(selector);
+    if (element === null) throw new Error(`${selector} did not render`);
+    return getComputedStyle(element)[property];
+  };
+  const names = ["bg", "surface", "ink", "muted", "accent"] as const;
+  return {
+    prefersDark: matchMedia("(prefers-color-scheme: dark)").matches,
+    tokens: Object.fromEntries(names.map((name) => [name, toRgb(root.getPropertyValue(`--${name}`).trim())])),
+    bodyBackground: getComputedStyle(document.body).backgroundColor,
+    bodyColor: getComputedStyle(document.body).color,
+    navBackground: painted(".bottom-nav", "backgroundColor"),
+    mutedColor: painted('.bottom-nav a[href="#calendar"]', "color"),
+    accentColor: painted('.bottom-nav a[href="#today"]', "color"),
+  };
+};
+
 /** One logged-in page at one viewport, with the console errors it produced. */
 async function openPage(
   app: TestApp,
@@ -188,8 +220,13 @@ async function openPage(
   width: number,
   height: number,
   prepare?: (page: Page) => Promise<void>,
+  colorScheme?: "light" | "dark",
 ): Promise<{ page: Page; context: BrowserContext; errors: string[] }> {
-  const context = await browser!.newContext({ viewport: { width, height } });
+  if (app === undefined) throw new Error("the test app did not boot, so there is no page to open");
+  const context = await browser!.newContext({
+    viewport: { width, height },
+    ...(colorScheme === undefined ? {} : { colorScheme }),
+  });
   await context.addCookies([
     { name: SESSION_COOKIE, value: app.cookies.owner, domain: "127.0.0.1", path: "/", httpOnly: true },
   ]);
@@ -384,6 +421,61 @@ test("a user who scales text up still gets every tab on screen", async (t) => {
     } finally {
       await context.close();
     }
+  }
+});
+
+test("the system dark scheme repaints the token palette at every phone width", async (t) => {
+  if (skipReason !== undefined) return t.skip(skipReason);
+  const app = homeFixture;
+  if (app === undefined) throw new Error("the test app did not boot, so there is no page to open");
+  for (const { width, height, label } of PHONE_WIDTHS) {
+    const where = `${label} (${width}px)`;
+    const colours = async (scheme: "light" | "dark") => {
+      const opened = await openPage(app, "today", width, height, undefined, scheme);
+      try {
+        // The loading screen's own heading is "Pupkeep", so `openPage`'s wait can
+        // end before the today screen (and its nav) exists — wait for the nav
+        // the colour assertions read.
+        await opened.page.locator(".bottom-nav").waitFor({ timeout: 10_000 });
+        return { colours: await opened.page.evaluate(SCHEME_COLORS), errors: [...opened.errors] };
+      } finally {
+        await opened.context.close();
+      }
+    };
+    const light = await colours("light");
+    assert.deepEqual(light.errors, [], `${where}: the light scheme logged console errors`);
+    const dark = await colours("dark");
+    assert.deepEqual(dark.errors, [], `${where}: the dark scheme logged console errors`);
+
+    assert.equal(light.colours.prefersDark, false, `${where}: the light context does not ask for dark`);
+    assert.equal(dark.colours.prefersDark, true, `${where}: the dark context emulates the system scheme`);
+
+    // The override is live: every palette token the app paints with changed.
+    for (const name of ["bg", "surface", "ink", "muted", "accent"] as const) {
+      assert.notEqual(
+        dark.colours.tokens[name],
+        light.colours.tokens[name],
+        `${where}: --${name} still has the light value in the dark scheme`,
+      );
+    }
+
+    // And the app is using it: body, nav surface, muted tab and active tab
+    // resolve to their tokens in each scheme, not to a hardcoded colour.
+    for (const [scheme, seen] of [
+      ["light", light.colours],
+      ["dark", dark.colours],
+    ] as const) {
+      assert.equal(seen.bodyBackground, seen.tokens.bg, `${where}: the ${scheme} body paints --bg`);
+      assert.equal(seen.bodyColor, seen.tokens.ink, `${where}: the ${scheme} body ink is --ink`);
+      assert.equal(seen.navBackground, seen.tokens.surface, `${where}: the ${scheme} nav paints --surface`);
+      assert.equal(seen.mutedColor, seen.tokens.muted, `${where}: the ${scheme} muted tab is --muted`);
+      assert.equal(seen.accentColor, seen.tokens.accent, `${where}: the ${scheme} active tab is --accent`);
+    }
+
+    // The schemes are visibly different, not two names for the same colours.
+    assert.notEqual(dark.colours.bodyBackground, light.colours.bodyBackground, `${where}: the body stayed light`);
+    assert.notEqual(dark.colours.bodyColor, light.colours.bodyColor, `${where}: the ink stayed light`);
+    assert.notEqual(dark.colours.navBackground, light.colours.navBackground, `${where}: the nav stayed light`);
   }
 });
 

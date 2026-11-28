@@ -19,6 +19,7 @@
 //   GET  /api/puppy              the care state: puppy, roster, meals, setup
 //   PATCH /api/puppy             edit the profile (rev + Idempotency-Key)
 //   PATCH /api/household         set/confirm the timezone (rev + Idempotency-Key)
+//   PATCH /api/me                rename yourself (rev + Idempotency-Key; your row only)
 //   GET  /api/models             model, allowlist, last probe, key presence, budget
 //   PUT  /api/models/keys        set or clear a provider key (owner; never echoed)
 //   POST /api/models/probe       run the allowlist probe now (owner; rate-limited)
@@ -126,7 +127,7 @@ import {
   updateMealSlots,
   type FeedOutcome,
 } from "./domain/feeding.ts";
-import { updateAgentBudget, updateHouseholdProfile } from "./domain/household.ts";
+import { renameHouseholdMember, updateAgentBudget, updateHouseholdProfile } from "./domain/household.ts";
 import { readBudget } from "./domain/usage.ts";
 import { modelIsPaid } from "./agent/model.ts";
 import { isProviderId, PROVIDERS, providerKeyPresent } from "./models/collection.ts";
@@ -557,6 +558,11 @@ async function dispatch(deps: HttpDeps, req: IncomingMessage, res: ServerRespons
 
     if (pathname === "/api/household" && req.method === "PATCH") {
       await handleHouseholdUpdate(deps, req, res, requireCare(session));
+      return;
+    }
+
+    if (pathname === "/api/me" && req.method === "PATCH") {
+      await handleMemberRename(deps, req, res, requireCare(session));
       return;
     }
 
@@ -1208,6 +1214,44 @@ async function handleHouseholdUpdate(
     now: new Date(deps.now?.() ?? Date.now()),
   });
   await respondToCareWrite(deps, res, outcome, "household");
+}
+
+/**
+ * Rename yourself (R12): one authenticated, rev-guarded write on the household
+ * document's member profile. The signed-in member only — the route never
+ * touches another member's row, so nobody renames their partner here. The
+ * household document stays the display authority: config.json's seed is not
+ * written, so boot reconciliation reports the drift instead of overwriting the
+ * chosen name. A stale revision, a duplicate of the other caregiver's name and
+ * a reused key are refused exactly like the other care writes.
+ */
+async function handleMemberRename(
+  deps: HttpDeps,
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const key = requireCareMutation(deps, req, session);
+  const body = await readJsonBody(req);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ConflictError("a name change is a JSON object");
+  }
+  const record = body as Record<string, unknown>;
+  requireOnlyKeys(record, ["rev", "name"]);
+  const rev = revisionOf(record);
+  if (typeof record.name !== "string") {
+    throw new ConflictError("a name change needs a name");
+  }
+
+  const outcome = await renameHouseholdMember(deps.thread.harness, deps.thread.context, {
+    actor: careActor(session),
+    memberId: session.memberId,
+    actionId: `http:${key}`,
+    rev,
+    name: record.name,
+    now: new Date(deps.now?.() ?? Date.now()),
+  });
+  await respondToCareWrite(deps, res, outcome, "name");
 }
 
 /**

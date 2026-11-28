@@ -8,9 +8,9 @@
 // Security notes (PLAN §14.2):
 //  - no inline scripts or styles anywhere — the CSP is `default-src 'self'`.
 //  - the service worker is registered only in a secure context
-//    (window.isSecureContext: HTTPS or localhost). Over plain HTTP — the
-//    partner's daily Tailscale origin — the shell loads as an ordinary web app
-//    and never claims PWA install, service workers or Web Push.
+//    (window.isSecureContext: HTTPS or localhost). Over plain HTTP (for
+//    example, a LAN address) the shell loads as an ordinary web app and never
+//    claims PWA install, service workers or Web Push.
 
 import { h, render } from "./vendor/preact.mjs";
 import htm from "./vendor/htm.mjs";
@@ -182,8 +182,8 @@ if (root) {
 // Settings surface can explain why no worker is active; it never throws.
 //
 // This shell registers nothing and claims nothing when `window.isSecureContext`
-// is false (plain HTTP such as the partner's Tailscale origin). Web Push is a
-// later-phase flow, and it will live behind this same guard.
+// is false (plain HTTP rather than the household's HTTPS address). Web Push
+// lives behind this same guard.
 export function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return "unsupported";
   if (!window.isSecureContext) return "insecure-context";
