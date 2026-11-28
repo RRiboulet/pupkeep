@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+Added:
+
+- **A mandatory first-run setup page at `#/setup`.** The whole app is locked
+  until the household is configured: the shell forces the setup route, the
+  bottom navigation disappears and no other view is reachable until the five
+  steps are done — household name confirmed, timezone confirmed, puppy named,
+  meal times saved and a provider key present. Setup keeps its derived truth
+  (never a stored done flag) and gains the name-confirm and key-presence steps;
+  a saved key counts without a probe, and its value never reaches any client.
+  Settings trades its embedded wizard for a Household section (name and
+  timezone), either caregiver may finish setup except the owner-only key write,
+  and a partner invited after completion lands straight in the app, never gated.
+  Households complete under the old three-step rule are re-gated once under the
+  five-step rule — an honest visit, no grandfather flag.
+
 ## v0.1.1 — 2026-11-18
 
 Fixed:
